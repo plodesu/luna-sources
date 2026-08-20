@@ -1,26 +1,24 @@
 {
-  "id": "kinogo.online",
-  "name": "Kinogo",
-  "author": "plodesu",
+  "sourceName": "Kinogo",
+  "iconUrl": "https://kinogo.online/favicon.ico",
+  "author": {
+    "name": "plodesu",
+    "icon": "https://github.com/plodesu.png"
+  },
   "version": "1.0.0",
   "language": "Russian",
-  "type": "movie",
+  "languageType": [
+    "Dubbed"
+  ],
+  "streamType": "MP4 & HLS",
+  "quality": "1080p",
   "baseUrl": "https://kinogo.online",
-  "icon": "https://kinogo.online/favicon.ico",
-  "search": {
-    "url": "https://kinogo.online/index.php?do=search&subaction=search&story=%s",
-    "method": "POST",
-    "selector": "div.shortstory",
-    "title": "div.shortstorytitle h2 a",
-    "href": "div.shortstorytitle h2 a@href",
-    "image": "div.shortstorytitle div.poster img@src"
-  },
-  "details": {
-    "title": "h1#news-title",
-    "description": "div.fullstory-content",
-    "image": "div.fullstory-poster img@src"
-  },
-  "stream": {
-    "selector": "iframe#video-player@src, div.player-box iframe@src, iframe@src"
-  }
+  "searchBaseUrl": "https://kinogo.online",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/kinogo.js",
+  "type": "shows/movies",
+  "asyncJS": true,
+  "softsub": false,
+  "downloadSupport": true,
+  "supportsSora": true,
+  "supportsLuna": true
 }
