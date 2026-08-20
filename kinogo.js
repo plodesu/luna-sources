@@ -1,5 +1,5 @@
 const defaultHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
     'Referer': 'https://kinogomy.net/'
 };
 
@@ -144,7 +144,7 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Stream Extractor (Extracts actual video files from webpage source)
+ * 4. Advanced Tab & Player Extractor
  */
 async function extractStreamUrl(url) {
     try {
@@ -159,52 +159,52 @@ async function extractStreamUrl(url) {
         }
 
         const response = await soraFetch(targetUrl, { headers: defaultHeaders });
-        if (!response) {
-            return JSON.stringify({ streams: [], subtitles: "" });
-        }
+        if (!response) return JSON.stringify({ streams: [], subtitles: "" });
+        
         const html = await response.text();
-
         let streams = [];
 
-        // Search for file payload variables common in KinoGo players
-        const fileMatch = html.match(/"file"\s*:\s*"([^"]+)"/i) || html.match(/'file'\s*:\s*'([^']+)'/i);
-        if (fileMatch && fileMatch[1]) {
-            let rawFileStr = fileMatch[1];
-            // Split if multiple streams are comma-separated or labeled with 'or'
-            let subUrls = rawFileStr.split(/\s*(?:,|or)\s*/i);
-            
-            for (let i = 0; i < subUrls.length; i++) {
-                let streamUrl = subUrls[i].trim();
-                if (streamUrl) {
-                    streams.push({
-                        title: `KinoGo Stream Quality ${i + 1}`,
-                        streamUrl: streamUrl,
-                        headers: {
-                            "User-Agent": defaultHeaders["User-Agent"],
-                            "Referer": targetUrl
-                        }
-                    });
+        // 1. Scrape the specific 'data-src' attributes from the tabs list
+        const tabRegex = /<li[^>]+data-src=["']([^"']+)["'][^>]*>([^<]+)<\/li>/gi;
+        let match;
+
+        while ((match = tabRegex.exec(html)) !== null) {
+            let src = match[1];
+            let title = match[2].trim();
+
+            // Ignore trailers
+            if (title.toLowerCase().includes('трейлер')) continue;
+
+            // Clean up the URL
+            if (src.startsWith('//')) src = 'https:' + src;
+
+            streams.push({
+                title: `KinoGo - ${title}`,
+                streamUrl: src,
+                headers: {
+                    "User-Agent": defaultHeaders["User-Agent"],
+                    "Referer": targetUrl,
+                    "Origin": "https://kinogomy.net"
                 }
-            }
+            });
         }
 
-        // Fallback: extract any direct .mp4 or .m3u8 files mentioned in the page scripts
+        // 2. Fallback to the iframe src if nothing is found from tabs
         if (streams.length === 0) {
-            const directMediaRegex = /(https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*)/gi;
-            let match;
-            let count = 1;
-            while ((match = directMediaRegex.exec(html)) !== null) {
-                let mediaUrl = match[1];
-                if (!streams.some(s => s.streamUrl === mediaUrl)) {
-                    streams.push({
-                        title: `KinoGo Direct File ${count++}`,
-                        streamUrl: mediaUrl,
-                        headers: {
-                            "User-Agent": defaultHeaders["User-Agent"],
-                            "Referer": targetUrl
-                        }
-                    });
-                }
+            const iframeMatch = html.match(/id="iframesrc"[^>]+src=["']([^"']+)["']/i) || html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+            if (iframeMatch) {
+                let src = iframeMatch[1];
+                if (src.startsWith('//')) src = 'https:' + src;
+                
+                streams.push({
+                    title: "KinoGo Default Player",
+                    streamUrl: src,
+                    headers: {
+                        "User-Agent": defaultHeaders["User-Agent"],
+                        "Referer": targetUrl,
+                        "Origin": "https://kinogomy.net"
+                    }
+                });
             }
         }
 
