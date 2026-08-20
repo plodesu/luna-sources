@@ -1,35 +1,231 @@
-const MIRRORS = [
-    'https://hdrezka.me',
-    'https://rezka.ag',
-    'https://hdrezka.ag',
-    'https://hdrezka.tv'
-];
-
 const defaultHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
     'Cookie': 'hdmbbs=1',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
 };
 
-let activeMirror = MIRRORS[0];
+async function searchResults(keyword) {
+    const results = [];
+    try {
+        const response = await fetchv2(
+            `https://hdrezka.me/search/?do=search&subaction=search&q=${encodeURIComponent(keyword)}`,
+            defaultHeaders
+        );
+        const html = await response.text();
 
-async function tryFetch(path, options = {}) {
-    const method = options.method || 'GET';
-    const body = options.body || null;
-    const headers = Object.assign({}, defaultHeaders, options.headers || {});
+        const parts = html.split('class="b-content__inline_item"');
+        for (let i = 1; i < parts.length; i++) {
+            const part = parts[i];
+            const imgMatch = part.match(/<img[^>]+src="([^"]+)"/);
+            const linkMatch = part.match(/<div class="b-content__inline_item-link">[\s\S]*?<a href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
 
-    for (const mirror of MIRRORS) {
-        try {
-            const url = path.startsWith('http') ? path : `${mirror}${path}`;
-            const res = await fetchv2(url, headers, method, body);
-            if (res) {
-                activeMirror = mirror;
-                return res;
+            if (linkMatch && imgMatch) {
+                results.push({
+                    title: decodeHtmlEntities(linkMatch[2].trim()),
+                    image: imgMatch[1].trim(),
+                    href: linkMatch[1].trim()
+                });
             }
-        } catch (e) {}
+        }
+        return JSON.stringify(results);
+    } catch (err) {
+        return JSON.stringify([]);
     }
-    return null;
 }
+
+async function extractDetails(url) {
+    try {
+        const response = await fetchv2(url, defaultHeaders);
+        const html = await response.text();
+
+        const descMatch = html.match(/class="b-post__description_text"[^>]*>([\s\S]*?)<\/div>/);
+        const description = descMatch ? decodeHtmlEntities(descMatch[1].trim()) : 'N/A';
+
+        const origMatch = html.match(/<div class="b-post__origtitle"[^>]*>([\s\S]*?)<\/div>/);
+        const aliases = origMatch ? decodeHtmlEntities(origMatch[1].trim()) : 'N/A';
+
+        const yearMatch = html.match(/href="[^"]*?\/year\/[^"]*?">([^<]+)<\/a>/);
+        const airdate = yearMatch ? yearMatch[1].trim() : 'N/A';
+
+        return JSON.stringify([{ description, aliases, airdate }]);
+    } catch (err) {
+        return JSON.stringify([{ description: 'N/A', aliases: 'N/A', airdate: 'N/A' }]);
+    }
+}
+
+async function extractEpisodes(url) {
+    try {
+        const response = await fetchv2(url, defaultHeaders);
+        const html = await response.text();
+
+        const typeMatch = html.match(/<meta property="og:type" content="([^"]+)"/);
+        const isTV = typeMatch && typeMatch[1] === 'video.tv_series';
+
+        if (!isTV) {
+            return JSON.stringify([{ href: url, number: 1, season: 1 }]);
+        }
+
+        const postId = getPostId(html, url);
+        if (!postId) {
+            return JSON.stringify([{ href: url, number: 1, season: 1 }]);
+        }
+
+        const translators = parseTranslators(html);
+        if (translators.length === 0) {
+            return JSON.stringify([{ href: url, number: 1, season: 1 }]);
+        }
+
+        const origin = getOrigin(url);
+        const postData = `id=${postId}&translator_id=${translators[0].id}&action=get_episodes`;
+        const headers = {
+            ...defaultHeaders,
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': url
+        };
+
+        const apiResponse = await fetchv2(`${origin}/ajax/get_cdn_series/`, headers, 'POST', postData);
+        const data = await apiResponse.json();
+
+        if (!data.success) {
+            return JSON.stringify([{ href: url, number: 1, season: 1 }]);
+        }
+
+        const results = [];
+        const episodeRegex = /class="[^"]*b-simple_episode__item[^"]*"[^>]*data-season_id="(\d+)"[^>]*data-episode_id="(\d+)"/g;
+        let match;
+        while ((match = episodeRegex.exec(data.episodes || '')) !== null) {
+            results.push({
+                href: appendQueryParams(url, {
+                    post_id: postId,
+                    season: match[1],
+                    episode: match[2]
+                }),
+                number: parseInt(match[2], 10),
+                season: parseInt(match[1], 10)
+            });
+        }
+
+        return JSON.stringify(results.length ? results : [{ href: url, number: 1, season: 1 }]);
+    } catch (err) {
+        return JSON.stringify([{ href: url, number: 1, season: 1 }]);
+    }
+}
+
+async function extractStreamUrl(url) {
+    try {
+        let postId = getQueryParam(url, 'post_id');
+        const season = getQueryParam(url, 'season');
+        const episode = getQueryParam(url, 'episode');
+        const isTV = !!(season && episode);
+
+        const basePageUrl = url.split('?')[0];
+        const response = await fetchv2(basePageUrl, defaultHeaders);
+        const html = await response.text();
+
+        if (!postId) postId = getPostId(html, basePageUrl);
+        if (!postId) return JSON.stringify({ streams: [], subtitles: '' });
+
+        const translators = parseTranslators(html);
+        if (translators.length === 0) return JSON.stringify({ streams: [], subtitles: '' });
+
+        const origin = getOrigin(basePageUrl);
+        const postHeaders = {
+            'User-Agent': defaultHeaders['User-Agent'],
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': basePageUrl,
+            'Cookie': 'hdmbbs=1'
+        };
+
+        const allStreams = [];
+        let finalSubtitle = '';
+
+        // Try translators one by one (more reliable than Promise.all on iOS)
+        for (const tr of translators) {
+            try {
+                const postData = isTV
+                    ? `id=${postId}&translator_id=${tr.id}&season=${season}&episode=${episode}&action=get_stream`
+                    : `id=${postId}&translator_id=${tr.id}&action=get_movie`;
+
+                const apiResponse = await fetchv2(
+                    `${origin}/ajax/get_cdn_series/`,
+                    postHeaders,
+                    'POST',
+                    postData
+                );
+                const data = await apiResponse.json();
+
+                if (!data || !data.success || !data.url) continue;
+
+                // Subtitles
+                if (data.subtitle && !finalSubtitle) {
+                    const subParts = String(data.subtitle).split(',');
+                    for (const p of subParts) {
+                        const m = p.match(/\[([^\]]+)\]\s*(\S+)/);
+                        if (m) {
+                            finalSubtitle = m[2];
+                            break;
+                        }
+                    }
+                }
+
+                // Decode stream URL
+                let decoded = data.url;
+                if (!decoded.startsWith('[')) {
+                    decoded = clearTrash(decoded);
+                }
+
+                const parts = decoded.split(',');
+                for (const part of parts) {
+                    const match = part.match(/\[([^\]]+)\]\s*(.+)/);
+                    if (!match) continue;
+
+                    const quality = match[1].replace(/<[^>]+>/g, '').trim();
+                    if (!quality || quality.includes('<')) continue;
+
+                    const links = match[2].split(/\s+or\s+/);
+                    for (const link of links) {
+                        const clean = link.trim();
+                        if (clean && (clean.startsWith('http') || clean.startsWith('//'))) {
+                            allStreams.push({
+                                title: `${tr.name} • ${quality}`,
+                                streamUrl: clean.startsWith('//') ? 'https:' + clean : clean,
+                                headers: {
+                                    'User-Agent': defaultHeaders['User-Agent'],
+                                    'Referer': basePageUrl
+                                }
+                            });
+                        }
+                    }
+                }
+
+                // If we already have streams, no need to try every translator
+                if (allStreams.length > 0) break;
+            } catch (e) {
+                // continue to next translator
+            }
+        }
+
+        // Sort by quality (highest first)
+        allStreams.sort((a, b) => {
+            const getRes = (t) => {
+                const m = t.match(/(\d{3,4})p/);
+                return m ? parseInt(m[1], 10) : 0;
+            };
+            return getRes(b.title) - getRes(a.title);
+        });
+
+        return JSON.stringify({
+            streams: allStreams,
+            subtitles: finalSubtitle
+        });
+    } catch (err) {
+        return JSON.stringify({ streams: [], subtitles: '' });
+    }
+}
+
+// ==================== HELPERS ====================
 
 function decodeHtmlEntities(str) {
     return str
@@ -48,7 +244,7 @@ function getOrigin(url) {
         return `${parsed.protocol}//${parsed.host}`;
     } catch (e) {
         const match = url.match(/^(https?:\/\/[^\/]+)/);
-        return match ? match[1] : activeMirror;
+        return match ? match[1] : 'https://hdrezka.me';
     }
 }
 
@@ -76,9 +272,8 @@ function getPostId(html, url) {
     if (m2) return m2[1];
     const m3 = html.match(/data-post_id="(\d+)"/);
     if (m3) return m3[1];
-    const last = url.split('/').pop() || '';
-    const m4 = last.match(/^(\d+)/);
-    return m4 ? m4[1] : null;
+    const last = (url.split('/').pop() || '').match(/^(\d+)/);
+    return last ? last[1] : null;
 }
 
 function parseTranslators(html) {
@@ -88,12 +283,12 @@ function parseTranslators(html) {
         const liRegex = /<li[^>]+data-translator_id="(\d+)"[^>]*>([\s\S]*?)<\/li>/g;
         let match;
         while ((match = liRegex.exec(listMatch[1])) !== null) {
-            let name = match[2].replace(/<[^>]*>/g, '').trim();
+            let name = match[2].replace(/<[^>]*>/g, '').trim() || 'Озвучка';
             const imgMatch = match[2].match(/<img[^>]+title="([^"]+)"/);
             if (imgMatch && !name.includes(imgMatch[1])) {
                 name += ` (${imgMatch[1]})`;
             }
-            translators.push({ id: parseInt(match[1], 10), name: name || 'Озвучка' });
+            translators.push({ id: parseInt(match[1], 10), name });
         }
     }
     if (translators.length === 0) {
@@ -110,17 +305,17 @@ function parseTranslators(html) {
 }
 
 function clearTrash(data) {
-    const trashList = ["@", "#", "!", "^", "$"];
-    const trashCodesSet = new Set();
+    const trashList = ['@', '#', '!', '^', '$'];
+    const trashCodesSet = [];
     for (let i = 2; i < 4; i++) {
         const combos = getCombinations(trashList, i);
         for (const combo of combos) {
-            trashCodesSet.add(btoa(combo.join('')));
+            trashCodesSet.push(btoa(combo.join('')));
         }
     }
-    let trashString = data.replace("#h", "").split("//_//").join("");
+    let trashString = String(data).replace('#h', '').split('//_//').join('');
     for (const temp of trashCodesSet) {
-        trashString = trashString.split(temp).join("");
+        trashString = trashString.split(temp).join('');
     }
     try {
         return decodeUTF8(atob(trashString));
@@ -141,35 +336,36 @@ function getCombinations(arr, length) {
 
 function btoa(input) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-    let str = '';
-    for (let i = 0; i < input.length; i += 3) {
-        const c1 = input.charCodeAt(i);
-        const c2 = i + 1 < input.length ? input.charCodeAt(i + 1) : NaN;
-        const c3 = i + 2 < input.length ? input.charCodeAt(i + 2) : NaN;
-        const b1 = c1 >> 2;
-        const b2 = ((c1 & 3) << 4) | (isNaN(c2) ? 0 : c2 >> 4);
-        const b3 = isNaN(c2) ? 64 : ((c2 & 15) << 2) | (isNaN(c3) ? 0 : c3 >> 6);
-        const b4 = isNaN(c3) ? 64 : c3 & 63;
-        str += chars.charAt(b1) + chars.charAt(b2) + chars.charAt(b3) + chars.charAt(b4);
+    let str = String(input);
+    let output = '';
+    for (let i = 0; i < str.length; i += 3) {
+        const c1 = str.charCodeAt(i);
+        const c2 = i + 1 < str.length ? str.charCodeAt(i + 1) : NaN;
+        const c3 = i + 2 < str.length ? str.charCodeAt(i + 2) : NaN;
+        const e1 = c1 >> 2;
+        const e2 = ((c1 & 3) << 4) | (isNaN(c2) ? 0 : c2 >> 4);
+        const e3 = isNaN(c2) ? 64 : ((c2 & 15) << 2) | (isNaN(c3) ? 0 : c3 >> 6);
+        const e4 = isNaN(c3) ? 64 : c3 & 63;
+        output += chars.charAt(e1) + chars.charAt(e2) + chars.charAt(e3) + chars.charAt(e4);
     }
-    return str;
+    return output;
 }
 
 function atob(input) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-    let str = input.replace(/=+$/, '');
+    let str = String(input).replace(/=+$/, '');
     let output = '';
     for (let i = 0; i < str.length; i += 4) {
-        const enc1 = chars.indexOf(str.charAt(i));
-        const enc2 = chars.indexOf(str.charAt(i + 1));
-        const enc3 = chars.indexOf(str.charAt(i + 2));
-        const enc4 = chars.indexOf(str.charAt(i + 3));
-        const chr1 = (enc1 << 2) | (enc2 >> 4);
-        const chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
-        const chr3 = ((enc3 & 3) << 6) | enc4;
-        output += String.fromCharCode(chr1);
-        if (enc3 !== 64) output += String.fromCharCode(chr2);
-        if (enc4 !== 64) output += String.fromCharCode(chr3);
+        const e1 = chars.indexOf(str.charAt(i));
+        const e2 = chars.indexOf(str.charAt(i + 1));
+        const e3 = chars.indexOf(str.charAt(i + 2));
+        const e4 = chars.indexOf(str.charAt(i + 3));
+        const c1 = (e1 << 2) | (e2 >> 4);
+        const c2 = ((e2 & 15) << 4) | (e3 >> 2);
+        const c3 = ((e3 & 3) << 6) | e4;
+        output += String.fromCharCode(c1);
+        if (e3 !== 64 && e3 !== -1) output += String.fromCharCode(c2);
+        if (e4 !== 64 && e4 !== -1) output += String.fromCharCode(c3);
     }
     return output;
 }
@@ -179,202 +375,5 @@ function decodeUTF8(str) {
         return decodeURIComponent(escape(str));
     } catch (e) {
         return str;
-    }
-}
-
-// ==================== MAIN FUNCTIONS ====================
-
-async function searchResults(keyword) {
-    try {
-        const response = await tryFetch(`/search/?do=search&subaction=search&q=${encodeURIComponent(keyword)}`);
-        if (!response) return JSON.stringify([]);
-
-        const html = await response.text();
-        const results = [];
-        const parts = html.split('class="b-content__inline_item"');
-
-        for (let i = 1; i < parts.length; i++) {
-            const part = parts[i];
-            const imgMatch = part.match(/<img[^>]+src="([^"]+)"/);
-            const linkMatch = part.match(/<div class="b-content__inline_item-link">[\s\S]*?<a href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-
-            if (linkMatch && imgMatch) {
-                results.push({
-                    title: decodeHtmlEntities(linkMatch[2].trim()),
-                    image: imgMatch[1].trim(),
-                    href: linkMatch[1].trim()
-                });
-            }
-        }
-        return JSON.stringify(results);
-    } catch (err) {
-        return JSON.stringify([]);
-    }
-}
-
-async function extractDetails(url) {
-    try {
-        const response = await tryFetch(url);
-        if (!response) {
-            return JSON.stringify([{ description: 'N/A', aliases: 'N/A', airdate: 'N/A' }]);
-        }
-        const html = await response.text();
-
-        const descMatch = html.match(/class="b-post__description_text"[^>]*>([\s\S]*?)<\/div>/);
-        const description = descMatch ? decodeHtmlEntities(descMatch[1].trim()) : 'N/A';
-
-        const origMatch = html.match(/<div class="b-post__origtitle"[^>]*>([\s\S]*?)<\/div>/);
-        const aliases = origMatch ? decodeHtmlEntities(origMatch[1].trim()) : 'N/A';
-
-        const yearMatch = html.match(/href="[^"]*?\/year\/[^"]*?">([^<]+)<\/a>/);
-        const airdate = yearMatch ? yearMatch[1].trim() : 'N/A';
-
-        return JSON.stringify([{ description, aliases, airdate }]);
-    } catch (err) {
-        return JSON.stringify([{ description: 'N/A', aliases: 'N/A', airdate: 'N/A' }]);
-    }
-}
-
-async function extractEpisodes(url) {
-    try {
-        const response = await tryFetch(url);
-        if (!response) return JSON.stringify([{ href: url, number: 1, season: 1 }]);
-
-        const html = await response.text();
-        const typeMatch = html.match(/<meta property="og:type" content="([^"]+)"/);
-        const isTV = typeMatch && typeMatch[1] === 'video.tv_series';
-
-        if (!isTV) {
-            return JSON.stringify([{ href: url, number: 1, season: 1 }]);
-        }
-
-        const postId = getPostId(html, url);
-        if (!postId) return JSON.stringify([{ href: url, number: 1, season: 1 }]);
-
-        const translators = parseTranslators(html);
-        if (translators.length === 0) return JSON.stringify([{ href: url, number: 1, season: 1 }]);
-
-        const origin = getOrigin(url);
-        const postData = `id=${postId}&translator_id=${translators[0].id}&action=get_episodes`;
-        const headers = {
-            ...defaultHeaders,
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Referer': url
-        };
-
-        const apiResponse = await fetchv2(`${origin}/ajax/get_cdn_series/`, headers, 'POST', postData);
-        const data = await apiResponse.json();
-
-        if (!data.success) return JSON.stringify([{ href: url, number: 1, season: 1 }]);
-
-        const results = [];
-        const episodeRegex = /class="[^"]*b-simple_episode__item[^"]*"[^>]*data-season_id="(\d+)"[^>]*data-episode_id="(\d+)"/g;
-        let match;
-        while ((match = episodeRegex.exec(data.episodes || '')) !== null) {
-            results.push({
-                href: appendQueryParams(url, { post_id: postId, season: match[1], episode: match[2] }),
-                number: parseInt(match[2], 10),
-                season: parseInt(match[1], 10)
-            });
-        }
-
-        return JSON.stringify(results.length ? results : [{ href: url, number: 1, season: 1 }]);
-    } catch (err) {
-        return JSON.stringify([{ href: url, number: 1, season: 1 }]);
-    }
-}
-
-async function extractStreamUrl(url) {
-    try {
-        let postId = getQueryParam(url, 'post_id');
-        const season = getQueryParam(url, 'season');
-        const episode = getQueryParam(url, 'episode');
-        const isTV = !!(season && episode);
-        const basePageUrl = url.split('?')[0];
-
-        const response = await tryFetch(basePageUrl);
-        if (!response) return JSON.stringify({ streams: [], subtitles: '' });
-
-        const html = await response.text();
-        if (!postId) postId = getPostId(html, basePageUrl);
-        if (!postId) return JSON.stringify({ streams: [], subtitles: '' });
-
-        const translators = parseTranslators(html);
-        if (translators.length === 0) return JSON.stringify({ streams: [], subtitles: '' });
-
-        const origin = getOrigin(basePageUrl);
-        const postHeaders = {
-            'User-Agent': defaultHeaders['User-Agent'],
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Referer': basePageUrl
-        };
-
-        const streamPromises = translators.map(async (tr) => {
-            try {
-                const postData = isTV
-                    ? `id=${postId}&translator_id=${tr.id}&season=${season}&episode=${episode}&action=get_stream`
-                    : `id=${postId}&translator_id=${tr.id}&action=get_movie`;
-
-                const apiResponse = await fetchv2(`${origin}/ajax/get_cdn_series/`, postHeaders, 'POST', postData);
-                const data = await apiResponse.json();
-
-                if (data.success && data.url) {
-                    const rawUrl = data.url;
-                    const decoded = rawUrl.startsWith('[') ? rawUrl : clearTrash(rawUrl);
-                    const parts = decoded.split(',');
-                    const translatorStreams = [];
-                    let translatorSubtitle = data.subtitle || '';
-
-                    for (const part of parts) {
-                        const match = part.match(/\[([^\]]+)\]\s*([^,\s]+(?:\s+or\s+[^,\s]+)*)/);
-                        if (match) {
-                            const quality = match[1];
-                            if (quality.includes('<')) continue;
-                            const links = match[2].split(/\s+or\s+/);
-                            for (const link of links) {
-                                if (link) {
-                                    translatorStreams.push({
-                                        title: `${tr.name} (${quality})`,
-                                        streamUrl: link.trim(),
-                                        headers: {
-                                            'User-Agent': defaultHeaders['User-Agent'],
-                                            'Referer': basePageUrl
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    return { streams: translatorStreams, subtitle: translatorSubtitle };
-                }
-            } catch (e) {}
-            return { streams: [], subtitle: '' };
-        });
-
-        const results = await Promise.all(streamPromises);
-        const allStreams = [];
-        let finalSubtitle = '';
-
-        for (const res of results) {
-            if (res.streams) allStreams.push(...res.streams);
-            if (!finalSubtitle && res.subtitle) finalSubtitle = res.subtitle;
-        }
-
-        allStreams.sort((a, b) => {
-            const getRes = (t) => {
-                const m = t.match(/(\d+)p/);
-                return m ? parseInt(m[1], 10) : 0;
-            };
-            return getRes(b.title) - getRes(a.title);
-        });
-
-        return JSON.stringify({
-            streams: allStreams,
-            subtitles: finalSubtitle
-        });
-    } catch (err) {
-        return JSON.stringify({ streams: [], subtitles: '' });
     }
 }
