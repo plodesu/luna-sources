@@ -5,12 +5,12 @@
     "name": "plodesu",
     "icon": "https://github.com/plodesu.png"
   },
-  "version": "1.0.0",
+  "version": "1.0.2",
   "language": "Russian",
   "languageType": [
     "Dubbed"
   ],
-  "streamType": "MP4 & HLS",
+  "streamType": "HLS",
   "quality": "1080p",
   "baseUrl": "https://gidonline.me",
   "searchBaseUrl": "https://gidonline.me",
