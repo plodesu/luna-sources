@@ -7,7 +7,7 @@ const baseUrl = 'https://kinogo.inc';
 const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
 
 /**
- * 1. Search TMDB first to get Russian title and metadata
+ * 1. Search TMDB first to convert title to Russian Cyrillic
  */
 async function searchResults(keyword) {
     try {
@@ -37,7 +37,7 @@ async function searchResults(keyword) {
 }
 
 /**
- * 2. Extract Details from TMDB
+ * 2. Details metadata
  */
 async function extractDetails(url) {
     try {
@@ -60,24 +60,48 @@ async function extractDetails(url) {
 }
 
 /**
- * 3. Extract Episodes
+ * Helper: Search KinoGo and return the actual page URL
+ */
+async function resolveKinoGoPage(ruTitle) {
+    try {
+        const postData = `do=search&subaction=search&story=${encodeURIComponent(ruTitle)}`;
+        const searchRes = await fetchv2(`${baseUrl}/index.php?do=search`, {
+            ...defaultHeaders,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }, 'POST', postData);
+
+        const searchHtml = await searchRes.text();
+        const linkMatch = searchHtml.match(/<div class="shortstory-title">\s*<a href="([^"]+)">/i) ||
+                          searchHtml.match(/<a href="(https?:\/\/kinogo\.[^"]+\.html)">/i);
+
+        return linkMatch ? linkMatch[1] : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * 3. Extract Episodes & resolve actual KinoGo link
  */
 async function extractEpisodes(url) {
     try {
         const parts = url.split('/');
         const type = parts[0];
         const id = parts[1];
-        const ruTitle = parts[2] || '';
+        const ruTitle = decodeURIComponent(parts[2] || '');
+
+        const realPageUrl = await resolveKinoGoPage(ruTitle);
+        const targetHref = realPageUrl || `${baseUrl}/index.php?do=search&story=${encodeURIComponent(ruTitle)}`;
 
         if (type === 'movie') {
             return JSON.stringify([{
-                href: `${baseUrl}/index.php?do=search&story=${ruTitle}`,
+                href: targetHref,
                 number: 1,
                 season: 1
             }]);
         }
 
-        // TV Show Handling
+        // TV Shows
         const response = await soraFetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${tmdbApiKey}&language=ru-RU`);
         const data = await response.json();
 
@@ -87,7 +111,7 @@ async function extractEpisodes(url) {
                 if (season.season_number === 0) continue;
                 for (let ep = 1; ep <= season.episode_count; ep++) {
                     allEpisodes.push({
-                        href: `${baseUrl}/index.php?do=search&story=${ruTitle}`,
+                        href: targetHref,
                         number: ep,
                         season: season.season_number
                     });
@@ -102,38 +126,25 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Find Stream on KinoGo using translated Russian title
+ * 4. Scrape Video Player Streams
  */
 async function extractStreamUrl(url) {
     try {
         let targetUrl = url;
 
-        // If URL comes from TMDB search, query KinoGo site with Russian title
+        // Fallback search resolver if it was not resolved earlier
         if (url.includes('do=search')) {
             const queryMatch = url.match(/story=([^&]+)/);
             if (queryMatch) {
-                const ruTitle = decodeURIComponent(queryMatch[1]);
-                const postData = `do=search&subaction=search&story=${encodeURIComponent(ruTitle)}`;
-                
-                const searchRes = await fetchv2(`${baseUrl}/index.php?do=search`, {
-                    ...defaultHeaders,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }, 'POST', postData);
-
-                const searchHtml = await searchRes.text();
-                const linkMatch = searchHtml.match(/<div class="shortstory-title">\s*<a href="([^"]+)">/i) ||
-                                  searchHtml.match(/<a href="(https?:\/\/kinogo\.[^"]+\.html)">/i);
-
-                if (linkMatch) {
-                    targetUrl = linkMatch[1];
-                }
+                const resolved = await resolveKinoGoPage(decodeURIComponent(queryMatch[1]));
+                if (resolved) targetUrl = resolved;
             }
         }
 
-        // Fetch KinoGo page to extract iframe stream
         const response = await fetchv2(targetUrl, defaultHeaders);
         const html = await response.text();
 
+        // Locate iframe embed player
         const iframeMatch = html.match(/<iframe[\s\S]*?src=["']([^"']+)["']/i);
         if (!iframeMatch) {
             return JSON.stringify({ streams: [], subtitle: "" });
@@ -141,11 +152,12 @@ async function extractStreamUrl(url) {
 
         let embedUrl = iframeMatch[1].startsWith('//') ? `https:${iframeMatch[1]}` : iframeMatch[1];
 
-        // Fetch iframe player page
         const playerResponse = await fetchv2(embedUrl, { ...defaultHeaders, 'Referer': targetUrl });
         const playerHtml = await playerResponse.text();
 
         const streams = [];
+        
+        // Extract directly formatted .m3u8 / .mp4 streams
         const streamMatches = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/gi);
 
         if (streamMatches) {
@@ -161,6 +173,7 @@ async function extractStreamUrl(url) {
             });
         }
 
+        // Web player fallback stream object
         if (streams.length === 0) {
             streams.push({
                 title: "KinoGo Web Player",
@@ -179,7 +192,7 @@ async function extractStreamUrl(url) {
 }
 
 /**
- * Helper Fetch Function
+ * Fetch Utility Function
  */
 async function soraFetch(url, options = { headers: {}, method: 'GET', body: null }) {
     const headers = options.headers || {};
