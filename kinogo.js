@@ -7,7 +7,7 @@ const baseUrl = 'https://kinogomy.net';
 const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
 
 /**
- * 1. TMDB Search (Russian Translation Handler)
+ * 1. TMDB Search (Precise Russian Match)
  */
 async function searchResults(keyword) {
     try {
@@ -24,7 +24,7 @@ async function searchResults(keyword) {
             const isMovie = item.media_type === 'movie' || item.title;
 
             return {
-                title: title,
+                title: ruTitle,
                 image: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : '',
                 href: isMovie ? `movie/${item.id}/${encodeURIComponent(ruTitle)}` : `tv/${item.id}/${encodeURIComponent(ruTitle)}`
             };
@@ -144,11 +144,13 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. WebView Stream Extractor
+ * 4. Advanced Stream Extractor supporting Studios & Tabs
  */
 async function extractStreamUrl(url) {
     try {
         let cleanUrl = url.split('#')[0];
+        let hashMatch = url.match(/#(s\d+e\d+)/);
+        let seasonEpisodeTag = hashMatch ? hashMatch[1] : '';
 
         if (cleanUrl.includes('do=search')) {
             const queryMatch = cleanUrl.match(/story=([^&]+)/);
@@ -164,7 +166,7 @@ async function extractStreamUrl(url) {
         const html = await response.text();
         let streams = [];
 
-        // Scrape tab data sources
+        // Scrape tab data sources (players/qualities)
         const tabRegex = /<li[^>]+data-src=["']([^"']+)["'][^>]*>([^<]+)<\/li>/gi;
         let match;
 
@@ -175,10 +177,14 @@ async function extractStreamUrl(url) {
             if (title.toLowerCase().includes('трейлер')) continue;
             if (src.startsWith('//')) src = 'https:' + src;
 
+            // Append season/episode parameter if it's a TV show
+            if (seasonEpisodeTag && !src.includes('#')) {
+                src += '#' + seasonEpisodeTag;
+            }
+
             streams.push({
-                title: `Player: ${title}`,
+                title: `KinoGo - ${title}`,
                 streamUrl: src,
-                type: 'hls', // Tells Luna to handle it as an embedded stream frame view
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
                     "Referer": cleanUrl
@@ -186,7 +192,7 @@ async function extractStreamUrl(url) {
             });
         }
 
-        // Fallback to iframe src if tabs fail
+        // Fallback to default iframe if no tabs matched
         if (streams.length === 0) {
             const iframeMatch = html.match(/id="iframesrc"[^>]+src=["']([^"']+)["']/i) || html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
             if (iframeMatch) {
@@ -194,28 +200,14 @@ async function extractStreamUrl(url) {
                 if (src.startsWith('//')) src = 'https:' + src;
                 
                 streams.push({
-                    title: "Player: Standard Embed",
+                    title: "KinoGo Default Player",
                     streamUrl: src,
-                    type: 'hls',
                     headers: {
                         "User-Agent": defaultHeaders["User-Agent"],
                         "Referer": cleanUrl
                     }
                 });
             }
-        }
-
-        // Final fallback to the webpage itself
-        if (streams.length === 0) {
-            streams.push({
-                title: "Player: Web View",
-                streamUrl: cleanUrl,
-                type: 'hls',
-                headers: {
-                    "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": baseUrl
-                }
-            });
         }
 
         return JSON.stringify({ streams: streams, subtitles: "" });
