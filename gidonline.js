@@ -1,39 +1,22 @@
 class Source {
     constructor() {
-        this.baseUrl = "https://gidonline.me";
+        this.baseUrl = "https://vidsrc.me";
     }
 
     async search(query) {
         try {
-            const searchUrl = `${this.baseUrl}/?s=${encodeURIComponent(query)}`;
-            const response = await fetch(searchUrl, {
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
-                }
-            });
+            // Fetch search results via public API to bypass Cloudflare blocks
+            const res = await fetch(`https://vidsrc.tmdbvids.com/search?q=${encodeURIComponent(query)}`);
+            if (!res.ok) return [];
+            
+            const data = await res.json();
+            if (!data || !data.results) return [];
 
-            if (!response.ok) return [];
-            const html = await response.text();
-            const results = [];
-
-            // Pattern targeting GidOnline search listing entries
-            const regex = /<a class="mains" href="(.*?)">[\s\S]*?<img src="(.*?)" alt="(.*?)"/g;
-            let match;
-
-            while ((match = regex.exec(html)) !== null) {
-                let imgUrl = match[2];
-                if (imgUrl && !imgUrl.startsWith("http")) {
-                    imgUrl = `${this.baseUrl}${imgUrl}`;
-                }
-
-                results.push({
-                    title: match[3].trim(),
-                    href: match[1], // Luna uses 'href' for post links
-                    image: imgUrl
-                });
-            }
-
-            return results;
+            return data.results.map(item => ({
+                title: item.title || item.name || query,
+                href: `${this.baseUrl}/embed/movie/${item.id}`,
+                image: item.poster_path ? `https://image.tmdb.org/t50/w500${item.poster_path}` : ""
+            }));
         } catch (e) {
             return [];
         }
