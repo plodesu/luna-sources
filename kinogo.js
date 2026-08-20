@@ -144,7 +144,7 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Multi-Server Stream Extractor (Ensures Server Selection Dialog Appears)
+ * 4. Stream Extractor (Extracts actual video files from webpage source)
  */
 async function extractStreamUrl(url) {
     try {
@@ -165,55 +165,47 @@ async function extractStreamUrl(url) {
         const html = await response.text();
 
         let streams = [];
-        let playerIndex = 1;
 
-        // Scrape standard iframes
-        const iframeRegex = /<iframe[^>]+src=["']([^"']+)["']/gi;
-        let match;
-        while ((match = iframeRegex.exec(html)) !== null) {
-            let src = match[1];
-            if (!src) continue;
-
-            if (src.startsWith('//')) src = 'https:' + src;
-            else if (src.startsWith('/')) src = baseUrl + src;
-
-            if (!src.includes('facebook') && !src.includes('vk.com') && !src.includes('telegram')) {
-                streams.push({
-                    title: `KinoGo Dub / Player ${playerIndex++}`,
-                    streamUrl: src,
-                    headers: {
-                        "User-Agent": defaultHeaders["User-Agent"],
-                        "Referer": targetUrl
-                    }
-                });
+        // Search for file payload variables common in KinoGo players
+        const fileMatch = html.match(/"file"\s*:\s*"([^"]+)"/i) || html.match(/'file'\s*:\s*'([^']+)'/i);
+        if (fileMatch && fileMatch[1]) {
+            let rawFileStr = fileMatch[1];
+            // Split if multiple streams are comma-separated or labeled with 'or'
+            let subUrls = rawFileStr.split(/\s*(?:,|or)\s*/i);
+            
+            for (let i = 0; i < subUrls.length; i++) {
+                let streamUrl = subUrls[i].trim();
+                if (streamUrl) {
+                    streams.push({
+                        title: `KinoGo Stream Quality ${i + 1}`,
+                        streamUrl: streamUrl,
+                        headers: {
+                            "User-Agent": defaultHeaders["User-Agent"],
+                            "Referer": targetUrl
+                        }
+                    });
+                }
             }
         }
 
-        // Fallback options to ensure the selector menu always forces open
+        // Fallback: extract any direct .mp4 or .m3u8 files mentioned in the page scripts
         if (streams.length === 0) {
-            streams.push({
-                title: "KinoGo Server 1 (Web View)",
-                streamUrl: targetUrl,
-                headers: {
-                    "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": baseUrl
+            const directMediaRegex = /(https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*)/gi;
+            let match;
+            let count = 1;
+            while ((match = directMediaRegex.exec(html)) !== null) {
+                let mediaUrl = match[1];
+                if (!streams.some(s => s.streamUrl === mediaUrl)) {
+                    streams.push({
+                        title: `KinoGo Direct File ${count++}`,
+                        streamUrl: mediaUrl,
+                        headers: {
+                            "User-Agent": defaultHeaders["User-Agent"],
+                            "Referer": targetUrl
+                        }
+                    });
                 }
-            });
-            streams.push({
-                title: "KinoGo Server 2 (Direct Embed)",
-                streamUrl: targetUrl,
-                headers: {
-                    "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": baseUrl
-                }
-            });
-        } else if (streams.length === 1) {
-            // Force at least 2 options so Luna triggers the server selection window instead of auto-crashing
-            streams.push({
-                title: "KinoGo Alternative Mirror",
-                streamUrl: streams[0].streamUrl,
-                headers: streams[0].headers
-            });
+            }
         }
 
         return JSON.stringify({ streams: streams, subtitles: "" });
