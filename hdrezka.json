@@ -1,0 +1,32 @@
+{
+    "sourceName": "HDRezka",
+    "iconUrl": "https://rezka.ag/apple-touch-icon-144.png",
+    "author": {
+        "name": "plo",
+        "icon": "https://files.catbox.moe/741wp7.png"
+    },
+    "version": "1.1.0",
+    "language": "Russian",
+    "languageType": [
+        "Dubbed",
+        "Subbed"
+    ],
+    "streamType": "MP4 & HLS",
+    "quality": "4K",
+    "baseUrl": "https://hdrezka.me",
+    "searchBaseUrl": "https://hdrezka.me",
+    "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/hdrezka.js",
+    "type": "movies/shows/anime",
+    "asyncJS": true,
+    "softsub": true,
+    "downloadSupport": true,
+    "supportsMojuru": true,
+    "supportsDartotsu": true,
+    "supportsSora": true,
+    "supportsLuna": true,
+    "supportsAnymex": true,
+    "supportsTsumi": true,
+    "supportsHiyoku": true,
+    "supportsShirox": true,
+    "supportsEclipse": true
+}
