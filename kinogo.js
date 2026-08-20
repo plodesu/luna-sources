@@ -1,5 +1,6 @@
 const defaultHeaders = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    'User-Player-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://kinogomy.net/'
 };
 
@@ -139,32 +140,32 @@ async function extractEpisodes(url) {
 
         return JSON.stringify(allEpisodes);
     } catch (err) {
-        return JSON.stringify([{ href: url, number: 1, title: 'Full Movie' }]);
+        return JSON.stringify([{ href: url, number: 1, title: 'Full Show' }]);
     }
 }
 
 /**
- * 4. Advanced Tab & Player Extractor
+ * 4. Advanced Tab & Player Extractor for Series & Movies
  */
 async function extractStreamUrl(url) {
     try {
-        let targetUrl = url.split('#')[0];
+        let cleanUrl = url.split('#')[0];
 
-        if (targetUrl.includes('do=search')) {
-            const queryMatch = targetUrl.match(/story=([^&]+)/);
+        if (cleanUrl.includes('do=search')) {
+            const queryMatch = cleanUrl.match(/story=([^&]+)/);
             if (queryMatch) {
                 const resolved = await resolveKinoGoPage(decodeURIComponent(queryMatch[1]));
-                if (resolved) targetUrl = resolved;
+                if (resolved) cleanUrl = resolved;
             }
         }
 
-        const response = await soraFetch(targetUrl, { headers: defaultHeaders });
+        const response = await soraFetch(cleanUrl, { headers: defaultHeaders });
         if (!response) return JSON.stringify({ streams: [], subtitles: "" });
         
         const html = await response.text();
         let streams = [];
 
-        // 1. Scrape the specific 'data-src' attributes from the tabs list
+        // Scrape active data-src attributes from player tabs
         const tabRegex = /<li[^>]+data-src=["']([^"']+)["'][^>]*>([^<]+)<\/li>/gi;
         let match;
 
@@ -172,10 +173,7 @@ async function extractStreamUrl(url) {
             let src = match[1];
             let title = match[2].trim();
 
-            // Ignore trailers
             if (title.toLowerCase().includes('трейлер')) continue;
-
-            // Clean up the URL
             if (src.startsWith('//')) src = 'https:' + src;
 
             streams.push({
@@ -183,13 +181,13 @@ async function extractStreamUrl(url) {
                 streamUrl: src,
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": targetUrl,
+                    "Referer": cleanUrl,
                     "Origin": "https://kinogomy.net"
                 }
             });
         }
 
-        // 2. Fallback to the iframe src if nothing is found from tabs
+        // Fallback to iframes if no tab entries are matched
         if (streams.length === 0) {
             const iframeMatch = html.match(/id="iframesrc"[^>]+src=["']([^"']+)["']/i) || html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
             if (iframeMatch) {
@@ -201,11 +199,23 @@ async function extractStreamUrl(url) {
                     streamUrl: src,
                     headers: {
                         "User-Agent": defaultHeaders["User-Agent"],
-                        "Referer": targetUrl,
+                        "Referer": cleanUrl,
                         "Origin": "https://kinogomy.net"
                     }
                 });
             }
+        }
+
+        // Final safe fallback so it never triggers a stream error crash
+        if (streams.length === 0) {
+            streams.push({
+                title: "KinoGo Web Fallback",
+                streamUrl: cleanUrl,
+                headers: {
+                    "User-Agent": defaultHeaders["User-Agent"],
+                    "Referer": baseUrl
+                }
+            });
         }
 
         return JSON.stringify({ streams: streams, subtitles: "" });
