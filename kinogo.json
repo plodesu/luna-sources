@@ -1,19 +1,19 @@
 {
     "sourceName": "KinoGo",
-    "iconUrl": "https://kinogo.inc/favicon.ico",
+    "iconUrl": "https://kinogomy.net/favicon.ico",
     "author": {
         "name": "plodesu",
         "icon": "https://github.com/plodesu.png"
     },
-    "version": "1.0.2",
+    "version": "1.0.3",
     "language": "Russian",
     "languageType": [
         "Dubbed"
     ],
     "streamType": "MP4 & HLS",
     "quality": "1080p",
-    "baseUrl": "https://kinogo.inc",
-    "searchBaseUrl": "https://kinogo.inc",
+    "baseUrl": "https://kinogomy.net",
+    "searchBaseUrl": "https://kinogomy.net",
     "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/kinogo.js",
     "type": "movies/shows",
     "asyncJS": true,
