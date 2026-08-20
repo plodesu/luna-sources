@@ -1,24 +1,31 @@
 {
-  "sourceName": "KinoGo",
-  "iconUrl": "https://kinogo.inc/favicon.ico",
-  "author": {
-    "name": "plodesu",
-    "icon": "https://github.com/plodesu.png"
-  },
-  "version": "1.0.0",
-  "language": "Russian",
-  "languageType": [
-    "Dubbed"
-  ],
-  "streamType": "MP4 & HLS",
-  "quality": "1080p",
-  "baseUrl": "https://kinogo.inc",
-  "searchBaseUrl": "https://kinogo.inc",
-  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/kinogo.js",
-  "type": "movies/shows",
-  "asyncJS": true,
-  "softsub": false,
-  "downloadSupport": true,
-  "supportsSora": true,
-  "supportsLuna": true
+    "sourceName": "KinoGo",
+    "iconUrl": "https://kinogo.inc/favicon.ico",
+    "author": {
+        "name": "plodesu",
+        "icon": "https://github.com/plodesu.png"
+    },
+    "version": "1.0.0",
+    "language": "Russian",
+    "languageType": [
+        "Dubbed"
+    ],
+    "streamType": "MP4 & HLS",
+    "quality": "1080p",
+    "baseUrl": "https://kinogo.inc",
+    "searchBaseUrl": "https://kinogo.inc",
+    "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/kinogo.js",
+    "type": "movies/shows",
+    "asyncJS": true,
+    "softsub": false,
+    "downloadSupport": true,
+    "supportsMojuru": true,
+    "supportsDartotsu": true,
+    "supportsSora": true,
+    "supportsLuna": true,
+    "supportsAnymex": true,
+    "supportsTsumi": true,
+    "supportsHiyoku": true,
+    "supportsShirox": true,
+    "supportsEclipse": true
 }
