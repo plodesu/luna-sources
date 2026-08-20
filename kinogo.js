@@ -1,69 +1,205 @@
-class Source {
-    constructor() {
-        this.baseUrl = "https://kinogo.inc";
-    }
+const defaultHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://kinogo.inc/'
+};
 
-    async search(query) {
-        // 5-second timeout controller so Luna never hangs indefinitely
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+const baseUrl = 'https://kinogo.inc';
 
-        try {
-            const params = new URLSearchParams();
-            params.append("do", "search");
-            params.append("subaction", "search");
-            params.append("story", query);
+async function searchResults(keyword) {
+    const results = [];
+    try {
+        const postData = `do=search&subaction=search&story=${encodeURIComponent(keyword)}`;
+        const headers = {
+            ...defaultHeaders,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        };
 
-            const res = await fetch(`${this.baseUrl}/index.php?do=search`, {
-                method: "POST",
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                body: params.toString(),
-                signal: controller.signal
-            });
+        const response = await fetchv2(`${baseUrl}/index.php?do=search`, headers, 'POST', postData);
+        const html = await response.text();
 
-            clearTimeout(timeoutId);
-            if (!res.ok) return [];
+        const parts = html.split('<div class="shortstory-title">');
+        for (let i = 1; i < parts.length; i++) {
+            const part = parts[i];
+            const linkMatch = part.match(/<a href="([^"]+)">([\s\S]*?)<\/a>/);
+            const imgMatch = part.match(/<img[^>]+src="([^"]+)"/);
 
-            const html = await res.text();
-            const results = [];
-            
-            const regex = /<div class="shortstory-title"><a href="(.*?)">(.*?)<\/a>[\s\S]*?<img src="(.*?)"/g;
-            let match;
-
-            while ((match = regex.exec(html)) !== null) {
-                let imgUrl = match[3];
-                if (imgUrl && !imgUrl.startsWith("http")) {
-                    imgUrl = `${this.baseUrl}${imgUrl}`;
+            if (linkMatch && imgMatch) {
+                let imgUrl = imgMatch[1].trim();
+                if (!imgUrl.startsWith('http')) {
+                    imgUrl = `${baseUrl}${imgUrl}`;
                 }
 
                 results.push({
-                    title: match[2].replace(/<[^>]*>/g, "").trim(),
-                    href: match[1],
-                    image: imgUrl
+                    title: decodeHtmlEntities(linkMatch[2].replace(/<[^>]*>/g, '').trim()),
+                    image: imgUrl,
+                    href: linkMatch[1].trim()
                 });
             }
-
-            return results;
-        } catch (e) {
-            clearTimeout(timeoutId);
-            return []; // Guarantees Luna receives an empty array instead of hanging
         }
-    }
 
-    async searchResults(query) {
-        return await this.search(query);
-    }
-
-    async getDetails(url) {
-        return {};
-    }
-
-    async getStream(url) {
-        return [];
+        return JSON.stringify(results);
+    } catch (err) {
+        return JSON.stringify([{
+            title: "Error",
+            image: "Error",
+            href: "Error"
+        }]);
     }
 }
 
-const source = new Source();
+async function extractDetails(url) {
+    try {
+        const response = await fetchv2(url, defaultHeaders);
+        const html = await response.text();
+
+        const descMatch = html.match(/<div[^>]+id="news-id-[^"]*"[^>]*>([\s\S]*?)<\/div>/i) ||
+                          html.match(/<div class="fullstory-description">([\s\S]*?)<\/div>/i);
+        const description = descMatch ? decodeHtmlEntities(descMatch[1].replace(/<[^>]*>/g, '').trim()) : "N/A";
+
+        const origMatch = html.match(/<li><b>Оригинальное название:<\/b>\s*([^<]+)<\/li>/i);
+        const aliases = origMatch ? decodeHtmlEntities(origMatch[1].trim()) : "N/A";
+
+        const yearMatch = html.match(/<li><b>Год выпуска:<\/b>\s*<a[^>]*>(\d+)<\/a>/i);
+        const airdate = yearMatch ? yearMatch[1].trim() : "N/A";
+
+        return JSON.stringify([{
+            description: description,
+            aliases: aliases,
+            airdate: airdate
+        }]);
+    } catch (err) {
+        return JSON.stringify([{
+            description: "Error",
+            aliases: "Error",
+            airdate: "Error"
+        }]);
+    }
+}
+
+async function extractEpisodes(url) {
+    try {
+        const response = await fetchv2(url, defaultHeaders);
+        const html = await response.text();
+
+        const iframeMatch = html.match(/<iframe[\s\S]*?src=["']([^"']+)["']/i);
+        if (!iframeMatch) {
+            return JSON.stringify([{
+                href: url,
+                number: 1,
+                season: 1
+            }]);
+        }
+
+        const embedUrl = iframeMatch[1].startsWith('//') ? `https:${iframeMatch[1]}` : iframeMatch[1];
+        
+        return JSON.stringify([{
+            href: appendQueryParams(url, { embed: embedUrl }),
+            number: 1,
+            season: 1
+        }]);
+    } catch (err) {
+        return JSON.stringify([{
+            href: "Error",
+            number: "Error",
+            season: "Error"
+        }]);
+    }
+}
+
+async function extractStreamUrl(url) {
+    try {
+        let embedUrl = getQueryParam(url, "embed");
+        const basePageUrl = url.split('?')[0];
+
+        if (!embedUrl) {
+            const response = await fetchv2(basePageUrl, defaultHeaders);
+            const html = await response.text();
+            const iframeMatch = html.match(/<iframe[\s\S]*?src=["']([^"']+)["']/i);
+            
+            if (iframeMatch) {
+                embedUrl = iframeMatch[1].startsWith('//') ? `https:${iframeMatch[1]}` : iframeMatch[1];
+            } else {
+                embedUrl = basePageUrl;
+            }
+        }
+
+        const embedHeaders = {
+            ...defaultHeaders,
+            'Referer': basePageUrl
+        };
+
+        const playerResponse = await fetchv2(embedUrl, embedHeaders);
+        const playerHtml = await playerResponse.text();
+
+        const allStreams = [];
+
+        const streamMatch = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/gi) ||
+                            playerHtml.match(/file\s*:\s*["']([^"']+)["']/gi);
+
+        if (streamMatch) {
+            for (const match of streamMatch) {
+                let cleanUrl = match.replace(/file\s*:\s*["']/i, '').replace(/["']$/, '');
+                if (cleanUrl.startsWith('//')) cleanUrl = `https:${cleanUrl}`;
+
+                allStreams.push({
+                    title: "KinoGo Stream",
+                    streamUrl: cleanUrl,
+                    headers: {
+                        "User-Agent": defaultHeaders["User-Agent"],
+                        "Referer": embedUrl
+                    }
+                });
+            }
+        }
+
+        if (allStreams.length === 0) {
+            allStreams.push({
+                title: "KinoGo Web Stream",
+                streamUrl: embedUrl,
+                headers: {
+                    "User-Agent": defaultHeaders["User-Agent"],
+                    "Referer": basePageUrl
+                }
+            });
+        }
+
+        return JSON.stringify({
+            streams: allStreams,
+            subtitle: ""
+        });
+    } catch (err) {
+        return JSON.stringify({
+            streams: [],
+            subtitle: ""
+        });
+    }
+}
+
+function decodeHtmlEntities(str) {
+    return str
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/&#39;/g, "'");
+}
+
+function getQueryParam(url, name) {
+    try {
+        const parsed = new URL(url);
+        return parsed.searchParams.get(name);
+    } catch (e) {
+        const regex = new RegExp('[?&]' + name + '=([^&#]*)');
+        const match = regex.exec(url);
+        return match ? decodeURIComponent(match[1]) : null;
+    }
+}
+
+function appendQueryParams(url, params) {
+    const separator = url.includes('?') ? '&' : '?';
+    const queryString = Object.entries(params)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join('&');
+    return `${url}${separator}${queryString}`;
+}
