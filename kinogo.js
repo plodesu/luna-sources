@@ -7,7 +7,7 @@ const baseUrl = 'https://kinogo.inc';
 const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
 
 /**
- * 1. Search TMDB first to convert title to Russian Cyrillic
+ * 1. TMDB Search (Russian Translation Handler)
  */
 async function searchResults(keyword) {
     try {
@@ -37,7 +37,7 @@ async function searchResults(keyword) {
 }
 
 /**
- * 2. Details metadata
+ * 2. Details Metadata
  */
 async function extractDetails(url) {
     try {
@@ -60,7 +60,7 @@ async function extractDetails(url) {
 }
 
 /**
- * Helper: Search KinoGo and return the actual page URL
+ * Helper: Resolve KinoGo Page URL from TMDB Title
  */
 async function resolveKinoGoPage(ruTitle) {
     try {
@@ -72,7 +72,7 @@ async function resolveKinoGoPage(ruTitle) {
 
         const searchHtml = await searchRes.text();
         const linkMatch = searchHtml.match(/<div class="shortstory-title">\s*<a href="([^"]+)">/i) ||
-                          searchHtml.match(/<a href="(https?:\/\/kinogo\.[^"]+\.html)">/i);
+                          searchHtml.match(/<a href="(https?:\/\/[^"]+\.html)">/i);
 
         return linkMatch ? linkMatch[1] : null;
     } catch (e) {
@@ -81,7 +81,7 @@ async function resolveKinoGoPage(ruTitle) {
 }
 
 /**
- * 3. Extract Episodes & resolve actual KinoGo link
+ * 3. Extract Episodes
  */
 async function extractEpisodes(url) {
     try {
@@ -126,13 +126,12 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Scrape Video Player Streams
+ * 4. Multi-Player & Dubbing Extractor
  */
 async function extractStreamUrl(url) {
     try {
         let targetUrl = url;
 
-        // Fallback search resolver if it was not resolved earlier
         if (url.includes('do=search')) {
             const queryMatch = url.match(/story=([^&]+)/);
             if (queryMatch) {
@@ -144,51 +143,92 @@ async function extractStreamUrl(url) {
         const response = await fetchv2(targetUrl, defaultHeaders);
         const html = await response.text();
 
-        // Locate iframe embed player
-        const iframeMatch = html.match(/<iframe[\s\S]*?src=["']([^"']+)["']/i);
-        if (!iframeMatch) {
+        const playerUrls = [];
+
+        // 1. Check all Standard HTML Iframes
+        const iframeRegex = /<iframe[\s\S]*?src=["']([^"']+)["']/gi;
+        let match;
+        while ((match = iframeRegex.exec(html)) !== null) {
+            if (match[1] && !match[1].includes('facebook') && !match[1].includes('vk.com')) {
+                playerUrls.push({ name: "Player 1", url: fixEmbedUrl(match[1]) });
+            }
+        }
+
+        // 2. Check Data Attributes / Alternate Player Tabs (data-src, data-player, data-file)
+        const dataRegex = /data-(?:src|player|file|link)\s*=\s*["']([^"']+)["']/gi;
+        let dataMatch;
+        let count = 2;
+        while ((dataMatch = dataRegex.exec(html)) !== null) {
+            const cleanUrl = fixEmbedUrl(dataMatch[1]);
+            if (cleanUrl && !playerUrls.some(p => p.url === cleanUrl)) {
+                playerUrls.push({ name: `Player ${count++} (Dub)`, url: cleanUrl });
+            }
+        }
+
+        // 3. Check JS Embedded Variables (Collaps, HDRezka, Alloha, Voidboost, etc.)
+        const jsUrlRegex = /(?:https?:)?\/\/[^\s"'<>]+\/(?:embed|player|v|vod)\/[^\s"'<>]+/gi;
+        let jsMatch;
+        while ((jsMatch = jsUrlRegex.exec(html)) !== null) {
+            const cleanUrl = fixEmbedUrl(jsMatch[0]);
+            if (cleanUrl && !playerUrls.some(p => p.url === cleanUrl)) {
+                playerUrls.push({ name: `Player ${count++}`, url: cleanUrl });
+            }
+        }
+
+        if (playerUrls.length === 0) {
             return JSON.stringify({ streams: [], subtitle: "" });
         }
 
-        let embedUrl = iframeMatch[1].startsWith('//') ? `https:${iframeMatch[1]}` : iframeMatch[1];
+        // Extract playable streams from all discovered players concurrently
+        const streamResults = await Promise.all(playerUrls.map(async (player) => {
+            try {
+                const playerRes = await fetchv2(player.url, { ...defaultHeaders, 'Referer': targetUrl });
+                const playerHtml = await playerRes.text();
 
-        const playerResponse = await fetchv2(embedUrl, { ...defaultHeaders, 'Referer': targetUrl });
-        const playerHtml = await playerResponse.text();
+                // Direct video formats (.m3u8 or .mp4)
+                const streamMatches = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/gi);
+                if (streamMatches) {
+                    return streamMatches.map((s, idx) => ({
+                        title: `KinoGo [${player.name}] Stream ${idx + 1}`,
+                        streamUrl: s,
+                        headers: {
+                            "User-Agent": defaultHeaders["User-Agent"],
+                            "Referer": player.url
+                        }
+                    }));
+                }
 
-        const streams = [];
-        
-        // Extract directly formatted .m3u8 / .mp4 streams
-        const streamMatches = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/gi);
-
-        if (streamMatches) {
-            streamMatches.forEach(stream => {
-                streams.push({
-                    title: "KinoGo Stream",
-                    streamUrl: stream,
+                // Fallback: Web player embed link
+                return [{
+                    title: `KinoGo [${player.name}] Web Stream`,
+                    streamUrl: player.url,
                     headers: {
                         "User-Agent": defaultHeaders["User-Agent"],
-                        "Referer": embedUrl
+                        "Referer": targetUrl
                     }
-                });
-            });
-        }
+                }];
+            } catch (e) {
+                return null;
+            }
+        }));
 
-        // Web player fallback stream object
-        if (streams.length === 0) {
-            streams.push({
-                title: "KinoGo Web Player",
-                streamUrl: embedUrl,
-                headers: {
-                    "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": targetUrl
-                }
-            });
-        }
+        const streams = streamResults.flat().filter(Boolean);
 
         return JSON.stringify({ streams: streams, subtitle: "" });
     } catch (err) {
         return JSON.stringify({ streams: [], subtitle: "" });
     }
+}
+
+/**
+ * Utility: Standardize Protocol Relative URLs
+ */
+function fixEmbedUrl(url) {
+    if (!url) return null;
+    let clean = url.trim();
+    if (clean.startsWith('//')) return `https:${clean}`;
+    if (clean.startsWith('/')) return `${baseUrl}${clean}`;
+    return clean;
 }
 
 /**
