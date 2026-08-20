@@ -1,189 +1,213 @@
 const defaultHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://kinogomy.net/'
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Referer": "https://kinogomy.net/",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
 };
 
-const baseUrl = 'https://kinogomy.net';
-const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
+const baseUrl = "https://kinogomy.net";
+const tmdbApiKey = "ad301b7cc82ffe19273e55e4d4206885";
+
+async function soraFetch(url, options = {}) {
+    const headers = { ...defaultHeaders, ...(options.headers || {}) };
+    const method = options.method || "GET";
+    const body = options.body || null;
+
+    try {
+        return await fetchv2(url, headers, method, body);
+    } catch (e) {
+        try {
+            return await fetch(url, { headers, method, body });
+        } catch (err) {
+            return null;
+        }
+    }
+}
 
 /**
- * 1. TMDB Search (Precise Russian Match)
+ * 1. Search (TMDB → Russian titles)
  */
 async function searchResults(keyword) {
     try {
-        const cleanQuery = keyword.replace(/Episode\s*\d+/gi, '').replace(/Season\s*\d+/gi, '').trim();
-        const tmdbUrl = `https://api.themoviedb.org/3/search/multi?api_key=${tmdbApiKey}&query=${encodeURIComponent(cleanQuery)}&language=ru-RU&include_adult=false`;
-        
-        const response = await soraFetch(tmdbUrl);
-        if (!response) return JSON.stringify([]);
-        const data = await response.json();
+        const clean = keyword
+            .replace(/Episode\s*\d+/gi, "")
+            .replace(/Season\s*\d+/gi, "")
+            .trim();
 
-        const results = (data.results || []).map(function(item) {
-            const title = item.title || item.name || item.original_title || item.original_name || 'Untitled';
-            const ruTitle = item.title || item.name || title;
-            const isMovie = item.media_type === 'movie' || item.title;
+        const tmdbUrl = `https://api.themoviedb.org/3/search/multi?api_key=${tmdbApiKey}&query=${encodeURIComponent(clean)}&language=ru-RU&include_adult=false`;
+        const res = await soraFetch(tmdbUrl);
+        if (!res) return JSON.stringify([]);
+
+        const data = await res.json();
+        const results = (data.results || []).map(item => {
+            const title = item.title || item.name || item.original_title || item.original_name || "Untitled";
+            const isMovie = item.media_type === "movie" || !!item.title;
 
             return {
-                title: ruTitle,
-                image: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : '',
-                href: isMovie ? `movie/${item.id}/${encodeURIComponent(ruTitle)}` : `tv/${item.id}/${encodeURIComponent(ruTitle)}`
+                title: title,
+                image: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : "",
+                href: isMovie
+                    ? `movie/${item.id}/${encodeURIComponent(title)}`
+                    : `tv/${item.id}/${encodeURIComponent(title)}`
             };
         });
 
         return JSON.stringify(results);
-    } catch (err) {
+    } catch (e) {
         return JSON.stringify([]);
     }
 }
 
 /**
- * 2. Details Metadata
+ * 2. Details
  */
 async function extractDetails(url) {
     try {
-        const parts = url.split('/');
-        const type = parts[0];
-        const id = parts[1];
-
-        const tmdbUrl = `https://api.themoviedb.org/3/${type === 'movie' ? 'movie' : 'tv'}/${id}?api_key=${tmdbApiKey}&language=ru-RU`;
-        const response = await soraFetch(tmdbUrl);
-        if (!response) {
-            return JSON.stringify([{ description: 'Описание отсутствует.', aliases: 'N/A', airdate: 'N/A' }]);
+        const [type, id] = url.split("/");
+        const tmdbUrl = `https://api.themoviedb.org/3/${type === "movie" ? "movie" : "tv"}/${id}?api_key=${tmdbApiKey}&language=ru-RU`;
+        const res = await soraFetch(tmdbUrl);
+        if (!res) {
+            return JSON.stringify([{ description: "Описание отсутствует.", aliases: "N/A", airdate: "N/A" }]);
         }
-        const data = await response.json();
+        const data = await res.json();
 
         return JSON.stringify([{
-            description: data.overview || 'Описание отсутствует.',
-            aliases: data.original_title || data.original_name || 'N/A',
-            airdate: data.release_date || data.first_air_date || 'N/A'
+            description: data.overview || "Описание отсутствует.",
+            aliases: data.original_title || data.original_name || "N/A",
+            airdate: data.release_date || data.first_air_date || "N/A"
         }]);
-    } catch (err) {
-        return JSON.stringify([{ description: 'Error loading details', aliases: 'Error', airdate: 'Error' }]);
+    } catch (e) {
+        return JSON.stringify([{ description: "Error", aliases: "Error", airdate: "Error" }]);
     }
 }
 
 /**
- * Helper: Resolve KinoGo Page URL from TMDB Title
+ * Helper – find real KinoGo page by Russian title
  */
 async function resolveKinoGoPage(ruTitle) {
     try {
         if (!ruTitle) return null;
-        const postData = `do=search&subaction=search&story=${encodeURIComponent(ruTitle)}`;
-        const response = await soraFetch(`${baseUrl}/index.php?do=search`, {
-            method: 'POST',
+
+        const body = `do=search&subaction=search&story=${encodeURIComponent(ruTitle)}`;
+        const res = await soraFetch(`${baseUrl}/index.php?do=search`, {
+            method: "POST",
             headers: {
                 ...defaultHeaders,
-                'Content-Type': 'application/x-www-form-urlencoded'
+                "Content-Type": "application/x-www-form-urlencoded"
             },
-            body: postData
+            body
         });
 
-        if (!response) return null;
-        const searchHtml = await response.text();
-        
-        const linkMatch = searchHtml.match(/<div class="shortstory-title">\s*<a href="([^"]+)">/i) ||
-                          searchHtml.match(/<a href="(https?:\/\/[^"]+\.html)">/i);
+        if (!res) return null;
+        const html = await res.text();
 
-        return linkMatch ? linkMatch[1] : null;
+        // Current site patterns
+        const match =
+            html.match(/<div class="shortstory-title">\s*<a href="([^"]+)">/i) ||
+            html.match(/<a href="(https?:\/\/kinogomy\.net\/[^"]+\.html)"/i) ||
+            html.match(/href="(\/[^"]+\.html)"[^>]*>[\s\S]*?shortstory/i);
+
+        if (!match) return null;
+        let link = match[1];
+        if (link.startsWith("/")) link = baseUrl + link;
+        return link;
     } catch (e) {
         return null;
     }
 }
 
 /**
- * 3. Extract Episodes
+ * 3. Episodes
  */
 async function extractEpisodes(url) {
     try {
-        const parts = url.split('/');
+        const parts = url.split("/");
         const type = parts[0];
         const id = parts[1];
-        const ruTitle = decodeURIComponent(parts[2] || '');
+        const ruTitle = decodeURIComponent(parts[2] || "");
 
-        const realPageUrl = await resolveKinoGoPage(ruTitle);
-        const targetHref = realPageUrl || `${baseUrl}/index.php?do=search&story=${encodeURIComponent(ruTitle)}`;
+        const realPage = await resolveKinoGoPage(ruTitle);
+        const target = realPage || `${baseUrl}/index.php?do=search&story=${encodeURIComponent(ruTitle)}`;
 
-        if (type === 'movie') {
+        if (type === "movie") {
             return JSON.stringify([{
-                href: targetHref,
+                href: target,
                 number: 1,
-                title: 'Full Movie'
+                title: "Full Movie"
             }]);
         }
 
-        const response = await soraFetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${tmdbApiKey}&language=ru-RU`);
-        if (!response) {
-            return JSON.stringify([{ href: targetHref, number: 1, title: 'Episode 1' }]);
+        // TV – build from TMDB seasons
+        const res = await soraFetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${tmdbApiKey}&language=ru-RU`);
+        if (!res) {
+            return JSON.stringify([{ href: target, number: 1, title: "Episode 1" }]);
         }
-        const data = await response.json();
+        const data = await res.json();
 
-        let allEpisodes = [];
-        if (data.seasons && data.seasons.length) {
-            for (let i = 0; i < data.seasons.length; i++) {
-                const season = data.seasons[i];
+        const episodes = [];
+        if (data.seasons) {
+            for (const season of data.seasons) {
                 if (season.season_number === 0) continue;
-                for (let ep = 1; ep <= season.episode_count; ep++) {
-                    allEpisodes.push({
-                        href: `${targetHref}#s${season.season_number}e${ep}`,
+                for (let ep = 1; ep <= (season.episode_count || 0); ep++) {
+                    episodes.push({
+                        href: `${target}#s${season.season_number}e${ep}`,
                         number: ep,
                         season: season.season_number,
-                        title: `Season ${season.season_number} Episode ${ep}`
+                        title: `S${season.season_number}E${ep}`
                     });
                 }
             }
         }
 
-        if (allEpisodes.length === 0) {
-            allEpisodes.push({ href: targetHref, number: 1, title: 'Full Show' });
+        if (episodes.length === 0) {
+            episodes.push({ href: target, number: 1, title: "Full Show" });
         }
 
-        return JSON.stringify(allEpisodes);
-    } catch (err) {
-        return JSON.stringify([{ href: url, number: 1, title: 'Full Show' }]);
+        return JSON.stringify(episodes);
+    } catch (e) {
+        return JSON.stringify([{ href: url, number: 1, title: "Full Show" }]);
     }
 }
 
 /**
- * 4. Advanced Stream Extractor supporting Studios & Tabs
+ * 4. Stream extractor (updated for current players)
  */
 async function extractStreamUrl(url) {
     try {
-        let cleanUrl = url.split('#')[0];
-        let hashMatch = url.match(/#(s\d+e\d+)/);
-        let seasonEpisodeTag = hashMatch ? hashMatch[1] : '';
+        let cleanUrl = url.split("#")[0];
+        const hashMatch = url.match(/#(s\d+e\d+)/i);
+        const seasonEpisode = hashMatch ? hashMatch[1] : "";
 
-        if (cleanUrl.includes('do=search')) {
-            const queryMatch = cleanUrl.match(/story=([^&]+)/);
-            if (queryMatch) {
-                const resolved = await resolveKinoGoPage(decodeURIComponent(queryMatch[1]));
+        // Resolve search URLs
+        if (cleanUrl.includes("do=search")) {
+            const q = cleanUrl.match(/story=([^&]+)/);
+            if (q) {
+                const resolved = await resolveKinoGoPage(decodeURIComponent(q[1]));
                 if (resolved) cleanUrl = resolved;
             }
         }
 
-        const response = await soraFetch(cleanUrl, { headers: defaultHeaders });
-        if (!response) return JSON.stringify({ streams: [], subtitles: "" });
-        
-        const html = await response.text();
-        let streams = [];
+        const res = await soraFetch(cleanUrl, { headers: defaultHeaders });
+        if (!res) return JSON.stringify({ streams: [], subtitles: "" });
 
-        // Scrape tab data sources (players/qualities)
+        const html = await res.text();
+        const streams = [];
+
+        // Current site: <li ... data-src="..." data-tab="...">Title</li>
         const tabRegex = /<li[^>]+data-src=["']([^"']+)["'][^>]*>([^<]+)<\/li>/gi;
-        let match;
+        let m;
+        while ((m = tabRegex.exec(html)) !== null) {
+            let src = m[1].replace(/&amp;/g, "&");
+            const title = m[2].trim();
 
-        while ((match = tabRegex.exec(html)) !== null) {
-            let src = match[1];
-            let title = match[2].trim();
+            if (/трейлер|trailer/i.test(title)) continue;
+            if (src.startsWith("//")) src = "https:" + src;
 
-            if (title.toLowerCase().includes('трейлер')) continue;
-            if (src.startsWith('//')) src = 'https:' + src;
-
-            // Append season/episode parameter if it's a TV show
-            if (seasonEpisodeTag && !src.includes('#')) {
-                src += '#' + seasonEpisodeTag;
+            if (seasonEpisode && !src.includes("#")) {
+                src += "#" + seasonEpisode;
             }
 
             streams.push({
-                title: `KinoGo - ${title}`,
+                title: `KinoGo – ${title}`,
                 streamUrl: src,
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
@@ -192,15 +216,18 @@ async function extractStreamUrl(url) {
             });
         }
 
-        // Fallback to default iframe if no tabs matched
+        // Fallback – main iframe
         if (streams.length === 0) {
-            const iframeMatch = html.match(/id="iframesrc"[^>]+src=["']([^"']+)["']/i) || html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-            if (iframeMatch) {
-                let src = iframeMatch[1];
-                if (src.startsWith('//')) src = 'https:' + src;
-                
+            const iframe =
+                html.match(/id=["']iframesrc["'][^>]+src=["']([^"']+)["']/i) ||
+                html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+
+            if (iframe) {
+                let src = iframe[1].replace(/&amp;/g, "&");
+                if (src.startsWith("//")) src = "https:" + src;
+
                 streams.push({
-                    title: "KinoGo Default Player",
+                    title: "KinoGo Default",
                     streamUrl: src,
                     headers: {
                         "User-Agent": defaultHeaders["User-Agent"],
@@ -210,31 +237,8 @@ async function extractStreamUrl(url) {
             }
         }
 
-        return JSON.stringify({ streams: streams, subtitles: "" });
-    } catch (err) {
-        return JSON.stringify({ streams: [], subtitles: "" });
-    }
-}
-
-/**
- * Fetch Utility Function
- */
-async function soraFetch(url, options) {
-    const opts = options || {};
-    const headers = opts.headers || {};
-    if (!headers["User-Agent"]) {
-        headers["User-Agent"] = defaultHeaders["User-Agent"];
-    }
-    const method = opts.method || 'GET';
-    const body = opts.body || null;
-
-    try {
-        return await fetchv2(url, headers, method, body);
+        return JSON.stringify({ streams, subtitles: "" });
     } catch (e) {
-        try {
-            return await fetch(url, { headers: headers, method: method, body: body });
-        } catch (error) {
-            return null;
-        }
+        return JSON.stringify({ streams: [], subtitles: "" });
     }
 }
