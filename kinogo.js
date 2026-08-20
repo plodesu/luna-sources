@@ -5,7 +5,6 @@ class Source {
 
     async search(query) {
         try {
-            // DLE requires POST data formatted as application/x-www-form-urlencoded
             const params = new URLSearchParams();
             params.append("do", "search");
             params.append("subaction", "search");
@@ -25,7 +24,6 @@ class Source {
             const html = await res.text();
             const results = [];
             
-            // Regex to parse Kinogo search result cards
             const regex = /<div class="shortstory-title"><a href="(.*?)">(.*?)<\/a>[\s\S]*?<img src="(.*?)"/g;
             let match;
 
@@ -36,7 +34,7 @@ class Source {
                 }
 
                 results.push({
-                    title: match[2].replace(/<[^>]*>/g, "").trim(), // Strip inner HTML tags
+                    title: match[2].replace(/<[^>]*>/g, "").trim(),
                     href: match[1],
                     image: imgUrl
                 });
@@ -54,19 +52,60 @@ class Source {
 
     async getDetails(url) {
         try {
-            const res = await fetch(url);
+            const res = await fetch(url, {
+                headers: { 
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)" 
+                }
+            });
             const html = await res.text();
-            
-            // Extract player iframe source
-            const iframe = html.match(/<iframe[\s\S]*?src="(.*?)"/);
-            return { streamUrl: iframe ? iframe[1] : "" };
+
+            // Extract iframe player URL from Kinogo page
+            const iframeMatch = html.match(/<iframe[\s\S]*?src=["'](.*?)["']/i);
+            const playerUrl = iframeMatch ? iframeMatch[1] : "";
+
+            return {
+                streamUrl: playerUrl
+            };
         } catch (e) {
             return {};
         }
     }
 
     async getStream(url) {
-        return [];
+        if (!url) return [];
+
+        try {
+            let embedUrl = url;
+            if (embedUrl.startsWith("//")) {
+                embedUrl = `https:${embedUrl}`;
+            }
+
+            // Fetch iframe player page to locate direct video file
+            const res = await fetch(embedUrl, {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+                    "Referer": this.baseUrl
+                }
+            });
+
+            const html = await res.text();
+
+            // Search for direct HLS (.m3u8) or MP4 stream URL inside player code
+            const streamMatch = html.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/i) 
+                               || html.match(/file\s*:\s*["']([^"']+)["']/i);
+
+            if (streamMatch && streamMatch[1]) {
+                return [{
+                    name: "KinoGo HD",
+                    url: streamMatch[1],
+                    quality: "1080p"
+                }];
+            }
+
+            return [];
+        } catch (e) {
+            return [];
+        }
     }
 }
 
