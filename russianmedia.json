@@ -1,0 +1,31 @@
+{
+    "sourceName": "Russian Media Hub",
+    "iconUrl": "https://kinogomy.net/favicon.ico",
+    "author": {
+        "name": "plodesu",
+        "icon": "https://github.com/plodesu.png"
+    },
+    "version": "1.0.0",
+    "language": "Russian",
+    "languageType": [
+        "Dubbed"
+    ],
+    "streamType": "MP4 & HLS",
+    "quality": "1080p",
+    "baseUrl": "https://kinogomy.net",
+    "searchBaseUrl": "https://kinogomy.net",
+    "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/russian_media.js",
+    "type": "movies/shows",
+    "asyncJS": true,
+    "softsub": false,
+    "downloadSupport": true,
+    "supportsMojuru": true,
+    "supportsDartotsu": true,
+    "supportsSora": true,
+    "supportsLuna": true,
+    "supportsAnymex": true,
+    "supportsTsumi": true,
+    "supportsHiyoku": true,
+    "supportsShirox": true,
+    "supportsEclipse": true
+}
