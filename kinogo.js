@@ -124,7 +124,7 @@ async function extractEpisodes(url) {
                 if (season.season_number === 0) continue;
                 for (let ep = 1; ep <= season.episode_count; ep++) {
                     allEpisodes.push({
-                        href: targetHref,
+                        href: `${targetHref}#s${season.season_number}e${ep}`,
                         number: ep,
                         season: season.season_number,
                         title: `Season ${season.season_number} Episode ${ep}`
@@ -144,14 +144,14 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Stream Extractor
+ * 4. Deep Stream Extractor (Unpacks iframes into direct .m3u8/.mp4 links)
  */
 async function extractStreamUrl(url) {
     try {
-        let targetUrl = url;
+        let targetUrl = url.split('#')[0]; // Strip anchor tags
 
-        if (url.includes('do=search')) {
-            const queryMatch = url.match(/story=([^&]+)/);
+        if (targetUrl.includes('do=search')) {
+            const queryMatch = targetUrl.match(/story=([^&]+)/);
             if (queryMatch) {
                 const resolved = await resolveKinoGoPage(decodeURIComponent(queryMatch[1]));
                 if (resolved) targetUrl = resolved;
@@ -164,10 +164,9 @@ async function extractStreamUrl(url) {
         }
         const html = await response.text();
 
-        let streams = [];
+        let iframeUrls = [];
         const iframeRegex = /<iframe[\s\S]*?src=["']([^"']+)["']/gi;
         let match;
-        let playerIndex = 1;
 
         while ((match = iframeRegex.exec(html)) !== null) {
             let iframeSrc = match[1];
@@ -179,27 +178,52 @@ async function extractStreamUrl(url) {
                 iframeSrc = baseUrl + iframeSrc;
             }
 
-            if (iframeSrc.includes('facebook') || iframeSrc.includes('vk.com') || iframeSrc.includes('telegram')) {
-                continue;
+            if (!iframeSrc.includes('facebook') && !iframeSrc.includes('vk.com') && !iframeSrc.includes('telegram')) {
+                iframeUrls.push(iframeSrc);
             }
+        }
 
+        let streams = [];
+
+        // Loop through discovered iframe player pages to find actual video files inside them
+        for (let i = 0; i < iframeUrls.length; i++) {
+            try {
+                const playerRes = await soraFetch(iframeUrls[i], {
+                    headers: {
+                        ...defaultHeaders,
+                        'Referer': targetUrl
+                    }
+                });
+                if (!playerRes) continue;
+                const playerHtml = await playerRes.text();
+
+                // Search for .m3u8 or .mp4 files inside the player code
+                const streamMatches = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/gi);
+                if (streamMatches) {
+                    for (let j = 0; j < streamMatches.length; j++) {
+                        streams.push({
+                            title: `KinoGo Player ${i + 1} - Stream ${j + 1}`,
+                            streamUrl: streamMatches[j],
+                            headers: {
+                                "User-Agent": defaultHeaders["User-Agent"],
+                                "Referer": iframeUrls[i]
+                            }
+                        });
+                    }
+                }
+            } catch (err) {
+                // Skip failed player scraping
+            }
+        }
+
+        // Fallback: If no direct video file was intercepted, pass the iframe player itself
+        if (streams.length === 0 && iframeUrls.length > 0) {
             streams.push({
-                title: `KinoGo Player ${playerIndex++}`,
-                streamUrl: iframeSrc,
+                title: "KinoGo Web Player",
+                streamUrl: iframeUrls[0],
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
                     "Referer": targetUrl
-                }
-            });
-        }
-
-        if (streams.length === 0) {
-            streams.push({
-                title: "KinoGo Web Stream",
-                streamUrl: targetUrl,
-                headers: {
-                    "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": baseUrl
                 }
             });
         }
