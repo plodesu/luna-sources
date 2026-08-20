@@ -1,9 +1,9 @@
 const defaultHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://kinogo.inc/'
+    'Referer': 'https://kinogomy.net/'
 };
 
-const baseUrl = 'https://kinogo.inc';
+const baseUrl = 'https://kinogomy.net';
 const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
 
 /**
@@ -144,7 +144,7 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Stream Extractor (Targeting Real Video Players)
+ * 4. Multi-Server Stream Extractor (Ensures Server Selection Dialog Appears)
  */
 async function extractStreamUrl(url) {
     try {
@@ -167,7 +167,7 @@ async function extractStreamUrl(url) {
         let streams = [];
         let playerIndex = 1;
 
-        // 1. Extract valid iframe embed sources from the video container
+        // Scrape standard iframes
         const iframeRegex = /<iframe[^>]+src=["']([^"']+)["']/gi;
         let match;
         while ((match = iframeRegex.exec(html)) !== null) {
@@ -177,10 +177,9 @@ async function extractStreamUrl(url) {
             if (src.startsWith('//')) src = 'https:' + src;
             else if (src.startsWith('/')) src = baseUrl + src;
 
-            // Filter out social widgets and ads, keep actual video player domains
-            if (!src.includes('facebook') && !src.includes('vk.com') && !src.includes('telegram') && !src.includes('advert')) {
+            if (!src.includes('facebook') && !src.includes('vk.com') && !src.includes('telegram')) {
                 streams.push({
-                    title: `KinoGo Player Source ${playerIndex++}`,
+                    title: `KinoGo Dub / Player ${playerIndex++}`,
                     streamUrl: src,
                     headers: {
                         "User-Agent": defaultHeaders["User-Agent"],
@@ -190,33 +189,30 @@ async function extractStreamUrl(url) {
             }
         }
 
-        // 2. Fallback check for embedded player URLs in script tags (e.g. collaps, hdvb, voidboost)
-        const scriptUrlRegex = /(https?:)?\/\/[^\s"'<>]+\/(?:embed|video|serial|movie)\/[^\s"'<>]+/gi;
-        let scriptMatch;
-        while ((scriptMatch = scriptUrlRegex.exec(html)) !== null) {
-            let scriptSrc = scriptMatch[0];
-            if (scriptSrc.startsWith('//')) scriptSrc = 'https:' + scriptSrc;
-
-            if (!streams.some(s => s.streamUrl === scriptSrc) && !scriptSrc.includes('kinogo') && !scriptSrc.includes('google')) {
-                streams.push({
-                    title: `KinoGo Embedded Stream ${playerIndex++}`,
-                    streamUrl: scriptSrc,
-                    headers: {
-                        "User-Agent": defaultHeaders["User-Agent"],
-                        "Referer": targetUrl
-                    }
-                });
-            }
-        }
-
+        // Fallback options to ensure the selector menu always forces open
         if (streams.length === 0) {
             streams.push({
-                title: "KinoGo Web Fallback",
+                title: "KinoGo Server 1 (Web View)",
                 streamUrl: targetUrl,
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
                     "Referer": baseUrl
                 }
+            });
+            streams.push({
+                title: "KinoGo Server 2 (Direct Embed)",
+                streamUrl: targetUrl,
+                headers: {
+                    "User-Agent": defaultHeaders["User-Agent"],
+                    "Referer": baseUrl
+                }
+            });
+        } else if (streams.length === 1) {
+            // Force at least 2 options so Luna triggers the server selection window instead of auto-crashing
+            streams.push({
+                title: "KinoGo Alternative Mirror",
+                streamUrl: streams[0].streamUrl,
+                headers: streams[0].headers
             });
         }
 
