@@ -144,11 +144,11 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Deep Stream Extractor (Unpacks iframes into direct .m3u8/.mp4 links)
+ * 4. Dub & Player Selector Extractor
  */
 async function extractStreamUrl(url) {
     try {
-        let targetUrl = url.split('#')[0]; // Strip anchor tags
+        let targetUrl = url.split('#')[0];
 
         if (targetUrl.includes('do=search')) {
             const queryMatch = targetUrl.match(/story=([^&]+)/);
@@ -164,66 +164,63 @@ async function extractStreamUrl(url) {
         }
         const html = await response.text();
 
-        let iframeUrls = [];
-        const iframeRegex = /<iframe[\s\S]*?src=["']([^"']+)["']/gi;
-        let match;
-
-        while ((match = iframeRegex.exec(html)) !== null) {
-            let iframeSrc = match[1];
-            if (!iframeSrc) continue;
-
-            if (iframeSrc.startsWith('//')) {
-                iframeSrc = 'https:' + iframeSrc;
-            } else if (iframeSrc.startsWith('/')) {
-                iframeSrc = baseUrl + iframeSrc;
-            }
-
-            if (!iframeSrc.includes('facebook') && !iframeSrc.includes('vk.com') && !iframeSrc.includes('telegram')) {
-                iframeUrls.push(iframeSrc);
-            }
-        }
-
         let streams = [];
 
-        // Loop through discovered iframe player pages to find actual video files inside them
-        for (let i = 0; i < iframeUrls.length; i++) {
-            try {
-                const playerRes = await soraFetch(iframeUrls[i], {
+        // Look for translation / dub menu options or data attributes containing alternative player links
+        // KinoGo typically stores alternative player links or translator names in data attributes or translation lists
+        const dataLinkRegex = /data-(?:link|file|src|translate|player)=["']([^"']+)["']/gi;
+        let match;
+        let index = 1;
+
+        while ((match = dataLinkRegex.exec(html)) !== null) {
+            let link = match[1];
+            if (!link) continue;
+
+            if (link.startsWith('//')) link = 'https:' + link;
+            else if (link.startsWith('/')) link = baseUrl + link;
+
+            if (!streams.some(s => s.streamUrl === link)) {
+                streams.push({
+                    title: `Dub / Translation ${index++}`,
+                    streamUrl: link,
                     headers: {
-                        ...defaultHeaders,
-                        'Referer': targetUrl
+                        "User-Agent": defaultHeaders["User-Agent"],
+                        "Referer": targetUrl
                     }
                 });
-                if (!playerRes) continue;
-                const playerHtml = await playerRes.text();
-
-                // Search for .m3u8 or .mp4 files inside the player code
-                const streamMatches = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/gi);
-                if (streamMatches) {
-                    for (let j = 0; j < streamMatches.length; j++) {
-                        streams.push({
-                            title: `KinoGo Player ${i + 1} - Stream ${j + 1}`,
-                            streamUrl: streamMatches[j],
-                            headers: {
-                                "User-Agent": defaultHeaders["User-Agent"],
-                                "Referer": iframeUrls[i]
-                            }
-                        });
-                    }
-                }
-            } catch (err) {
-                // Skip failed player scraping
             }
         }
 
-        // Fallback: If no direct video file was intercepted, pass the iframe player itself
-        if (streams.length === 0 && iframeUrls.length > 0) {
+        // Fallback to standard iframes if no custom data links were captured
+        if (streams.length === 0) {
+            const iframeRegex = /<iframe[\s\S]*?src=["']([^"']+)["']/gi;
+            while ((match = iframeRegex.exec(html)) !== null) {
+                let iframeSrc = match[1];
+                if (!iframeSrc) continue;
+
+                if (iframeSrc.startsWith('//')) iframeSrc = 'https:' + iframeSrc;
+                else if (iframeSrc.startsWith('/')) iframeSrc = baseUrl + iframeSrc;
+
+                if (!iframeSrc.includes('facebook') && !iframeSrc.includes('vk.com')) {
+                    streams.push({
+                        title: `KinoGo Player ${index++}`,
+                        streamUrl: iframeSrc,
+                        headers: {
+                            "User-Agent": defaultHeaders["User-Agent"],
+                            "Referer": targetUrl
+                        }
+                    });
+                }
+            }
+        }
+
+        if (streams.length === 0) {
             streams.push({
                 title: "KinoGo Web Player",
-                streamUrl: iframeUrls[0],
+                streamUrl: targetUrl,
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": targetUrl
+                    "Referer": baseUrl
                 }
             });
         }
