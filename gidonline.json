@@ -5,19 +5,20 @@
     "name": "plodesu",
     "icon": "https://github.com/plodesu.png"
   },
-  "version": "1.0.0",
-  "language": "Russian",
+  "version": "1.0.1",
+  "language": "English",
   "languageType": [
+    "Subbed",
     "Dubbed"
   ],
-  "streamType": "MP4 & HLS",
+  "streamType": "HLS",
   "quality": "1080p",
-  "baseUrl": "https://gidonline.me",
-  "searchBaseUrl": "https://gidonline.me",
+  "baseUrl": "https://vidsrc.me",
+  "searchBaseUrl": "https://vidsrc.me",
   "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/gidonline.js",
   "type": "shows/movies",
   "asyncJS": true,
-  "softsub": false,
+  "softsub": true,
   "downloadSupport": true,
   "supportsSora": true,
   "supportsLuna": true
