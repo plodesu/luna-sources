@@ -1,22 +1,30 @@
 class Source {
     constructor() {
-        this.baseUrl = "https://vidsrc.me";
+        this.baseUrl = "https://gidonline.me";
     }
 
     async search(query) {
         try {
-            // Fetch search results via public API to bypass Cloudflare blocks
-            const res = await fetch(`https://vidsrc.tmdbvids.com/search?q=${encodeURIComponent(query)}`);
-            if (!res.ok) return [];
-            
-            const data = await res.json();
-            if (!data || !data.results) return [];
+            const url = `${this.baseUrl}/?s=${encodeURIComponent(query)}`;
+            const response = await fetch(url);
+            if (!response.ok) return [];
 
-            return data.results.map(item => ({
-                title: item.title || item.name || query,
-                href: `${this.baseUrl}/embed/movie/${item.id}`,
-                image: item.poster_path ? `https://image.tmdb.org/t50/w500${item.poster_path}` : ""
-            }));
+            const html = await response.text();
+            const results = [];
+            const regex = /<a class="mains" href="(.*?)">[\s\S]*?<img src="(.*?)" alt="(.*?)"/g;
+            let match;
+
+            while ((match = regex.exec(html)) !== null) {
+                let img = match[2];
+                if (img && !img.startsWith("http")) img = `${this.baseUrl}${img}`;
+
+                results.push({
+                    title: match[3].trim(),
+                    href: match[1],
+                    image: img
+                });
+            }
+            return results;
         } catch (e) {
             return [];
         }
@@ -27,7 +35,14 @@ class Source {
     }
 
     async getDetails(url) {
-        return {};
+        try {
+            const res = await fetch(url);
+            const html = await res.text();
+            const iframe = html.match(/<iframe class="ifram" src="(.*?)"/);
+            return { streamUrl: iframe ? iframe[1] : "" };
+        } catch (e) {
+            return {};
+        }
     }
 
     async getStream(url) {
