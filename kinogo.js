@@ -1,5 +1,4 @@
 const defaultHeaders = {
-    'User-Player-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://kinogomy.net/'
 };
@@ -145,7 +144,7 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Advanced Tab & Player Extractor for Series & Movies
+ * 4. WebView Stream Extractor
  */
 async function extractStreamUrl(url) {
     try {
@@ -165,7 +164,7 @@ async function extractStreamUrl(url) {
         const html = await response.text();
         let streams = [];
 
-        // Scrape active data-src attributes from player tabs
+        // Scrape tab data sources
         const tabRegex = /<li[^>]+data-src=["']([^"']+)["'][^>]*>([^<]+)<\/li>/gi;
         let match;
 
@@ -177,17 +176,17 @@ async function extractStreamUrl(url) {
             if (src.startsWith('//')) src = 'https:' + src;
 
             streams.push({
-                title: `KinoGo - ${title}`,
+                title: `Player: ${title}`,
                 streamUrl: src,
+                type: 'hls', // Tells Luna to handle it as an embedded stream frame view
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
-                    "Referer": cleanUrl,
-                    "Origin": "https://kinogomy.net"
+                    "Referer": cleanUrl
                 }
             });
         }
 
-        // Fallback to iframes if no tab entries are matched
+        // Fallback to iframe src if tabs fail
         if (streams.length === 0) {
             const iframeMatch = html.match(/id="iframesrc"[^>]+src=["']([^"']+)["']/i) || html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
             if (iframeMatch) {
@@ -195,22 +194,23 @@ async function extractStreamUrl(url) {
                 if (src.startsWith('//')) src = 'https:' + src;
                 
                 streams.push({
-                    title: "KinoGo Default Player",
+                    title: "Player: Standard Embed",
                     streamUrl: src,
+                    type: 'hls',
                     headers: {
                         "User-Agent": defaultHeaders["User-Agent"],
-                        "Referer": cleanUrl,
-                        "Origin": "https://kinogomy.net"
+                        "Referer": cleanUrl
                     }
                 });
             }
         }
 
-        // Final safe fallback so it never triggers a stream error crash
+        // Final fallback to the webpage itself
         if (streams.length === 0) {
             streams.push({
-                title: "KinoGo Web Fallback",
+                title: "Player: Web View",
                 streamUrl: cleanUrl,
+                type: 'hls',
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
                     "Referer": baseUrl
