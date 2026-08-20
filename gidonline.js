@@ -5,25 +5,34 @@ class Source {
 
     async search(query) {
         try {
-            const url = `${this.baseUrl}/?s=${encodeURIComponent(query)}`;
-            const response = await fetch(url);
-            if (!response.ok) return [];
+            // Using a CORS proxy to bypass Cloudflare blockages
+            const targetUrl = encodeURIComponent(`${this.baseUrl}/?s=${encodeURIComponent(query)}`);
+            const proxyUrl = `https://api.allorigins.win/get?url=${targetUrl}`;
 
-            const html = await response.text();
+            const res = await fetch(proxyUrl);
+            if (!res.ok) return [];
+
+            const data = await res.json();
+            const html = data.contents;
+            if (!html) return [];
+
             const results = [];
             const regex = /<a class="mains" href="(.*?)">[\s\S]*?<img src="(.*?)" alt="(.*?)"/g;
             let match;
 
             while ((match = regex.exec(html)) !== null) {
-                let img = match[2];
-                if (img && !img.startsWith("http")) img = `${this.baseUrl}${img}`;
+                let imgUrl = match[2];
+                if (imgUrl && !imgUrl.startsWith("http")) {
+                    imgUrl = `${this.baseUrl}${imgUrl}`;
+                }
 
                 results.push({
                     title: match[3].trim(),
                     href: match[1],
-                    image: img
+                    image: imgUrl
                 });
             }
+
             return results;
         } catch (e) {
             return [];
@@ -35,14 +44,7 @@ class Source {
     }
 
     async getDetails(url) {
-        try {
-            const res = await fetch(url);
-            const html = await res.text();
-            const iframe = html.match(/<iframe class="ifram" src="(.*?)"/);
-            return { streamUrl: iframe ? iframe[1] : "" };
-        } catch (e) {
-            return {};
-        }
+        return {};
     }
 
     async getStream(url) {
