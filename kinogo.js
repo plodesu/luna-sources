@@ -5,10 +5,19 @@ const defaultHeaders = {
 
 const baseUrl = 'https://kinogo.inc';
 
+/**
+ * Luna search entrypoint
+ */
 async function searchResults(keyword) {
     const results = [];
     try {
-        const postData = `do=search&subaction=search&story=${encodeURIComponent(keyword)}`;
+        // Strip episode and season indicators to improve search matches
+        let cleanQuery = keyword
+            .replace(/Episode\s*\d+/gi, '')
+            .replace(/Season\s*\d+/gi, '')
+            .trim();
+
+        const postData = `do=search&subaction=search&story=${encodeURIComponent(cleanQuery)}`;
         const headers = {
             ...defaultHeaders,
             'Content-Type': 'application/x-www-form-urlencoded'
@@ -39,14 +48,13 @@ async function searchResults(keyword) {
 
         return JSON.stringify(results);
     } catch (err) {
-        return JSON.stringify([{
-            title: "Error",
-            image: "Error",
-            href: "Error"
-        }]);
+        return JSON.stringify([]);
     }
 }
 
+/**
+ * Extracts description, aliases, and year metadata
+ */
 async function extractDetails(url) {
     try {
         const response = await fetchv2(url, defaultHeaders);
@@ -76,6 +84,9 @@ async function extractDetails(url) {
     }
 }
 
+/**
+ * Extracts iframe embedded links
+ */
 async function extractEpisodes(url) {
     try {
         const response = await fetchv2(url, defaultHeaders);
@@ -106,6 +117,9 @@ async function extractEpisodes(url) {
     }
 }
 
+/**
+ * Extracts direct stream URLs from the player iframe
+ */
 async function extractStreamUrl(url) {
     try {
         let embedUrl = getQueryParam(url, "embed");
@@ -174,6 +188,8 @@ async function extractStreamUrl(url) {
         });
     }
 }
+
+/* Helper Utility Functions */
 
 function decodeHtmlEntities(str) {
     return str
