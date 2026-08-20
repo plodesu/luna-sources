@@ -144,7 +144,7 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Dub & Player Selector Extractor
+ * 4. Stream Extractor (Targeting Real Video Players)
  */
 async function extractStreamUrl(url) {
     try {
@@ -165,24 +165,23 @@ async function extractStreamUrl(url) {
         const html = await response.text();
 
         let streams = [];
+        let playerIndex = 1;
 
-        // Look for translation / dub menu options or data attributes containing alternative player links
-        // KinoGo typically stores alternative player links or translator names in data attributes or translation lists
-        const dataLinkRegex = /data-(?:link|file|src|translate|player)=["']([^"']+)["']/gi;
+        // 1. Extract valid iframe embed sources from the video container
+        const iframeRegex = /<iframe[^>]+src=["']([^"']+)["']/gi;
         let match;
-        let index = 1;
+        while ((match = iframeRegex.exec(html)) !== null) {
+            let src = match[1];
+            if (!src) continue;
 
-        while ((match = dataLinkRegex.exec(html)) !== null) {
-            let link = match[1];
-            if (!link) continue;
+            if (src.startsWith('//')) src = 'https:' + src;
+            else if (src.startsWith('/')) src = baseUrl + src;
 
-            if (link.startsWith('//')) link = 'https:' + link;
-            else if (link.startsWith('/')) link = baseUrl + link;
-
-            if (!streams.some(s => s.streamUrl === link)) {
+            // Filter out social widgets and ads, keep actual video player domains
+            if (!src.includes('facebook') && !src.includes('vk.com') && !src.includes('telegram') && !src.includes('advert')) {
                 streams.push({
-                    title: `Dub / Translation ${index++}`,
-                    streamUrl: link,
+                    title: `KinoGo Player Source ${playerIndex++}`,
+                    streamUrl: src,
                     headers: {
                         "User-Agent": defaultHeaders["User-Agent"],
                         "Referer": targetUrl
@@ -191,32 +190,28 @@ async function extractStreamUrl(url) {
             }
         }
 
-        // Fallback to standard iframes if no custom data links were captured
-        if (streams.length === 0) {
-            const iframeRegex = /<iframe[\s\S]*?src=["']([^"']+)["']/gi;
-            while ((match = iframeRegex.exec(html)) !== null) {
-                let iframeSrc = match[1];
-                if (!iframeSrc) continue;
+        // 2. Fallback check for embedded player URLs in script tags (e.g. collaps, hdvb, voidboost)
+        const scriptUrlRegex = /(https?:)?\/\/[^\s"'<>]+\/(?:embed|video|serial|movie)\/[^\s"'<>]+/gi;
+        let scriptMatch;
+        while ((scriptMatch = scriptUrlRegex.exec(html)) !== null) {
+            let scriptSrc = scriptMatch[0];
+            if (scriptSrc.startsWith('//')) scriptSrc = 'https:' + scriptSrc;
 
-                if (iframeSrc.startsWith('//')) iframeSrc = 'https:' + iframeSrc;
-                else if (iframeSrc.startsWith('/')) iframeSrc = baseUrl + iframeSrc;
-
-                if (!iframeSrc.includes('facebook') && !iframeSrc.includes('vk.com')) {
-                    streams.push({
-                        title: `KinoGo Player ${index++}`,
-                        streamUrl: iframeSrc,
-                        headers: {
-                            "User-Agent": defaultHeaders["User-Agent"],
-                            "Referer": targetUrl
-                        }
-                    });
-                }
+            if (!streams.some(s => s.streamUrl === scriptSrc) && !scriptSrc.includes('kinogo') && !scriptSrc.includes('google')) {
+                streams.push({
+                    title: `KinoGo Embedded Stream ${playerIndex++}`,
+                    streamUrl: scriptSrc,
+                    headers: {
+                        "User-Agent": defaultHeaders["User-Agent"],
+                        "Referer": targetUrl
+                    }
+                });
             }
         }
 
         if (streams.length === 0) {
             streams.push({
-                title: "KinoGo Web Player",
+                title: "KinoGo Web Fallback",
                 streamUrl: targetUrl,
                 headers: {
                     "User-Agent": defaultHeaders["User-Agent"],
