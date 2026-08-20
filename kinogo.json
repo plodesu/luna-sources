@@ -1,6 +1,6 @@
 {
-  "sourceName": "Kinogo",
-  "iconUrl": "https://kinogo.online/favicon.ico",
+  "sourceName": "KinoGo",
+  "iconUrl": "https://kinogo.inc/favicon.ico",
   "author": {
     "name": "plodesu",
     "icon": "https://github.com/plodesu.png"
@@ -12,10 +12,10 @@
   ],
   "streamType": "MP4 & HLS",
   "quality": "1080p",
-  "baseUrl": "https://kinogo.online",
-  "searchBaseUrl": "https://kinogo.online",
+  "baseUrl": "https://kinogo.inc",
+  "searchBaseUrl": "https://kinogo.inc",
   "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/kinogo.js",
-  "type": "shows/movies",
+  "type": "movies/shows",
   "asyncJS": true,
   "softsub": false,
   "downloadSupport": true,
