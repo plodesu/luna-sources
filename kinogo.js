@@ -4,28 +4,42 @@ const defaultHeaders = {
 };
 
 const baseUrl = 'https://kinogomy.net';
-const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
 
 async function searchResults(keyword) {
+    const results = [];
     try {
-        const clean = keyword.replace(/Episode\s*\d+/gi, '').replace(/Season\s*\d+/gi, '').trim();
-        const tmdbUrl = `https://api.themoviedb.org/3/search/multi?api_key=${tmdbApiKey}&query=${encodeURIComponent(clean)}&language=ru-RU&include_adult=false`;
-        
-        const response = await fetchv2(tmdbUrl, defaultHeaders);
-        const data = await response.json();
+        // Use GET search (same style as HDRezka)
+        const url = `${baseUrl}/index.php?do=search&subaction=search&story=${encodeURIComponent(keyword)}`;
+        const response = await fetchv2(url, defaultHeaders);
+        const html = await response.text();
 
-        const results = (data.results || []).map(item => {
-            const title = item.title || item.name || item.original_title || item.original_name || 'Untitled';
-            const isMovie = item.media_type === 'movie' || !!item.title;
+        // Parse current site structure
+        const parts = html.split('class="shortstory"');
+        for (let i = 1; i < parts.length; i++) {
+            const part = parts[i];
 
-            return {
-                title: title,
-                image: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : '',
-                href: isMovie 
-                    ? `movie/${item.id}/${encodeURIComponent(title)}` 
-                    : `tv/${item.id}/${encodeURIComponent(title)}`
-            };
-        });
+            const linkMatch = part.match(/<h2 class="zagolovki">\s*<a href="([^"]+)">\s*<span[^>]*>([^<]+)<\/span>/i) ||
+                              part.match(/<a href="(https?:\/\/kinogomy\.net\/[^"]+\.html)"[^>]*>\s*<span[^>]*>([^<]+)<\/span>/i);
+
+            const imgMatch = part.match(/data-src="(\/uploads\/posts\/[^"]+)"/i) ||
+                             part.match(/src="(\/uploads\/posts\/[^"]+)"/i);
+
+            if (linkMatch) {
+                let href = linkMatch[1];
+                let title = linkMatch[2].replace(/\s+/g, ' ').trim();
+                let image = '';
+
+                if (imgMatch) {
+                    image = imgMatch[1].startsWith('http') ? imgMatch[1] : baseUrl + imgMatch[1];
+                }
+
+                results.push({
+                    title: title,
+                    image: image,
+                    href: href
+                });
+            }
+        }
 
         return JSON.stringify(results);
     } catch (err) {
@@ -35,135 +49,88 @@ async function searchResults(keyword) {
 
 async function extractDetails(url) {
     try {
-        const parts = url.split('/');
-        const type = parts[0];
-        const id = parts[1];
+        const response = await fetchv2(url, defaultHeaders);
+        const html = await response.text();
 
-        const tmdbUrl = `https://api.themoviedb.org/3/${type === 'movie' ? 'movie' : 'tv'}/${id}?api_key=${tmdbApiKey}&language=ru-RU`;
-        const response = await fetchv2(tmdbUrl, defaultHeaders);
-        const data = await response.json();
+        let description = 'Описание отсутствует.';
+        const descMatch = html.match(/<div class="full-text"[^>]*>([\s\S]*?)<\/div>/i);
+        if (descMatch) {
+            description = descMatch[1]
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .substring(0, 500);
+        }
+
+        let year = 'N/A';
+        const yearMatch = html.match(/(?:Год|year)[^0-9]{0,30}(\d{4})/i);
+        if (yearMatch) year = yearMatch[1];
 
         return JSON.stringify([{
-            description: data.overview || 'Описание отсутствует.',
-            aliases: data.original_title || data.original_name || 'N/A',
-            airdate: data.release_date || data.first_air_date || 'N/A'
+            description: description,
+            aliases: 'N/A',
+            airdate: year
         }]);
     } catch (err) {
-        return JSON.stringify([{ description: 'Error', aliases: 'Error', airdate: 'Error' }]);
-    }
-}
-
-async function resolveKinoGoPage(ruTitle) {
-    try {
-        const body = `do=search&subaction=search&story=${encodeURIComponent(ruTitle)}`;
-        const response = await fetchv2(`${baseUrl}/index.php?do=search`, {
-            ...defaultHeaders,
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }, 'POST', body);
-
-        const html = await response.text();
-        const match = html.match(/<h2 class="zagolovki">\s*<a href="([^"]+)">/i) ||
-                      html.match(/href="(https?:\/\/kinogomy\.net\/[^"]+\.html)"/i);
-        return match ? match[1] : null;
-    } catch (e) {
-        return null;
+        return JSON.stringify([{
+            description: 'Error',
+            aliases: 'Error',
+            airdate: 'Error'
+        }]);
     }
 }
 
 async function extractEpisodes(url) {
-    try {
-        const parts = url.split('/');
-        const type = parts[0];
-        const id = parts[1];
-        const ruTitle = decodeURIComponent(parts[2] || '');
-
-        const realPage = await resolveKinoGoPage(ruTitle);
-        const target = realPage || `${baseUrl}/index.php?do=search&story=${encodeURIComponent(ruTitle)}`;
-
-        if (type === 'movie') {
-            return JSON.stringify([{
-                href: target,
-                number: 1,
-                title: 'Фильм'
-            }]);
-        }
-
-        const response = await fetchv2(`https://api.themoviedb.org/3/tv/${id}?api_key=${tmdbApiKey}&language=ru-RU`, defaultHeaders);
-        const data = await response.json();
-
-        const episodes = [];
-        if (data.seasons) {
-            for (const season of data.seasons) {
-                if (season.season_number === 0) continue;
-                for (let ep = 1; ep <= (season.episode_count || 0); ep++) {
-                    episodes.push({
-                        href: `${target}#s${season.season_number}e${ep}`,
-                        number: ep,
-                        season: season.season_number,
-                        title: `S${season.season_number}E${ep}`
-                    });
-                }
-            }
-        }
-
-        if (episodes.length === 0) {
-            episodes.push({ href: target, number: 1, title: 'Смотреть' });
-        }
-
-        return JSON.stringify(episodes);
-    } catch (err) {
-        return JSON.stringify([{ href: url, number: 1, title: 'Смотреть' }]);
-    }
+    // For both movies and series just return the page
+    return JSON.stringify([{
+        href: url,
+        number: 1,
+        title: 'Смотреть'
+    }]);
 }
 
 async function extractStreamUrl(url) {
     try {
-        let cleanUrl = url.split('#')[0];
-        const hashMatch = url.match(/#(s\d+e\d+)/i);
-        const seasonEpisode = hashMatch ? hashMatch[1] : '';
-
-        if (cleanUrl.includes('do=search')) {
-            const q = cleanUrl.match(/story=([^&]+)/);
-            if (q) {
-                const resolved = await resolveKinoGoPage(decodeURIComponent(q[1]));
-                if (resolved) cleanUrl = resolved;
-            }
-        }
-
-        const response = await fetchv2(cleanUrl, defaultHeaders);
+        const response = await fetchv2(url, defaultHeaders);
         const html = await response.text();
         const streams = [];
 
+        // Current players use data-src
         const tabRegex = /data-src=["']([^"']+)["'][^>]*>([^<]*)</gi;
         let match;
         while ((match = tabRegex.exec(html)) !== null) {
             let src = match[1].replace(/&amp;/g, '&');
             let title = (match[2] || 'Player').trim();
 
-            if (/трейлер|trailer|youtube/i.test(title) || /youtube\.com/i.test(src)) continue;
+            if (/трейлер|trailer|youtube/i.test(title) || /youtube\.com|youtu\.be/i.test(src)) continue;
             if (src.startsWith('//')) src = 'https:' + src;
-
-            if (seasonEpisode && !src.includes('#')) {
-                src += '#' + seasonEpisode;
-            }
+            if (!src.startsWith('http')) continue;
 
             streams.push({
                 title: 'KinoGo – ' + title,
                 streamUrl: src,
-                headers: defaultHeaders
+                headers: {
+                    'User-Agent': defaultHeaders['User-Agent'],
+                    'Referer': url
+                }
             });
         }
 
+        // Fallback iframe
         if (streams.length === 0) {
             const iframe = html.match(/id=["']iframesrc["'][^>]+src=["']([^"']+)["']/i) ||
                            html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
             if (iframe) {
                 let src = iframe[1].replace(/&amp;/g, '&');
                 if (src.startsWith('//')) src = 'https:' + src;
+
                 streams.push({
                     title: 'KinoGo Default',
                     streamUrl: src,
-                    headers: defaultHeaders
+                    headers: {
+                        'User-Agent': defaultHeaders['User-Agent'],
+                        'Referer': url
+                    }
                 });
             }
         }
