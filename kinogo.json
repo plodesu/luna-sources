@@ -1,0 +1,25 @@
+[
+  {
+    "id": "com.module.kinogo",
+    "name": "Kinogo Online",
+    "version": "1.0.0",
+    "baseUrl": "https://kinogo.online",
+    "icon": "https://kinogo.online/favicon.ico",
+    "search": {
+      "url": "https://kinogo.online/index.php?do=search&subaction=search&story=%s",
+      "method": "POST",
+      "selector": "div.shortstory",
+      "title": "div.shortstorytitle h2 a",
+      "href": "div.shortstorytitle h2 a@href",
+      "image": "div.shortstorytitle div.poster img@src"
+    },
+    "details": {
+      "title": "h1#news-title",
+      "description": "div.fullstory-content",
+      "image": "div.fullstory-poster img@src"
+    },
+    "stream": {
+      "selector": "iframe#video-player@src, div.player-box iframe@src, iframe@src"
+    }
+  }
+]
