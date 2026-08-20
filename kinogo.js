@@ -154,7 +154,7 @@ async function extractStreamUrl(url) {
             }
         }
 
-        // 2. Check Data Attributes / Alternate Player Tabs (data-src, data-player, data-file)
+        // 2. Check Data Attributes / Alternate Player Tabs
         const dataRegex = /data-(?:src|player|file|link)\s*=\s*["']([^"']+)["']/gi;
         let dataMatch;
         let count = 2;
@@ -165,7 +165,7 @@ async function extractStreamUrl(url) {
             }
         }
 
-        // 3. Check JS Embedded Variables (Collaps, HDRezka, Alloha, Voidboost, etc.)
+        // 3. Check JS Embedded Variables
         const jsUrlRegex = /(?:https?:)?\/\/[^\s"'<>]+\/(?:embed|player|v|vod)\/[^\s"'<>]+/gi;
         let jsMatch;
         while ((jsMatch = jsUrlRegex.exec(html)) !== null) {
@@ -179,13 +179,11 @@ async function extractStreamUrl(url) {
             return JSON.stringify({ streams: [], subtitle: "" });
         }
 
-        // Extract playable streams from all discovered players concurrently
         const streamResults = await Promise.all(playerUrls.map(async (player) => {
             try {
                 const playerRes = await fetchv2(player.url, { ...defaultHeaders, 'Referer': targetUrl });
                 const playerHtml = await playerRes.text();
 
-                // Direct video formats (.m3u8 or .mp4)
                 const streamMatches = playerHtml.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/gi);
                 if (streamMatches) {
                     return streamMatches.map((s, idx) => ({
@@ -198,7 +196,6 @@ async function extractStreamUrl(url) {
                     }));
                 }
 
-                // Fallback: Web player embed link
                 return [{
                     title: `KinoGo [${player.name}] Web Stream`,
                     streamUrl: player.url,
