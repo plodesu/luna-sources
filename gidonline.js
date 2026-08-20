@@ -16,6 +16,7 @@ class Source {
             const html = await response.text();
             const results = [];
 
+            // Pattern targeting GidOnline search listing entries
             const regex = /<a class="mains" href="(.*?)">[\s\S]*?<img src="(.*?)" alt="(.*?)"/g;
             let match;
 
@@ -27,32 +28,23 @@ class Source {
 
                 results.push({
                     title: match[3].trim(),
-                    url: match[1],
+                    href: match[1], // Luna uses 'href' for post links
                     image: imgUrl
                 });
             }
 
             return results;
         } catch (e) {
-            console.error("GidOnline search error:", e);
             return [];
         }
     }
 
+    async searchResults(query) {
+        return await this.search(query);
+    }
+
     async getDetails(url) {
-        try {
-            const response = await fetch(url);
-            const html = await response.text();
-
-            const iframeMatch = html.match(/<iframe class="ifram" src="(.*?)"/);
-            const streamUrl = iframeMatch ? iframeMatch[1] : null;
-
-            return {
-                streamUrl: streamUrl
-            };
-        } catch (e) {
-            return {};
-        }
+        return {};
     }
 
     async getStream(url) {
