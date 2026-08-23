@@ -1,0 +1,25 @@
+{
+    "sourceName": "Cloud Relay Provider",
+    "iconUrl": "https://raw.githubusercontent.com/tomb/tomb/main/icon.png",
+    "author": {
+        "name": "plodesu",
+        "icon": "https://github.com/plodesu.png"
+    },
+    "version": "1.0.0",
+    "language": "Multi",
+    "languageType": [
+        "Dubbed",
+        "Subbed"
+    ],
+    "streamType": "HLS",
+    "quality": "1080p",
+    "baseUrl": "https://api.themoviedb.org",
+    "searchBaseUrl": "https://api.themoviedb.org/3/search/multi",
+    "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/script.js",
+    "type": "movies/shows",
+    "asyncJS": true,
+    "softsub": false,
+    "downloadSupport": true,
+    "supportsLuna": true,
+    "supportsSora": true
+}
