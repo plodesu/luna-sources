@@ -1,0 +1,13 @@
+{
+  "name": "VideoCDN",
+  "author": "User",
+  "version": "1.0.0",
+  "language": "Russian",
+  "type": "movies/shows",
+  "quality": "1080p",
+  "stream": "HLS",
+  "async": true,
+  "baseUrl": "https://videocdn.tv/",
+  "searchUrl": "https://api.themoviedb.org/3/search/multi?query=%s",
+  "scriptUrl": "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO/main/videocdn.js"
+}
