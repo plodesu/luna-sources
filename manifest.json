@@ -1,12 +1,12 @@
 {
-    "sourceName": "Cloud Relay Provider",
+    "sourceName": "Russian Multi-Source Hub",
     "iconUrl": "https://raw.githubusercontent.com/tomb/tomb/main/icon.png",
     "author": {
         "name": "plodesu",
         "icon": "https://github.com/plodesu.png"
     },
     "version": "1.0.0",
-    "language": "Multi",
+    "language": "Russian",
     "languageType": [
         "Dubbed",
         "Subbed"
@@ -19,7 +19,7 @@
     "type": "movies/shows",
     "asyncJS": true,
     "softsub": false,
-    "downloadSupport": true,
+    "downloadSupport": false,
     "supportsLuna": true,
     "supportsSora": true
 }
