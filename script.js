@@ -1,26 +1,21 @@
 const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
 
-const defaultHeaders = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
-};
-
 async function searchResults(keyword) {
     try {
         const cleanQuery = keyword.replace(/Episode\s*\d+/gi, '').replace(/Season\s*\d+/gi, '').trim();
-        const tmdbUrl = `https://api.themoviedb.org/3/search/multi?api_key=${tmdbApiKey}&query=${encodeURIComponent(cleanQuery)}&include_adult=false`;
+        const proxyUrl = `https://post-eosin.vercel.app/api/proxy?url=${encodeURIComponent(`https://api.themoviedb.org/3/search/multi?api_key=${tmdbApiKey}&query=${encodeURIComponent(cleanQuery)}&language=ru-RU&include_adult=false`)}&simple=true`;
         
-        const response = await soraFetch(tmdbUrl);
+        const response = await soraFetch(proxyUrl);
         if (!response) return JSON.stringify([]);
         const data = await response.json();
 
-        const results = (data.results || []).map(function(item) {
+        const results = (data.results || []).map(item => {
             const title = item.title || item.name || item.original_title || 'Untitled';
             const isMovie = item.media_type === 'movie' || item.title;
-
             return {
                 title: title,
                 image: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : '',
-                href: isMovie ? `movie/${item.id}` : `tv/${item.id}`
+                href: isMovie ? `movie/${item.id}` : `tv/${item.id}/1/1`
             };
         });
 
@@ -35,14 +30,14 @@ async function extractDetails(url) {
         const parts = url.split('/');
         const type = parts[0];
         const id = parts[1];
-
-        const tmdbUrl = `https://api.themoviedb.org/3/${type === 'movie' ? 'movie' : 'tv'}/${id}?api_key=${tmdbApiKey}`;
-        const response = await soraFetch(tmdbUrl);
-        if (!response) return JSON.stringify([{ description: 'N/A', aliases: 'N/A', airdate: 'N/A' }]);
+        const proxyUrl = `https://post-eosin.vercel.app/api/proxy?url=${encodeURIComponent(`https://api.themoviedb.org/3/${type}/${id}?api_key=${tmdbApiKey}&language=ru-RU`)}&simple=true`;
+        
+        const response = await soraFetch(proxyUrl);
+        if (!response) return JSON.stringify([{ description: 'Описание отсутствует.', aliases: 'N/A', airdate: 'N/A' }]);
         
         const data = await response.json();
         return JSON.stringify([{
-            description: data.overview || 'No description available.',
+            description: data.overview || 'Описание отсутствует.',
             aliases: data.original_title || data.original_name || 'N/A',
             airdate: data.release_date || data.first_air_date || 'N/A'
         }]);
@@ -58,96 +53,113 @@ async function extractEpisodes(url) {
         const id = parts[1];
 
         if (type === 'movie') {
-            return JSON.stringify([{
-                href: `movie/${id}`,
-                number: 1,
-                title: 'Movie'
-            }]);
+            return JSON.stringify([{ href: `movie/${id}`, number: 1, title: 'Полный фильм (Russian Dub)' }]);
         }
 
-        const response = await soraFetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${tmdbApiKey}`);
-        if (!response) return JSON.stringify([{ href: url, number: 1, title: 'Episode 1' }]);
+        const proxyUrl = `https://post-eosin.vercel.app/api/proxy?url=${encodeURIComponent(`https://api.themoviedb.org/3/tv/${id}?api_key=${tmdbApiKey}&language=ru-RU`)}&simple=true`;
+        const response = await soraFetch(proxyUrl);
+        if (!response) return JSON.stringify([{ href: url, number: 1, title: 'Серия 1' }]);
         
         const data = await response.json();
         let allEpisodes = [];
         
-        if (data.seasons && data.seasons.length) {
-            for (let i = 0; i < data.seasons.length; i++) {
-                const season = data.seasons[i];
+        if (data.seasons) {
+            for (const season of data.seasons) {
                 if (season.season_number === 0) continue;
                 for (let ep = 1; ep <= season.episode_count; ep++) {
                     allEpisodes.push({
                         href: `tv/${id}/${season.season_number}/${ep}`,
                         number: ep,
                         season: season.season_number,
-                        title: `Season ${season.season_number} Episode ${ep}`
+                        title: `Сезон ${season.season_number} Серия ${ep}`
                     });
                 }
             }
         }
-
-        if (allEpisodes.length === 0) {
-            allEpisodes.push({ href: url, number: 1, title: 'Full Show' });
-        }
-
-        return JSON.stringify(allEpisodes);
+        return JSON.stringify(allEpisodes.length ? allEpisodes : [{ href: url, number: 1, title: 'Full Show' }]);
     } catch (err) {
         return JSON.stringify([{ href: url, number: 1, title: 'Full Show' }]);
     }
 }
 
-async function extractStreamUrl(url) {
+async function extractStreamUrl(ID) {
     try {
-        const parts = url.split('/');
-        const type = parts[0];
-        const tmdbId = parts[1];
-        const season = parts[2] || 1;
-        const episode = parts[3] || 1;
+        let isMovie = ID.includes('movie');
+        let tmdbID, season = 1, episode = 1;
 
-        let streams = [];
-
-        // Attempt 1: Fetch Direct HLS from MultiEmbed
-        try {
-            const embedUrl = type === 'movie' 
-                ? `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1`
-                : `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episode}`;
-            
-            const res = await soraFetch(embedUrl);
-            if (res) {
-                const text = await res.text();
-                const matches = text.match(/(https?:\/\/[^\s"'`<>]+?\.(?:m3u8|mp4)[^\s"'`<>]*)/gi) || [];
-                if (matches.length > 0) {
-                    streams.push({
-                        title: "[AutoEmbed] 🇺🇸 HD",
-                        streamUrl: matches[0].replace(/\\/g, "")
-                    });
-                }
-            }
-        } catch (e) {
-            // Ignore and move to backups
+        if (isMovie) {
+            tmdbID = ID.replace('movie/', '').replace('/', '');
+        } else {
+            const parts = ID.split('/');
+            tmdbID = parts[1];
+            season = parts[2] || 1;
+            episode = parts[3] || 1;
         }
 
-        // --- BACKUP TEST STREAMS (To force the Server Menu to appear) ---
-        streams.push({
-            title: "[Test Server] 🇺🇸 1080p",
-            streamUrl: "http://sample.vodobox.net/skate_phantom_flex_4k/skate_phantom_flex_4k.m3u8"
+        let streamObjects = [];
+
+        // Query Kinobox API via proxy to aggregate Russian translation players (Kodik, Collaps, etc.)
+        const kinoboxApi = `https://kinobox.tv/api/players?tmdb=${tmdbID}`;
+        const res = await soraFetch(kinoboxApi, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://kinobox.tv/"
+            }
         });
 
-        streams.push({
-            title: "[Test Server] 🇺🇸 720p",
-            streamUrl: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
-        });
+        if (res) {
+            const players = await res.json();
+            if (Array.isArray(players)) {
+                for (const player of players) {
+                    if (!player.iframeUrl) continue;
+                    let iframeUrl = player.iframeUrl.startsWith("//") ? "https:" + player.iframeUrl : player.iframeUrl;
 
-        return JSON.stringify({ streams: streams, subtitles: "" });
-    } catch (err) {
+                    if (!isMovie) {
+                        iframeUrl += (iframeUrl.includes("?") ? "&" : "?") + `season=${season}&episode=${episode}`;
+                    }
+
+                    // Scrape the iframe source for raw .m3u8 links
+                    const iframeRes = await soraFetch(iframeUrl, {
+                        headers: { "Referer": "https://kinobox.tv/" }
+                    });
+
+                    if (iframeRes) {
+                        const html = await iframeRes.text();
+                        const matches = html.match(/(https?:\/\/[^\s"'`<>]+?\.m3u8[^\s"'`<>]*)/gi) || [];
+                        
+                        for (const rawUrl of matches) {
+                            const cleanUrl = rawUrl.replace(/\\/g, "");
+                            const sourceName = player.source ? player.source.toUpperCase() : "RU Server";
+                            
+                            if (!streamObjects.some(s => s.streamUrl === cleanUrl)) {
+                                streamObjects.push({
+                                    title: `[${sourceName}] 🇷🇺 Russian Dub`,
+                                    streamUrl: cleanUrl,
+                                    headers: {
+                                        "User-Agent": "Mozilla/5.0",
+                                        "Referer": iframeUrl
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return JSON.stringify({ streams: streamObjects, subtitles: "" });
+    } catch (error) {
         return JSON.stringify({ streams: [], subtitles: "" });
     }
 }
 
-async function soraFetch(url, options) {
-    const opts = options || {};
+async function soraFetch(url, options = { headers: {}, method: 'GET', body: null }) {
+    const headers = options.headers || {};
+    if (!headers["User-Agent"]) {
+        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    }
     try {
-        let res = await fetchv2(url, opts.headers || defaultHeaders, opts.method || 'GET', opts.body || null);
+        let res = await fetchv2(url, headers, options.method || 'GET', options.body || null);
         let textRes = res;
         if (res && typeof res.text === 'function') {
             textRes = await res.text();
@@ -160,7 +172,7 @@ async function soraFetch(url, options) {
         };
     } catch (e) {
         try {
-            const res = await fetch(url, { headers: opts.headers || defaultHeaders, method: opts.method || 'GET' });
+            const res = await fetch(url, options);
             const text = await res.text();
             return {
                 text: async () => text,
