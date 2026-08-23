@@ -1,13 +1,9 @@
+const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
+
 const defaultHeaders = {
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 };
 
-const workerUrl = 'https://ru-cinema-relay.justalihan095.workers.dev';
-const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
-
-/**
- * 1. TMDB Search (Movies & TV Shows)
- */
 async function searchResults(keyword) {
     try {
         const cleanQuery = keyword.replace(/Episode\s*\d+/gi, '').replace(/Season\s*\d+/gi, '').trim();
@@ -18,7 +14,7 @@ async function searchResults(keyword) {
         const data = await response.json();
 
         const results = (data.results || []).map(function(item) {
-            const title = item.title || item.name || item.original_title || item.original_name || 'Untitled';
+            const title = item.title || item.name || item.original_title || 'Untitled';
             const isMovie = item.media_type === 'movie' || item.title;
 
             return {
@@ -34,9 +30,6 @@ async function searchResults(keyword) {
     }
 }
 
-/**
- * 2. Detailed Metadata Extraction
- */
 async function extractDetails(url) {
     try {
         const parts = url.split('/');
@@ -58,9 +51,6 @@ async function extractDetails(url) {
     }
 }
 
-/**
- * 3. Episode & Season Builder
- */
 async function extractEpisodes(url) {
     try {
         const parts = url.split('/');
@@ -106,9 +96,6 @@ async function extractEpisodes(url) {
     }
 }
 
-/**
- * 4. Fetch Streams from Cloudflare Worker
- */
 async function extractStreamUrl(url) {
     try {
         const parts = url.split('/');
@@ -117,41 +104,63 @@ async function extractStreamUrl(url) {
         const season = parts[2] || 1;
         const episode = parts[3] || 1;
 
-        const relayTarget = `${workerUrl}?tmdb=${tmdbId}&type=${type}&s=${season}&e=${episode}`;
-        const res = await soraFetch(relayTarget);
-        
-        if (!res) return JSON.stringify({ streams: [], subtitles: "" });
-        const data = await res.json();
+        let streams = [];
 
-        return JSON.stringify(data);
+        // Attempt 1: Fetch Direct HLS from MultiEmbed
+        try {
+            const embedUrl = type === 'movie' 
+                ? `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1`
+                : `https://multiembed.mov/directstream.php?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episode}`;
+            
+            const res = await soraFetch(embedUrl);
+            if (res) {
+                const text = await res.text();
+                const matches = text.match(/(https?:\/\/[^\s"'`<>]+?\.(?:m3u8|mp4)[^\s"'`<>]*)/gi) || [];
+                if (matches.length > 0) {
+                    streams.push({
+                        title: "[AutoEmbed] 🇺🇸 HD",
+                        streamUrl: matches[0].replace(/\\/g, "")
+                    });
+                }
+            }
+        } catch (e) {
+            // Ignore and move to backups
+        }
+
+        // --- BACKUP TEST STREAMS (To force the Server Menu to appear) ---
+        streams.push({
+            title: "[Test Server] 🇺🇸 1080p",
+            streamUrl: "http://sample.vodobox.net/skate_phantom_flex_4k/skate_phantom_flex_4k.m3u8"
+        });
+
+        streams.push({
+            title: "[Test Server] 🇺🇸 720p",
+            streamUrl: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+        });
+
+        return JSON.stringify({ streams: streams, subtitles: "" });
     } catch (err) {
         return JSON.stringify({ streams: [], subtitles: "" });
     }
 }
 
-/**
- * Multi-environment Fetch Helper
- */
 async function soraFetch(url, options) {
     const opts = options || {};
-    const headers = opts.headers || defaultHeaders;
     try {
-        let res = await fetchv2(url, headers, opts.method || 'GET', opts.body || null);
+        let res = await fetchv2(url, opts.headers || defaultHeaders, opts.method || 'GET', opts.body || null);
         let textRes = res;
-        
         if (res && typeof res.text === 'function') {
             textRes = await res.text();
         } else if (res && typeof res === 'object') {
             textRes = res._data || res.body || res;
         }
-
         return {
             text: async () => typeof textRes === 'string' ? textRes : JSON.stringify(textRes),
             json: async () => typeof textRes === 'string' ? JSON.parse(textRes) : textRes
         };
     } catch (e) {
         try {
-            const res = await fetch(url, { headers: headers, method: opts.method || 'GET' });
+            const res = await fetch(url, { headers: opts.headers || defaultHeaders, method: opts.method || 'GET' });
             const text = await res.text();
             return {
                 text: async () => text,
