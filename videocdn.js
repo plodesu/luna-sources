@@ -1,10 +1,13 @@
-const defaultHeaders = {
+ const defaultHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Referer': 'https://kinobox.tv/'
+    'Referer': 'https://kinogomy.net/'
 };
 
 const tmdbApiKey = 'ad301b7cc82ffe19273e55e4d4206885';
 
+/**
+ * 1. TMDB Universal Search (Russian Metadata)
+ */
 async function searchResults(keyword) {
     try {
         const cleanQuery = keyword.replace(/Episode\s*\d+/gi, '').replace(/Season\s*\d+/gi, '').trim();
@@ -31,6 +34,9 @@ async function searchResults(keyword) {
     }
 }
 
+/**
+ * 2. Extract Details
+ */
 async function extractDetails(url) {
     try {
         const parts = url.split('/');
@@ -52,6 +58,9 @@ async function extractDetails(url) {
     }
 }
 
+/**
+ * 3. Extract Episodes & Seasons
+ */
 async function extractEpisodes(url) {
     try {
         const parts = url.split('/');
@@ -97,56 +106,65 @@ async function extractEpisodes(url) {
     }
 }
 
+/**
+ * 4. Extract Real Direct Streams for Sora / Luna
+ */
 async function extractStreamUrl(url) {
     try {
         const parts = url.split('/');
-        const type = parts[0];
         const tmdbId = parts[1];
         let streams = [];
         
         const kinoboxApi = `https://kinobox.tv/api/players?tmdb=${tmdbId}`;
         const kbRes = await soraFetch(kinoboxApi);
-        if (!kbRes) return JSON.stringify([]);
         
-        const players = await kbRes.json();
-        
-        if (Array.isArray(players)) {
-            for (let i = 0; i < players.length; i++) {
-                let iframeUrl = players[i].iframeUrl;
-                if (!iframeUrl) continue;
-                
-                if (iframeUrl.startsWith('//')) iframeUrl = 'https:' + iframeUrl;
-                
-                const iframeRes = await soraFetch(iframeUrl, { headers: { 'Referer': 'https://kinobox.tv/' } });
-                const iframeHtml = await iframeRes.text();
-                
-                const fileMatches = iframeHtml.match(/(https?:\/\/[^\s"'`<>]+?\.(?:m3u8|mp4)[^\s"'`<>]*)/gi) || [];
-                
-                for (let j = 0; j < fileMatches.length; j++) {
-                    let rawUrl = fileMatches[j].replace(/\\/g, ''); 
+        if (kbRes) {
+            const players = await kbRes.json();
+            
+            if (Array.isArray(players)) {
+                for (let i = 0; i < players.length; i++) {
+                    let iframeUrl = players[i].iframeUrl;
+                    if (!iframeUrl) continue;
                     
-                    if (!streams.some(s => s.url === rawUrl)) {
-                        const isM3U8 = rawUrl.includes('.m3u8');
-                        const serverName = players[i].source ? players[i].source.toUpperCase() : 'Server';
+                    if (iframeUrl.startsWith('//')) iframeUrl = 'https:' + iframeUrl;
+                    
+                    const iframeRes = await soraFetch(iframeUrl, { headers: { 'Referer': 'https://kinobox.tv/' } });
+                    if (!iframeRes) continue;
+                    
+                    const iframeHtml = await iframeRes.text();
+                    
+                    // Regex scan for raw HLS (.m3u8) or MP4 files inside the stream scripts
+                    const fileMatches = iframeHtml.match(/(https?:\/\/[^\s"'`<>]+?\.(?:m3u8|mp4)[^\s"'`<>]*)/gi) || [];
+                    
+                    for (let j = 0; j < fileMatches.length; j++) {
+                        let rawUrl = fileMatches[j].replace(/\\/g, ''); 
                         
-                        streams.push({
-                            name: `${serverName} - Russian (${isM3U8 ? 'HLS' : 'MP4'})`,
-                            url: rawUrl,
-                            file: rawUrl, 
-                            type: isM3U8 ? 'hls' : 'mp4',
-                            headers: defaultHeaders
-                        });
+                        if (!streams.some(s => s.streamUrl === rawUrl)) {
+                            const serverName = players[i].source ? players[i].source.toUpperCase() : 'Server';
+                            
+                            streams.push({
+                                title: `${serverName} (Russian Dub)`,
+                                streamUrl: rawUrl,
+                                headers: defaultHeaders
+                            });
+                        }
                     }
                 }
             }
         }
 
-        return JSON.stringify(streams);
+        return JSON.stringify({
+            streams: streams,
+            subtitles: ""
+        });
     } catch (err) {
-        return JSON.stringify([]);
+        return JSON.stringify({ streams: [], subtitles: "" });
     }
 }
 
+/**
+ * Multi-environment Sora / Luna Fetch Helper
+ */
 async function soraFetch(url, options) {
     const opts = options || {};
     const headers = opts.headers || defaultHeaders;
@@ -165,6 +183,15 @@ async function soraFetch(url, options) {
             json: async () => typeof textRes === 'string' ? JSON.parse(textRes) : textRes
         };
     } catch (e) {
-        return await fetch(url, { headers: headers, method: opts.method || 'GET' });
+        try {
+            const res = await fetch(url, { headers: headers, method: opts.method || 'GET' });
+            const text = await res.text();
+            return {
+                text: async () => text,
+                json: async () => JSON.parse(text)
+            };
+        } catch (err) {
+            return null;
+        }
     }
 }
