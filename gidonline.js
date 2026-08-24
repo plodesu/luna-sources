@@ -1,7 +1,7 @@
 /**
  * GidOnline RU – films & series for Sora / Luna
  * Site: https://gidonline.eu
- * v1.8.0 – videasy-inspired: TMDB assist, parallel players, quality sort
+ * v2.0.0 – Плеер 2 studio picker (HDRezka/WinMedia/…) + Russian-only audio
  */
 
 const baseUrl = "https://gidonline.eu";
@@ -96,8 +96,10 @@ function isEnglishAudio(name) {
   return (
     n.indexOf("eng") !== -1 ||
     n.indexOf("original") !== -1 ||
+    n.indexOf("оригинал") !== -1 ||
     n.indexOf("english") !== -1 ||
-    n === "en"
+    n === "en" ||
+    n.indexOf("eng.") !== -1
   );
 }
 
@@ -222,13 +224,13 @@ async function tmdbTitleHints(keyword) {
 
 async function searchResults(keyword) {
   try {
-    const queries = buildSearchQueries(keyword);
+    const rawKeyword = String(keyword || "").trim();
+    const queries = buildSearchQueries(rawKeyword);
     if (queries.length === 0) return JSON.stringify([]);
 
     const results = [];
     const seen = {};
 
-    // 1) Direct GidOnline search
     for (let i = 0; i < queries.length; i++) {
       const url =
         baseUrl +
@@ -237,13 +239,12 @@ async function searchResults(keyword) {
       const res = await soraFetch(url);
       const html = await getText(res);
       parseSearchHtml(html, results, seen);
-      if (results.length >= 12) break;
+      if (results.length >= 25) break;
     }
 
-    // 2) TMDB-assisted titles (videasy-style) if few results
     if (results.length < 5) {
-      const hints = await tmdbTitleHints(cleanQuery(keyword));
-      for (let i = 0; i < hints.length && results.length < 15; i++) {
+      const hints = await tmdbTitleHints(cleanQuery(rawKeyword));
+      for (let i = 0; i < hints.length && results.length < 25; i++) {
         if (queries.indexOf(hints[i]) !== -1) continue;
         const url =
           baseUrl +
@@ -255,7 +256,40 @@ async function searchResults(keyword) {
       }
     }
 
-    return JSON.stringify(results);
+    // Rank by title match quality (fixes wrong first result)
+    const q = cleanQuery(rawKeyword).toLowerCase();
+    const qWords = q.split(/\s+/).filter(function (w) {
+      return w.length > 2;
+    });
+    function score(item) {
+      const t = String(item.title || "").toLowerCase();
+      let s = 0;
+      if (t === q) s += 100;
+      if (t.indexOf(q) !== -1) s += 50;
+      for (let i = 0; i < qWords.length; i++) {
+        if (t.indexOf(qWords[i]) !== -1) s += 10;
+      }
+      // prefer series label when user searches series-like terms
+      if (/сериал|serial|season|s\d/i.test(rawKeyword) && /сериал|мультсериал/i.test(t))
+        s += 20;
+      if (/сериал|мультсериал/i.test(t) && qWords.length <= 2) s += 5;
+      // penalize unrelated long titles with zero word hits
+      if (s === 0) s -= 5;
+      return s;
+    }
+    results.sort(function (a, b) {
+      return score(b) - score(a);
+    });
+    // drop very bad matches if we have good ones
+    const best = results.length ? score(results[0]) : 0;
+    const filtered =
+      best >= 10
+        ? results.filter(function (r) {
+            return score(r) >= 5;
+          })
+        : results;
+
+    return JSON.stringify(filtered.slice(0, 15));
   } catch (err) {
     return JSON.stringify([]);
   }
@@ -362,26 +396,164 @@ function sortAudioNames(names) {
 
 function pushAudioStreams(out, playerName, hls, audioNames, headers) {
   if (!hls) return;
-  let names = sortAudioNames(audioNames || []);
+  let names = (audioNames || []).slice();
   names = names.filter(function (n) {
     return !isEnglishAudio(n);
   });
   const prefix = playerName || "Смотреть";
-  if (names.length === 0) {
-    out.push({
-      title: prefix + " · Рус. дубляж",
-      streamUrl: hls,
-      headers: headers,
+  out.push({
+    title: prefix,
+    streamUrl: hls,
+    headers: headers,
+    _names: names,
+  });
+}
+
+function parseAudio0Tracks(master) {
+  const tracks = [];
+  const seen = {};
+  const lines = String(master || "").split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.indexOf("TYPE=AUDIO") === -1) continue;
+    if (/failover/i.test(line)) continue;
+    if (
+      line.indexOf('GROUP-ID="audio0"') === -1 &&
+      line.indexOf('GROUP-ID="audio"') === -1 &&
+      line.indexOf("GROUP-ID=") !== -1
+    ) {
+      continue;
+    }
+    const uri = (line.match(/URI="([^"]+)"/) || [])[1];
+    if (!uri || seen[uri]) continue;
+    seen[uri] = true;
+    tracks.push({
+      name: (line.match(/NAME="([^"]+)"/) || [])[1] || "",
+      lang: (line.match(/LANGUAGE="([^"]+)"/) || [])[1] || "",
+      uri: uri,
     });
-    return;
   }
-  for (let i = 0; i < names.length; i++) {
-    out.push({
-      title: prefix + " · " + String(names[i]),
-      streamUrl: hls,
-      headers: headers,
-    });
+  return tracks;
+}
+
+function rewriteMasterOneAudio(master, audioUri) {
+  const lines = String(master || "").split(/\r?\n/);
+  const out = ["#EXTM3U", "#EXT-X-VERSION:3"];
+  out.push(
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio0",NAME="Default",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="' +
+      audioUri +
+      '"'
+  );
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.indexOf("#EXT-X-STREAM-INF:") !== 0) continue;
+    if (/AUDIO="failover/i.test(line)) {
+      i++;
+      continue;
+    }
+    let inf = line.replace(/AUDIO="[^"]*"/, 'AUDIO="audio0"');
+    if (inf.indexOf("AUDIO=") === -1) inf += ',AUDIO="audio0"';
+    const url = (lines[i + 1] || "").trim();
+    if (url && url.charAt(0) !== "#") {
+      out.push(inf);
+      out.push(url);
+      i++;
+    }
   }
+  return out.join("\n") + "\n";
+}
+
+function toPlaylistDataUri(text) {
+  try {
+    if (typeof btoa === "function") {
+      return "data:application/vnd.apple.mpegurl;base64," + btoa(text);
+    }
+  } catch (e) {}
+  return (
+    "data:application/vnd.apple.mpegurl;charset=utf-8," +
+    encodeURIComponent(text)
+  );
+}
+
+function studioTitle(playerName, studio) {
+  const p = String(playerName || "");
+  const s = String(studio || "Рус. дубляж");
+  // Luna picker: Плеер 2 · HDRezka Studio
+  if (/плеер/i.test(p)) return p + " · " + s;
+  return "Плеер 2 · " + s;
+}
+
+async function expandAudioVariants(streams, headers) {
+  const out = [];
+  const cache = {};
+  for (let i = 0; i < streams.length; i++) {
+    const s = streams[i];
+    if (!s || !s.streamUrl) continue;
+    const names = s._names;
+    const isHls = /\.m3u8(\?|$)/i.test(s.streamUrl);
+    if (!isHls) {
+      if (!isEnglishAudio(s.title || "")) out.push(s);
+      continue;
+    }
+    let master = cache[s.streamUrl];
+    if (master === undefined) {
+      try {
+        const res = await soraFetch(s.streamUrl, {
+          headers: Object.assign({}, headers, {
+            Referer: "https://api.embess.ws/",
+            Origin: "https://api.embess.ws",
+          }),
+        });
+        const t = await getText(res);
+        master = t && t.indexOf("#EXTM3U") !== -1 ? t : "";
+      } catch (e) {
+        master = "";
+      }
+      cache[s.streamUrl] = master;
+    }
+    if (!master) {
+      if (!isEnglishAudio(s.title || "")) {
+        out.push({
+          title: studioTitle(s.title, "Рус. дубляж"),
+          streamUrl: s.streamUrl,
+          headers: s.headers || headers,
+        });
+      }
+      continue;
+    }
+    const tracks = parseAudio0Tracks(master);
+    const labelList =
+      names && names.length
+        ? names
+        : tracks.map(function (tr, idx) {
+            return tr.lang === "en" ? "Eng" : "Рус " + (idx + 1);
+          });
+    let added = 0;
+    const n = Math.max(labelList.length, tracks.length);
+    for (let k = 0; k < n; k++) {
+      const label = labelList[k] || tracks[k] && tracks[k].name || "";
+      const track = tracks[k] || tracks[0];
+      if (!track) continue;
+      if (isEnglishAudio(label) || (track.lang || "").toLowerCase() === "en")
+        continue;
+      const playlist = rewriteMasterOneAudio(master, track.uri);
+      out.push({
+        title: studioTitle(s.title, label || "Рус. дубляж"),
+        streamUrl: toPlaylistDataUri(playlist),
+        headers: s.headers || headers,
+      });
+      added++;
+    }
+    if (added === 0 && tracks[0]) {
+      const playlist = rewriteMasterOneAudio(master, tracks[0].uri);
+      out.push({
+        title: studioTitle(s.title, "Рус. дубляж"),
+        streamUrl: toPlaylistDataUri(playlist),
+        headers: s.headers || headers,
+      });
+    }
+  }
+  return out;
 }
 
 function parseMakePlayerMovie(html, playerName, out) {
@@ -414,7 +586,7 @@ function parseMakePlayerMovie(html, playerName, out) {
   pushAudioStreams(out, playerName || "Смотреть", hls, audioNames, headers);
 
   const dashMatch = html.match(/dash\s*:\s*"([^"]+\.mpd[^"]*)"/);
-  if (dashMatch) {
+  if (dashMatch && (!audioNames || !audioNames.length)) {
     out.push({
       title: (playerName || "Смотреть") + " · DASH",
       streamUrl: dashMatch[1].replace(/\\u0026/g, "&"),
@@ -623,67 +795,107 @@ async function extractStreamUrl(url) {
 
     const streams = [];
     let subtitle = "";
+    const headers = {
+      "User-Agent": defaultHeaders["User-Agent"],
+      Referer: baseUrl + "/",
+    };
 
-    // Parallel player fetches (videasy-style)
     const players = parsePagePlayers(html);
-    const playerJobs = players.map(function (p) {
-      return fetchPlayerStreams(p, se.season, se.episode, streams);
-    });
-
-    // Always hit embess by KP in parallel too
     const kp = findKinopoiskId(html);
+
+    const jobs = [];
+    const jobSeen = {};
+    function addJob(name, src) {
+      if (!src || jobSeen[src]) return;
+      if (/youtube|youtu\.be|newplayjj/i.test(src)) return;
+      jobSeen[src] = true;
+      jobs.push({ name: name, src: src });
+    }
+    for (let i = 0; i < players.length; i++) {
+      addJob(players[i].name, players[i].src);
+    }
     if (kp) {
-      playerJobs.push(
-        (async function () {
-          try {
-            const er = await soraFetch(
-              "https://api.embess.ws/embed/kp/" + kp + "?host=gidonline.eu"
-            );
-            const eh = await getText(er);
-            if (!eh) return;
-            const before = streams.length;
-            let sub = parseSeasonsPlayer(
-              eh,
-              "Смотреть",
-              se.season,
-              se.episode,
-              streams
-            );
-            if (streams.length === before) {
-              sub = parseMakePlayerMovie(eh, "Смотреть", streams) || sub;
+      const embessBase =
+        "https://api.embess.ws/embed/kp/" + kp + "?host=gidonline.eu";
+      addJob("Смотреть", embessBase);
+      if (se.season && se.episode) {
+        addJob(
+          "Смотреть",
+          embessBase + "&s=" + se.season + "&e=" + se.episode
+        );
+      } else {
+        addJob("Смотреть", embessBase + "&s=1&e=1");
+      }
+    }
+
+    for (let i = 0; i < jobs.length; i++) {
+      try {
+        const er = await soraFetch(jobs[i].src, {
+          headers: Object.assign({}, headers, { Referer: pageUrl }),
+        });
+        const eh = await getText(er);
+        if (!eh || eh.length < 80) continue;
+
+        const before = streams.length;
+        let sub = parseSeasonsPlayer(
+          eh,
+          jobs[i].name,
+          se.season || 1,
+          se.episode || 1,
+          streams
+        );
+        if (streams.length === before) {
+          sub = parseMakePlayerMovie(eh, jobs[i].name, streams) || sub;
+        }
+        if (sub && !subtitle) subtitle = sub;
+
+        // if seasons exist but still empty, dump first available episode
+        if (streams.length === before && eh.indexOf("seasons:") !== -1) {
+          const seasons = extractSeasonsArray(eh);
+          if (seasons && seasons.length) {
+            const s0 = seasons[0];
+            const sn = s0.season || 1;
+            const eps = s0.episodes || [];
+            if (eps.length) {
+              const ep = eps[0];
+              const en = parseInt(ep.episode || 1, 10);
+              let hls = ep.hls || "";
+              if (hls) {
+                hls = String(hls).replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+                let names = [];
+                if (ep.audio && ep.audio.names) names = ep.audio.names;
+                pushAudioStreams(
+                  streams,
+                  jobs[i].name + " S" + sn + "E" + en,
+                  hls,
+                  names,
+                  headers
+                );
+              }
             }
-            if (sub && !subtitle) subtitle = sub;
-          } catch (e) {}
-        })()
-      );
+          }
+        }
+      } catch (e) {}
     }
 
-    const subs = await Promise.all(playerJobs);
-    for (let i = 0; i < subs.length; i++) {
-      if (subs[i] && !subtitle) subtitle = subs[i];
-    }
+    const expanded = await expandAudioVariants(streams, headers);
 
-    // Dedupe
     const uniq = [];
     const seenKey = {};
-    for (let i = 0; i < streams.length; i++) {
-      const s = streams[i];
+    for (let i = 0; i < expanded.length; i++) {
+      const s = expanded[i];
       if (!s || !s.streamUrl) continue;
-      if (
-        s.streamUrl.indexOf(".m3u8") === -1 &&
-        s.streamUrl.indexOf(".mp4") === -1 &&
-        s.streamUrl.indexOf(".mpd") === -1
-      ) {
-        continue;
-      }
       if (isEnglishAudio(s.title || "")) continue;
-      const key = s.title + "|" + s.streamUrl;
+      const key = s.title + "|" + s.streamUrl.slice(0, 80);
       if (seenKey[key]) continue;
       seenKey[key] = true;
-      uniq.push(s);
+      uniq.push({
+        title: s.title,
+        streamUrl: s.streamUrl,
+        headers: s.headers || headers,
+      });
     }
 
-    // Sort: Смотреть first, then Russian preferred, then quality
     uniq.sort(function (a, b) {
       const an = a.title || "";
       const bn = b.title || "";
