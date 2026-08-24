@@ -1,0 +1,24 @@
+{
+  "sourceName": "KinoGo.my",
+  "iconUrl": "https://kinogomy.net/favicon.ico",
+  "author": {
+    "name": "you",
+    "icon": ""
+  },
+  "version": "1.0.0",
+  "language": "Russian",
+  "languageType": ["Dubbed", "Subbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://kinogomy.net",
+  "searchBaseUrl": "https://kinogomy.net",
+  "scriptUrl": "REPLACE_WITH_RAW_JS_URL",
+  "type": "movies/shows",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
