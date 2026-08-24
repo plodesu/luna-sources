@@ -2,7 +2,7 @@
   "sourceName": "KinoGo.my",
   "iconUrl": "https://kinogomy.net/favicon.ico",
   "author": {
-    "name": "you",
+    "name": "plodesu, credit 50/50",
     "icon": ""
   },
   "version": "1.0.0",
@@ -12,7 +12,7 @@
   "quality": "HD",
   "baseUrl": "https://kinogomy.net",
   "searchBaseUrl": "https://kinogomy.net",
-  "scriptUrl": "REPLACE_WITH_RAW_JS_URL",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/kinogomy.js",
   "type": "movies/shows",
   "asyncJS": true,
   "softsub": true,
