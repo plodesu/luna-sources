@@ -1,10 +1,13 @@
 /**
  * GidOnline RU – films & series for Sora / Luna
  * Site: https://gidonline.eu
- * v1.6.0 – series seasons[] + Russian dubs first + all players
+ * v1.8.0 – videasy-inspired: TMDB assist, parallel players, quality sort
  */
 
 const baseUrl = "https://gidonline.eu";
+const TMDB_KEY = "ad301b7cc82ffe19273e55e4d4206885";
+const TMDB_PROXY =
+  "https://post-eosin.vercel.app/api/proxy?url=";
 
 const defaultHeaders = {
   "User-Agent":
@@ -17,6 +20,9 @@ const defaultHeaders = {
 async function soraFetch(url, options) {
   options = options || {};
   const headers = Object.assign({}, defaultHeaders, options.headers || {});
+  if (!headers["User-Agent"]) {
+    headers["User-Agent"] = defaultHeaders["User-Agent"];
+  }
   const method = options.method || "GET";
   const body = options.body || null;
   try {
@@ -41,6 +47,17 @@ async function getText(res) {
     return String(res);
   } catch (e) {
     return "";
+  }
+}
+
+async function getJson(res) {
+  if (!res) return null;
+  try {
+    if (typeof res.json === "function") return await res.json();
+    const t = await getText(res);
+    return JSON.parse(t);
+  } catch (e) {
+    return null;
   }
 }
 
@@ -74,6 +91,79 @@ function cleanQuery(keyword) {
     .trim();
 }
 
+function isEnglishAudio(name) {
+  const n = String(name || "").toLowerCase();
+  return (
+    n.indexOf("eng") !== -1 ||
+    n.indexOf("original") !== -1 ||
+    n.indexOf("english") !== -1 ||
+    n === "en"
+  );
+}
+
+function isRussianPreferred(name) {
+  const n = String(name || "").toLowerCase();
+  if (isEnglishAudio(name)) return false;
+  return (
+    n.indexOf("рус") !== -1 ||
+    n.indexOf("дуб") !== -1 ||
+    n.indexOf("lostfilm") !== -1 ||
+    n.indexOf("hdrezka") !== -1 ||
+    n.indexOf("winmedia") !== -1 ||
+    n.indexOf("tvshows") !== -1 ||
+    n.indexOf("redhead") !== -1 ||
+    n.indexOf("le-production") !== -1 ||
+    n.indexOf("1win") !== -1 ||
+    n.indexOf("kubik") !== -1 ||
+    n.indexOf("newstudio") !== -1
+  );
+}
+
+function getQualityWeight(title) {
+  const t = String(title || "");
+  if (t.indexOf("2160") !== -1 || t.indexOf("4K") !== -1) return 2160;
+  if (t.indexOf("1080") !== -1) return 1080;
+  if (t.indexOf("720") !== -1) return 720;
+  if (t.indexOf("480") !== -1) return 480;
+  if (t.indexOf("360") !== -1) return 360;
+  return 0;
+}
+
+function buildSearchQueries(keyword) {
+  const base = cleanQuery(keyword);
+  if (!base) return [];
+  const queries = [];
+  const add = function (q) {
+    q = String(q || "").replace(/\s+/g, " ").trim();
+    if (!q) return;
+    if (queries.indexOf(q) === -1) queries.push(q);
+  };
+  add(base);
+  add(base.replace(/&/g, " ").replace(/\band\b/gi, " "));
+  add(base.replace(/[^a-zA-Zа-яА-ЯёЁ0-9\s]/g, " "));
+  const words = base.replace(/&/g, " ").split(/\s+/).filter(Boolean);
+  if (words.length >= 1) add(words[0]);
+  if (words.length >= 2) add(words[0] + " " + words[1]);
+  const low = base.toLowerCase();
+  const aliases = {
+    simpsons: "Симпсоны",
+    "the simpsons": "Симпсоны",
+    "the rookie": "Новобранец",
+    rookie: "Новобранец",
+    minions: "Миньоны",
+    "despicable me": "Гадкий я",
+    friends: "Друзья",
+    "breaking bad": "Во все тяжкие",
+    "game of thrones": "Игра престолов",
+    witcher: "Ведьмак",
+    reacher: "Ричер",
+  };
+  for (const k in aliases) {
+    if (low.indexOf(k) !== -1) add(aliases[k]);
+  }
+  return queries.slice(0, 5);
+}
+
 function parseSearchHtml(html, results, seen) {
   if (!html) return;
   const blockRe =
@@ -105,30 +195,40 @@ function parseSearchHtml(html, results, seen) {
   }
 }
 
-function buildSearchQueries(keyword) {
-  const base = cleanQuery(keyword);
-  if (!base) return [];
-  const queries = [];
-  const add = function (q) {
-    q = String(q || "").replace(/\s+/g, " ").trim();
-    if (!q) return;
-    if (queries.indexOf(q) === -1) queries.push(q);
-  };
-  add(base);
-  add(base.replace(/&/g, " ").replace(/\band\b/gi, " "));
-  add(base.replace(/[^a-zA-Zа-яА-ЯёЁ0-9\s]/g, " "));
-  const words = base.replace(/&/g, " ").split(/\s+/).filter(Boolean);
-  if (words.length >= 1) add(words[0]);
-  if (words.length >= 2) add(words[0] + " " + words[1]);
-  return queries.slice(0, 4);
+async function tmdbTitleHints(keyword) {
+  const hints = [];
+  try {
+    const api =
+      "https://api.themoviedb.org/3/search/multi?api_key=" +
+      TMDB_KEY +
+      "&query=" +
+      encodeURIComponent(keyword) +
+      "&include_adult=false&language=ru-RU";
+    const url = TMDB_PROXY + encodeURIComponent(api) + "&simple=true";
+    const res = await soraFetch(url);
+    const data = await getJson(res);
+    if (!data || !data.results) return hints;
+    for (let i = 0; i < data.results.length && i < 8; i++) {
+      const r = data.results[i];
+      if (r.media_type !== "movie" && r.media_type !== "tv") continue;
+      const t = r.title || r.name || r.original_title || r.original_name;
+      if (t) hints.push(t);
+      const ot = r.original_title || r.original_name;
+      if (ot && ot !== t) hints.push(ot);
+    }
+  } catch (e) {}
+  return hints;
 }
 
 async function searchResults(keyword) {
   try {
     const queries = buildSearchQueries(keyword);
     if (queries.length === 0) return JSON.stringify([]);
+
     const results = [];
     const seen = {};
+
+    // 1) Direct GidOnline search
     for (let i = 0; i < queries.length; i++) {
       const url =
         baseUrl +
@@ -139,6 +239,22 @@ async function searchResults(keyword) {
       parseSearchHtml(html, results, seen);
       if (results.length >= 12) break;
     }
+
+    // 2) TMDB-assisted titles (videasy-style) if few results
+    if (results.length < 5) {
+      const hints = await tmdbTitleHints(cleanQuery(keyword));
+      for (let i = 0; i < hints.length && results.length < 15; i++) {
+        if (queries.indexOf(hints[i]) !== -1) continue;
+        const url =
+          baseUrl +
+          "/index.php?do=search&subaction=search&story=" +
+          encodeURIComponent(hints[i]);
+        const res = await soraFetch(url);
+        const html = await getText(res);
+        parseSearchHtml(html, results, seen);
+      }
+    }
+
     return JSON.stringify(results);
   } catch (err) {
     return JSON.stringify([]);
@@ -188,83 +304,6 @@ async function extractDetails(url) {
   }
 }
 
-async function extractEpisodes(url) {
-  try {
-    const res = await soraFetch(url);
-    const html = await getText(res);
-    const eps = [];
-    const seen = {};
-    const epRe =
-      /data-(?:season|s)=["']?(\d+)["']?[^>]*data-(?:episode|e)=["']?(\d+)["']?/gi;
-    let m;
-    while ((m = epRe.exec(html)) !== null) {
-      const key = m[1] + "-" + m[2];
-      if (seen[key]) continue;
-      seen[key] = true;
-      const s = parseInt(m[1], 10);
-      const e = parseInt(m[2], 10);
-      eps.push({
-        href: url + (url.indexOf("?") >= 0 ? "&" : "?") + "s=" + s + "&e=" + e,
-        number: e,
-        season: s,
-        title: "S" + s + "E" + e,
-      });
-    }
-    if (eps.length === 0) {
-      const kp = findKinopoiskId(html);
-      if (kp) {
-        try {
-          const er = await soraFetch(
-            "https://api.embess.ws/embed/kp/" + kp + "?host=gidonline.eu"
-          );
-          const eh = await getText(er);
-          const seasons = extractSeasonsArray(eh);
-          if (seasons) {
-            for (let si = 0; si < seasons.length; si++) {
-              const season = seasons[si];
-              const sn = season.season || si + 1;
-              const episodes = season.episodes || [];
-              for (let ei = 0; ei < episodes.length; ei++) {
-                const ep = episodes[ei];
-                const en = parseInt(ep.episode || ei + 1, 10);
-                const key = sn + "-" + en;
-                if (seen[key]) continue;
-                seen[key] = true;
-                eps.push({
-                  href:
-                    url +
-                    (url.indexOf("?") >= 0 ? "&" : "?") +
-                    "s=" +
-                    sn +
-                    "&e=" +
-                    en,
-                  number: en,
-                  season: sn,
-                  title: "S" + sn + "E" + en,
-                });
-              }
-            }
-          }
-        } catch (e) {}
-      }
-    }
-    if (eps.length > 0) {
-      eps.sort(function (a, b) {
-        if (a.season !== b.season) return a.season - b.season;
-        return a.number - b.number;
-      });
-      return JSON.stringify(eps);
-    }
-    return JSON.stringify([
-      { href: url, number: 1, season: 1, title: "Смотреть" },
-    ]);
-  } catch (err) {
-    return JSON.stringify([
-      { href: url, number: 1, season: 1, title: "Смотреть" },
-    ]);
-  }
-}
-
 function findKinopoiskId(html) {
   const m =
     html.match(/[?&]kp=(\d+)/) ||
@@ -282,45 +321,6 @@ function parseSeasonEpisode(url) {
     season: s ? parseInt(s, 10) : null,
     episode: e ? parseInt(e, 10) : null,
   };
-}
-
-function isEnglishAudio(name) {
-  const n = String(name || "").toLowerCase();
-  return (
-    n.indexOf("eng") !== -1 ||
-    n.indexOf("original") !== -1 ||
-    n.indexOf("english") !== -1 ||
-    n === "en"
-  );
-}
-
-function isRussianPreferred(name) {
-  const n = String(name || "").toLowerCase();
-  if (isEnglishAudio(name)) return false;
-  return (
-    n.indexOf("рус") !== -1 ||
-    n.indexOf("дуб") !== -1 ||
-    n.indexOf("lostfilm") !== -1 ||
-    n.indexOf("hdrezka") !== -1 ||
-    n.indexOf("winmedia") !== -1 ||
-    n.indexOf("tvshows") !== -1 ||
-    n.indexOf("redhead") !== -1 ||
-    n.indexOf("red head") !== -1 ||
-    n.indexOf("le-production") !== -1 ||
-    n.indexOf("1win") !== -1 ||
-    n.indexOf("kubik") !== -1 ||
-    n.indexOf("newstudio") !== -1
-  );
-}
-
-function sortAudioNames(names) {
-  const arr = (names || []).slice();
-  arr.sort(function (a, b) {
-    const ar = isRussianPreferred(a) ? 0 : isEnglishAudio(a) ? 2 : 1;
-    const br = isRussianPreferred(b) ? 0 : isEnglishAudio(b) ? 2 : 1;
-    return ar - br;
-  });
-  return arr;
 }
 
 function extractSeasonsArray(html) {
@@ -343,33 +343,41 @@ function extractSeasonsArray(html) {
     }
   }
   if (end === -1) return null;
-  const raw = html.substring(i, end);
   try {
-    return JSON.parse(raw);
+    return JSON.parse(html.substring(i, end));
   } catch (e) {
-    try {
-      return JSON.parse(raw.replace(/'/g, '"'));
-    } catch (e2) {
-      return null;
-    }
+    return null;
   }
+}
+
+function sortAudioNames(names) {
+  const arr = (names || []).slice();
+  arr.sort(function (a, b) {
+    const ar = isRussianPreferred(a) ? 0 : isEnglishAudio(a) ? 2 : 1;
+    const br = isRussianPreferred(b) ? 0 : isEnglishAudio(b) ? 2 : 1;
+    return ar - br;
+  });
+  return arr;
 }
 
 function pushAudioStreams(out, playerName, hls, audioNames, headers) {
   if (!hls) return;
-  const names = sortAudioNames(audioNames || []);
+  let names = sortAudioNames(audioNames || []);
+  names = names.filter(function (n) {
+    return !isEnglishAudio(n);
+  });
+  const prefix = playerName || "Смотреть";
   if (names.length === 0) {
     out.push({
-      title: playerName + " · HLS",
+      title: prefix + " · Рус. дубляж",
       streamUrl: hls,
       headers: headers,
     });
     return;
   }
   for (let i = 0; i < names.length; i++) {
-    const name = String(names[i]);
     out.push({
-      title: playerName + " · " + name,
+      title: prefix + " · " + String(names[i]),
       streamUrl: hls,
       headers: headers,
     });
@@ -440,8 +448,6 @@ function parseSeasonsPlayer(html, playerName, season, episode, out) {
   }
 
   let subUrl = "";
-  let found = false;
-
   for (let si = 0; si < seasons.length; si++) {
     const sObj = seasons[si];
     const sn = sObj.season || si + 1;
@@ -451,7 +457,6 @@ function parseSeasonsPlayer(html, playerName, season, episode, out) {
       const ep = episodes[ei];
       const en = parseInt(ep.episode || ei + 1, 10);
       if (targetEpisode && en !== targetEpisode) continue;
-      found = true;
       let hls = ep.hls || ep.file || "";
       if (hls) hls = String(hls).replace(/\\u0026/g, "&").replace(/\\\//g, "/");
       let audioNames = [];
@@ -466,11 +471,9 @@ function parseSeasonsPlayer(html, playerName, season, episode, out) {
       if (ep.cc && ep.cc.length && ep.cc[0].url) {
         subUrl = String(ep.cc[0].url).replace(/\\u0026/g, "&");
       }
-      break;
+      return subUrl;
     }
-    if (found) break;
   }
-
   return subUrl;
 }
 
@@ -511,7 +514,6 @@ async function fetchPlayerStreams(player, season, episode, out) {
     });
     const html = await getText(res);
     if (!html || html.length < 50) return "";
-
     const before = out.length;
     let sub = parseSeasonsPlayer(
       html,
@@ -529,6 +531,86 @@ async function fetchPlayerStreams(player, season, episode, out) {
   }
 }
 
+async function extractEpisodes(url) {
+  try {
+    const res = await soraFetch(url);
+    const html = await getText(res);
+    const eps = [];
+    const seen = {};
+
+    const epRe =
+      /data-(?:season|s)=["']?(\d+)["']?[^>]*data-(?:episode|e)=["']?(\d+)["']?/gi;
+    let m;
+    while ((m = epRe.exec(html)) !== null) {
+      const key = m[1] + "-" + m[2];
+      if (seen[key]) continue;
+      seen[key] = true;
+      const s = parseInt(m[1], 10);
+      const e = parseInt(m[2], 10);
+      eps.push({
+        href: url + (url.indexOf("?") >= 0 ? "&" : "?") + "s=" + s + "&e=" + e,
+        number: e,
+        season: s,
+        title: "S" + s + "E" + e,
+      });
+    }
+
+    if (eps.length === 0) {
+      const kp = findKinopoiskId(html);
+      if (kp) {
+        try {
+          const er = await soraFetch(
+            "https://api.embess.ws/embed/kp/" + kp + "?host=gidonline.eu"
+          );
+          const eh = await getText(er);
+          const seasons = extractSeasonsArray(eh);
+          if (seasons) {
+            for (let si = 0; si < seasons.length; si++) {
+              const season = seasons[si];
+              const sn = season.season || si + 1;
+              const episodes = season.episodes || [];
+              for (let ei = 0; ei < episodes.length; ei++) {
+                const ep = episodes[ei];
+                const en = parseInt(ep.episode || ei + 1, 10);
+                const key = sn + "-" + en;
+                if (seen[key]) continue;
+                seen[key] = true;
+                eps.push({
+                  href:
+                    url +
+                    (url.indexOf("?") >= 0 ? "&" : "?") +
+                    "s=" +
+                    sn +
+                    "&e=" +
+                    en,
+                  number: en,
+                  season: sn,
+                  title: "S" + sn + "E" + en,
+                });
+              }
+            }
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (eps.length > 0) {
+      eps.sort(function (a, b) {
+        if (a.season !== b.season) return a.season - b.season;
+        return a.number - b.number;
+      });
+      return JSON.stringify(eps);
+    }
+    return JSON.stringify([
+      { href: url, number: 1, season: 1, title: "Смотреть" },
+    ]);
+  } catch (err) {
+    return JSON.stringify([
+      { href: url, number: 1, season: 1, title: "Смотреть" },
+    ]);
+  }
+}
+
 async function extractStreamUrl(url) {
   try {
     const clean = String(url).split("#")[0];
@@ -542,41 +624,46 @@ async function extractStreamUrl(url) {
     const streams = [];
     let subtitle = "";
 
+    // Parallel player fetches (videasy-style)
     const players = parsePagePlayers(html);
-    for (let i = 0; i < players.length; i++) {
-      const sub = await fetchPlayerStreams(
-        players[i],
-        se.season,
-        se.episode,
-        streams
-      );
-      if (sub && !subtitle) subtitle = sub;
-    }
+    const playerJobs = players.map(function (p) {
+      return fetchPlayerStreams(p, se.season, se.episode, streams);
+    });
 
+    // Always hit embess by KP in parallel too
     const kp = findKinopoiskId(html);
     if (kp) {
-      try {
-        const er = await soraFetch(
-          "https://api.embess.ws/embed/kp/" + kp + "?host=gidonline.eu"
-        );
-        const eh = await getText(er);
-        if (eh) {
-          const before = streams.length;
-          let sub = parseSeasonsPlayer(
-            eh,
-            "Смотреть",
-            se.season,
-            se.episode,
-            streams
-          );
-          if (streams.length === before) {
-            sub = parseMakePlayerMovie(eh, "Смотреть", streams) || sub;
-          }
-          if (sub && !subtitle) subtitle = sub;
-        }
-      } catch (e) {}
+      playerJobs.push(
+        (async function () {
+          try {
+            const er = await soraFetch(
+              "https://api.embess.ws/embed/kp/" + kp + "?host=gidonline.eu"
+            );
+            const eh = await getText(er);
+            if (!eh) return;
+            const before = streams.length;
+            let sub = parseSeasonsPlayer(
+              eh,
+              "Смотреть",
+              se.season,
+              se.episode,
+              streams
+            );
+            if (streams.length === before) {
+              sub = parseMakePlayerMovie(eh, "Смотреть", streams) || sub;
+            }
+            if (sub && !subtitle) subtitle = sub;
+          } catch (e) {}
+        })()
+      );
     }
 
+    const subs = await Promise.all(playerJobs);
+    for (let i = 0; i < subs.length; i++) {
+      if (subs[i] && !subtitle) subtitle = subs[i];
+    }
+
+    // Dedupe
     const uniq = [];
     const seenKey = {};
     for (let i = 0; i < streams.length; i++) {
@@ -589,22 +676,28 @@ async function extractStreamUrl(url) {
       ) {
         continue;
       }
+      if (isEnglishAudio(s.title || "")) continue;
       const key = s.title + "|" + s.streamUrl;
       if (seenKey[key]) continue;
       seenKey[key] = true;
       uniq.push(s);
     }
 
+    // Sort: Смотреть first, then Russian preferred, then quality
     uniq.sort(function (a, b) {
       const an = a.title || "";
       const bn = b.title || "";
-      const ar = isRussianPreferred(an) ? 0 : isEnglishAudio(an) ? 2 : 1;
-      const br = isRussianPreferred(bn) ? 0 : isEnglishAudio(bn) ? 2 : 1;
-      return ar - br;
+      const ap = an.indexOf("Смотреть") === 0 ? 0 : 1;
+      const bp = bn.indexOf("Смотреть") === 0 ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+      const ar = isRussianPreferred(an) ? 0 : 1;
+      const br = isRussianPreferred(bn) ? 0 : 1;
+      if (ar !== br) return ar - br;
+      return getQualityWeight(bn) - getQualityWeight(an);
     });
 
     return JSON.stringify({
-      streams: uniq.slice(0, 20),
+      streams: uniq.slice(0, 15),
       subtitles: subtitle || "",
     });
   } catch (err) {
