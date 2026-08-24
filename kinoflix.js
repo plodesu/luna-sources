@@ -1,7 +1,7 @@
 /**
  * Kinoflix – films & series for Sora / Luna
  * Site: https://kinoflix.tv
- * v1.2.0 – series HLS + MP4 both formats (Lanterns/Friends/Reacher)
+ * v1.3.0 – force RU-only HLS (strip EN) for series+movies
  */
 
 const baseUrl = "https://kinoflix.tv";
@@ -407,10 +407,12 @@ async function buildRussianOnlyHls(masterUrl, headers) {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (line.indexOf("TYPE=AUDIO") !== -1 && /LANGUAGE="ru"|NAME="Russian"/i.test(line)) {
-        // prefer stereo (aac20) over 5.1 for compatibility
-        if (ruAudioLine && /aac51|CHANNELS="6"/i.test(line) && !/aac51|CHANNELS="6"/i.test(ruAudioLine)) {
-          // keep existing stereo
-        } else if (!ruAudioLine || /DEFAULT=YES/i.test(line)) {
+        const is51 = /aac51|CHANNELS="6"/i.test(line);
+        const existingIs51 = ruAudioLine && /aac51|CHANNELS="6"/i.test(ruAudioLine);
+        // Prefer stereo RU over 5.1; skip if we already have stereo
+        if (ruAudioLine && !existingIs51 && is51) {
+          // keep stereo
+        } else if (!ruAudioLine || (existingIs51 && !is51) || /DEFAULT=YES/i.test(line)) {
           let uri = (line.match(/URI="([^"]+)"/) || [])[1];
           if (uri && uri.indexOf("http") !== 0) uri = base + uri;
           ruIsDefault = /DEFAULT=YES/i.test(line);
@@ -583,22 +585,24 @@ async function extractStreamUrl(url) {
       if (/master\.(txt|m3u8)|\/cdn\/hls\//i.test(f) || (f.indexOf("http") === 0 && f.indexOf("{") === -1 && f.indexOf(".mp4") === -1)) {
         const fixed = fixHlsUrl(f);
         const built = await buildRussianOnlyHls(fixed, headers);
-        // Prefer plain master (Luna plays https better than data:) when RU is default
-        if (built && built.url) {
+        // ALWAYS put RU-only rewritten playlist FIRST.
+        // Plain multi-audio masters let Luna pick English from device language.
+        if (built && built.dataUri) {
           streams.push({
             title: titleBase + " · RU",
-            streamUrl: built.url,
-            headers: headers,
-          });
-        }
-        if (built && built.dataUri && !built.ruDefault) {
-          streams.push({
-            title: titleBase + " · RU only",
             streamUrl: built.dataUri,
             headers: headers,
           });
         }
-        if (streams.length === 0) {
+        // Also expose plain master as backup (may still pick EN on some players)
+        if (built && built.url) {
+          streams.push({
+            title: titleBase + " · HLS multi",
+            streamUrl: built.url,
+            headers: headers,
+          });
+        }
+        if (!built || (!built.dataUri && !built.url)) {
           streams.push({
             title: titleBase + " · HLS",
             streamUrl: fixed,
