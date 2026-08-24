@@ -1,8 +1,8 @@
 /**
  * GidOnline.NET – films & series for Sora / Luna
  * Site: https://gidonline.net
- * Players: ortified.ws (primary, same stack as embess) + cinemar.cc (studios)
- * v3.1.0 – fixed search + dual player pipeline
+ * Player: ortified.ws only (Плеер 2 / cinemar disabled – hangs)
+ * v3.2.0 – Смотреть only, no cinemar
  */
 
 const baseUrl = "https://gidonline.net";
@@ -42,17 +42,6 @@ async function getText(res) {
     return String(res);
   } catch (e) {
     return "";
-  }
-}
-
-async function getJson(res) {
-  if (!res) return null;
-  try {
-    if (typeof res.json === "function") return await res.json();
-    const t = await getText(res);
-    return JSON.parse(t);
-  } catch (e) {
-    return null;
   }
 }
 
@@ -100,21 +89,6 @@ function isEnglishAudio(name) {
   );
 }
 
-function isRussianPreferred(name) {
-  const n = String(name || "").toLowerCase();
-  if (isEnglishAudio(name)) return false;
-  return (
-    n.indexOf("рус") !== -1 ||
-    n.indexOf("дуб") !== -1 ||
-    n.indexOf("lostfilm") !== -1 ||
-    n.indexOf("hdrezka") !== -1 ||
-    n.indexOf("winmedia") !== -1 ||
-    n.indexOf("tvshows") !== -1 ||
-    n.indexOf("kubik") !== -1 ||
-    n.indexOf("newstudio") !== -1
-  );
-}
-
 function parseSeasonEpisode(url) {
   const s = (String(url).match(/[?&#]s=(\d+)/i) || [])[1];
   const e = (String(url).match(/[?&#]e=(\d+)/i) || [])[1];
@@ -141,14 +115,11 @@ function buildSearchQueries(keyword) {
   const low = base.toLowerCase();
   const aliases = {
     simpsons: "Симпсоны",
-    "the simpsons": "Симпсоны",
-    "the rookie": "Новобранец",
-    rookie: "Новобранец",
     minions: "Миньоны",
-    "despicable me": "Гадкий я",
-    friends: "Друзья",
     reacher: "Ричер",
     naruto: "Наруто",
+    mutiny: "Мятеж",
+    rookie: "Новобранец",
   };
   for (const k in aliases) {
     if (low.indexOf(k) !== -1) add(aliases[k]);
@@ -156,41 +127,25 @@ function buildSearchQueries(keyword) {
   return queries.slice(0, 5);
 }
 
-/** Parse .net search cards: class="shortstory" title="..." href="..." */
 function parseSearchHtml(html, results, seen) {
   if (!html) return;
   let m;
-
-  // Primary: shortstory cards with title attr
   const re1 =
     /<a[^>]+href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[^>]*class="[^"]*shortstory[^"]*"[^>]*title="([^"]*)"/gi;
   while ((m = re1.exec(html)) !== null) {
     const href = absUrl(m[1]);
     if (!href || seen[href] || href.indexOf(".html") === -1) continue;
-    if (/\/(index|page|contact)/i.test(href)) continue;
     seen[href] = true;
-    results.push({
-      title: decodeHtml(m[2]),
-      image: "",
-      href: href,
-    });
+    results.push({ title: decodeHtml(m[2]), image: "", href: href });
   }
-
-  // Alternate attribute order: class before href
   const re1b =
     /class="[^"]*shortstory[^"]*"[^>]*href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[^>]*title="([^"]*)"/gi;
   while ((m = re1b.exec(html)) !== null) {
     const href = absUrl(m[1]);
     if (!href || seen[href]) continue;
     seen[href] = true;
-    results.push({
-      title: decodeHtml(m[2]),
-      image: "",
-      href: href,
-    });
+    results.push({ title: decodeHtml(m[2]), image: "", href: href });
   }
-
-  // h2 > a.ellipsis
   const re2 =
     /<h2>\s*<a[^>]+href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[^>]*(?:title="([^"]*)")?[^>]*>([^<]*)<\/a>/gi;
   while ((m = re2.exec(html)) !== null) {
@@ -203,8 +158,6 @@ function parseSearchHtml(html, results, seen) {
       href: href,
     });
   }
-
-  // Fill images from nearby poster
   const reImg =
     /href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[\s\S]{0,500}?data-src="([^"]+)"/gi;
   while ((m = reImg.exec(html)) !== null) {
@@ -246,7 +199,6 @@ function pushAudioStreams(out, playerName, hls, audioNames, headers) {
   }
 }
 
-/** Ortified/embess seasons JSON extract */
 function extractSeasonsArray(html) {
   if (!html || html.indexOf("seasons:") === -1) return null;
   const idx = html.indexOf("seasons:");
@@ -359,7 +311,6 @@ function parseSeasonsPlayer(html, playerName, season, episode, out) {
   };
   const targetSeason = season || 1;
   const targetEpisode = episode || 1;
-
   const found = findEpisodeStream(html, targetSeason, targetEpisode);
   if (found && found.hls) {
     pushAudioStreams(
@@ -371,7 +322,6 @@ function parseSeasonsPlayer(html, playerName, season, episode, out) {
     );
     return "";
   }
-
   const seasons = extractSeasonsArray(html);
   if (!seasons || !seasons.length) return "";
   for (let si = 0; si < seasons.length; si++) {
@@ -400,232 +350,37 @@ function parseSeasonsPlayer(html, playerName, season, episode, out) {
   return "";
 }
 
-/** Collect all embed iframes from page */
+/** Only ortified – skip cinemar (Плеер 2 hangs) */
 function parsePagePlayers(html) {
   const players = [];
   const seen = {};
   if (!html) return players;
-
-  // tab names
-  const tabs = [];
-  const tabRe = /<h2>([^<]+)<\/h2>/gi;
-  let m;
-  while ((m = tabRe.exec(html)) !== null) {
-    const name = decodeHtml(m[1]);
-    if (/смотреть|плеер|player/i.test(name)) tabs.push(name);
-  }
-
-  // data-src and src embeds
-  const embeds = [];
   const iframeRe =
-    /(?:data-src|src)=["']((?:https?:)?\/\/(?:cinemar\.cc|api\.ortified\.ws|api\.embess\.ws)[^"']+)["']/gi;
+    /(?:data-src|src)=["']((?:https?:)?\/\/(?:api\.ortified\.ws|api\.embess\.ws)[^"']+)["']/gi;
+  let m;
   while ((m = iframeRe.exec(html)) !== null) {
     let src = absUrl(m[1].replace(/&amp;/g, "&"));
     if (!src || seen[src]) continue;
-    if (/youtube|youtu\.be/i.test(src)) continue;
     seen[src] = true;
-    embeds.push(src);
-  }
-
-  for (let i = 0; i < embeds.length; i++) {
-    let name = tabs[i] || "Плеер " + (i + 1);
-    const src = embeds[i];
-    if (/ortified|embess/i.test(src)) name = "Смотреть";
-    if (/cinemar/i.test(src)) name = "Плеер 2";
-    players.push({ name: name, src: src });
+    players.push({ name: "Смотреть", src: src });
   }
   return players;
 }
-
-/* ---------- cinemar decode (secondary player) ---------- */
-
-function decodeCinemarFile(fileStr) {
-  if (!fileStr || String(fileStr).indexOf("#2") !== 0) return null;
-  try {
-    let e = String(fileStr).substring(2);
-    const dm = e.substring(0, 2);
-    e = e.substring(2);
-    const _ml = 32;
-    const sep = String.fromCharCode(parseInt(dm, 10) || dm.charCodeAt(0));
-    const parts = e.split(sep);
-    let joined = "";
-    for (let i = 0; i < parts.length; i++) {
-      const p = parts[i];
-      if (!p) continue;
-      const t = parseInt(p.slice(-1), 10);
-      if (p.length > _ml && !isNaN(t)) {
-        joined += p.substr(2 * t, p.length - 3 * t - 1) + p.substr(0, t);
-      } else {
-        joined += p;
-      }
-    }
-    const pad = joined.length % 4;
-    if (pad) joined += "====".substr(0, 4 - pad);
-    if (typeof atob !== "function") return null;
-    const binary = atob(joined);
-    let decoded = binary;
-    try {
-      decoded = decodeURIComponent(
-        Array.prototype.map
-          .call(binary, function (c) {
-            return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
-          })
-          .join("")
-      );
-    } catch (err) {
-      try {
-        decoded = decodeURIComponent(escape(binary));
-      } catch (e2) {}
-    }
-    return JSON.parse(decoded);
-  } catch (err) {
-    return null;
-  }
-}
-
-function extractCinemarOpts(html) {
-  if (!html) return null;
-  const idx = html.indexOf("Cinemar(");
-  if (idx === -1) return null;
-  let i = html.indexOf("{", idx);
-  if (i === -1) return null;
-  let depth = 0;
-  let end = -1;
-  for (let j = i; j < html.length && j < i + 200000; j++) {
-    const c = html.charAt(j);
-    if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        end = j + 1;
-        break;
-      }
-    }
-  }
-  if (end === -1) return null;
-  try {
-    return JSON.parse(html.substring(i, end));
-  } catch (e) {
-    return null;
-  }
-}
-
-function collectLeaves(items, season, episode, out) {
-  out = out || [];
-  if (!items || !items.length) return out;
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (it.folder && it.folder.length) {
-      const title = String(it.title || "");
-      const snMatch = title.match(/(\d+)/);
-      const isSeason = /сезон|season/i.test(title);
-      const isEpisode = /сери[яию]|episode|ep\b/i.test(title);
-      let nextS = season;
-      let nextE = episode;
-      if (isSeason && snMatch) nextS = parseInt(snMatch[1], 10);
-      if (isEpisode && snMatch) nextE = parseInt(snMatch[1], 10);
-      const idm = String(it.id || "").match(/s(\d+)e(\d+)/i);
-      if (idm) {
-        nextS = parseInt(idm[1], 10);
-        nextE = parseInt(idm[2], 10);
-      }
-      collectLeaves(it.folder, nextS, nextE, out);
-    } else if (it.data) {
-      out.push({
-        id: it.id,
-        title: it.title || "Студия",
-        data: it.data,
-        season: season || 1,
-        episode: episode || 1,
-      });
-    }
-  }
-  return out;
-}
-
-async function loadCinemarStream(dataStr) {
-  try {
-    const res = await soraFetch("https://cinemar.cc/api/playlist/load", {
-      method: "POST",
-      headers: {
-        "User-Agent": defaultHeaders["User-Agent"],
-        Referer: "https://cinemar.cc/",
-        Origin: "https://cinemar.cc",
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(dataStr),
-    });
-    const j = await getJson(res);
-    if (!j) return null;
-    const payload = j.data && j.data.file ? j.data : j;
-    if (payload && payload.file) {
-      return String(payload.file).replace(/\\u0026/g, "&");
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function extractCinemarStreams(embedHtml, season, episode, out) {
-  const opts = extractCinemarOpts(embedHtml);
-  if (!opts || !opts.file) return;
-  const pl = decodeCinemarFile(opts.file);
-  if (!pl || !pl.length) return;
-  const headers = {
-    "User-Agent": defaultHeaders["User-Agent"],
-    Referer: "https://cinemar.cc/",
-    Origin: "https://cinemar.cc",
-  };
-  const leaves = collectLeaves(pl, null, null, []);
-  const targetS = season || 1;
-  const targetE = episode || 1;
-  const hasSeries = leaves.some(function (x) {
-    return x.season > 1 || x.episode > 1;
-  });
-  let candidates = leaves.filter(function (L) {
-    if (!hasSeries && !season) return true;
-    return L.season === targetS && L.episode === targetE;
-  });
-  if (!candidates.length) candidates = leaves.slice(0, 6);
-  candidates = candidates.filter(function (c) {
-    return !isEnglishAudio(c.title);
-  });
-  const limit = Math.min(candidates.length, 6);
-  for (let i = 0; i < limit; i++) {
-    const file = await loadCinemarStream(candidates[i].data);
-    if (!file) continue;
-    const label = String(candidates[i].title || "Студия")
-      .replace(/<[^>]+>/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    pushStream(out, "Плеер 2 · " + label, file, headers);
-  }
-}
-
-/* ---------- Luna API ---------- */
 
 async function searchResults(keyword) {
   try {
     const rawKeyword = String(keyword || "").trim();
     const queries = buildSearchQueries(rawKeyword);
     if (!queries.length) return JSON.stringify([]);
-
     const results = [];
     const seen = {};
-
     for (let i = 0; i < queries.length; i++) {
-      // GET search
       const url =
         baseUrl +
         "/index.php?do=search&subaction=search&story=" +
         encodeURIComponent(queries[i]);
       const res = await soraFetch(url);
-      const html = await getText(res);
-      parseSearchHtml(html, results, seen);
-
-      // POST search fallback (DLE)
+      parseSearchHtml(await getText(res), results, seen);
       if (results.length < 3) {
         try {
           const body =
@@ -638,18 +393,14 @@ async function searchResults(keyword) {
               "User-Agent": defaultHeaders["User-Agent"],
               Referer: baseUrl + "/",
               "Content-Type": "application/x-www-form-urlencoded",
-              "Accept-Language": "ru-RU,ru;q=0.9",
             },
             body: body,
           });
-          const html2 = await getText(res2);
-          parseSearchHtml(html2, results, seen);
+          parseSearchHtml(await getText(res2), results, seen);
         } catch (e) {}
       }
       if (results.length >= 20) break;
     }
-
-    // Rank
     const q = cleanQuery(rawKeyword).toLowerCase();
     const qWords = q.split(/\s+/).filter(function (w) {
       return w.length > 2;
@@ -708,11 +459,8 @@ async function extractEpisodes(url) {
         { href: pageUrl, number: 1, season: 1, title: "Смотреть" },
       ]);
     }
-
-    // Prefer ortified for episode list
     const players = parsePagePlayers(html);
     for (let i = 0; i < players.length; i++) {
-      if (!/ortified|embess/i.test(players[i].src)) continue;
       try {
         const er = await soraFetch(players[i].src, {
           headers: {
@@ -720,52 +468,10 @@ async function extractEpisodes(url) {
             Referer: pageUrl,
           },
         });
-        const eh = await getText(er);
-        const eps = listEpisodesLight(eh, pageUrl);
+        const eps = listEpisodesLight(await getText(er), pageUrl);
         if (eps.length > 1) return JSON.stringify(eps);
       } catch (e) {}
     }
-
-    // cinemar playlist folders
-    for (let i = 0; i < players.length; i++) {
-      if (!/cinemar/i.test(players[i].src)) continue;
-      try {
-        const er = await soraFetch(players[i].src, {
-          headers: {
-            "User-Agent": defaultHeaders["User-Agent"],
-            Referer: pageUrl,
-          },
-        });
-        const eh = await getText(er);
-        const opts = extractCinemarOpts(eh);
-        if (!opts || !opts.file) continue;
-        const pl = decodeCinemarFile(opts.file);
-        if (!pl) continue;
-        const leaves = collectLeaves(pl, null, null, []);
-        const seen = {};
-        const eps = [];
-        for (let j = 0; j < leaves.length; j++) {
-          const L = leaves[j];
-          const key = L.season + "-" + L.episode;
-          if (seen[key]) continue;
-          seen[key] = true;
-          eps.push({
-            href: pageUrl + "?s=" + L.season + "&e=" + L.episode,
-            number: L.episode,
-            season: L.season,
-            title: "S" + L.season + "E" + L.episode,
-          });
-        }
-        if (eps.length > 1) {
-          eps.sort(function (a, b) {
-            if (a.season !== b.season) return a.season - b.season;
-            return a.number - b.number;
-          });
-          return JSON.stringify(eps);
-        }
-      } catch (e) {}
-    }
-
     return JSON.stringify([
       { href: pageUrl, number: 1, season: 1, title: "Смотреть" },
     ]);
@@ -795,15 +501,11 @@ async function extractStreamUrl(url) {
       "User-Agent": defaultHeaders["User-Agent"],
       Referer: baseUrl + "/",
     };
-
     const players = parsePagePlayers(html);
 
-    // Always try ortified first (most reliable, same as .eu)
     for (let i = 0; i < players.length; i++) {
-      const p = players[i];
-      if (!/ortified|embess/i.test(p.src)) continue;
       try {
-        const er = await soraFetch(p.src, {
+        const er = await soraFetch(players[i].src, {
           headers: Object.assign({}, headers, { Referer: pageUrl }),
         });
         const eh = await getText(er);
@@ -811,37 +513,17 @@ async function extractStreamUrl(url) {
         const before = streams.length;
         parseSeasonsPlayer(
           eh,
-          p.name || "Смотреть",
+          "Смотреть",
           se.season || 1,
           se.episode || 1,
           streams
         );
         if (streams.length === before) {
-          parseMakePlayerMovie(eh, p.name || "Смотреть", streams);
+          parseMakePlayerMovie(eh, "Смотреть", streams);
         }
       } catch (e) {}
     }
 
-    // Cinemar secondary (multiple studios)
-    for (let i = 0; i < players.length; i++) {
-      const p = players[i];
-      if (!/cinemar/i.test(p.src)) continue;
-      try {
-        const er = await soraFetch(p.src, {
-          headers: Object.assign({}, headers, { Referer: pageUrl }),
-        });
-        const eh = await getText(er);
-        if (!eh || eh.length < 80) continue;
-        await extractCinemarStreams(
-          eh,
-          se.season || 1,
-          se.episode || 1,
-          streams
-        );
-      } catch (e) {}
-    }
-
-    // Dedupe + filter English
     const uniq = [];
     const seenKey = {};
     for (let i = 0; i < streams.length; i++) {
@@ -858,22 +540,7 @@ async function extractStreamUrl(url) {
       });
     }
 
-    uniq.sort(function (a, b) {
-      const score = function (t) {
-        const x = (t || "").toLowerCase();
-        if (x.indexOf("смотреть") === 0) return 0;
-        if (x.indexOf("hdrezka") !== -1) return 1;
-        if (x.indexOf("lostfilm") !== -1) return 2;
-        if (x.indexOf("дуб") !== -1) return 3;
-        return 5;
-      };
-      return score(a.title) - score(b.title);
-    });
-
-    return JSON.stringify({
-      streams: uniq.slice(0, 12),
-      subtitles: "",
-    });
+    return JSON.stringify({ streams: uniq.slice(0, 10), subtitles: "" });
   } catch (err) {
     return JSON.stringify({ streams: [], subtitles: "" });
   }
