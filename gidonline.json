@@ -1,11 +1,11 @@
 {
-  "sourceName": "GidOnline RU",
-  "iconUrl": "https://gidonline.eu/favicon.ico",
+  "sourceName": "GidOnline.NET",
+  "iconUrl": "https://gidonline.net/favicon.ico",
   "author": {
     "name": "plodesu, credit 50/50",
     "icon": ""
   },
-  "version": "2.0.0",
+  "version": "1.0.0",
   "language": "Russian",
   "languageType": [
     "Dubbed",
@@ -13,9 +13,9 @@
   ],
   "streamType": "HLS",
   "quality": "HD",
-  "baseUrl": "https://gidonline.eu",
-  "searchBaseUrl": "https://gidonline.eu",
-  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/gidonline.js",
+  "baseUrl": "https://gidonline.net",
+  "searchBaseUrl": "https://gidonline.net",
+  "scriptUrl": "REPLACE_WITH_RAW_JS_URL",
   "type": "movies/shows",
   "asyncJS": true,
   "softsub": true,
