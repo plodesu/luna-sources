@@ -1,8 +1,8 @@
 {
-  "sourceName": "Seasonvar",
+  "sourceName": "Seasonvar (только для сериалов)",
   "iconUrl": "https://seasonvar.ru/favicon.ico",
   "author": {
-    "name": "plodesu, credit 50/50",
+    "name": "plodesu",
     "icon": ""
   },
   "version": "1.0.0",
