@@ -1,6 +1,6 @@
 /**
  * GidOnline.NET – Sora / Luna
- * v3.6.0 – correct posters + ranking + streams
+ * v3.7.0 – multi-season series streams fixed (season-aware)
  */
 const baseUrl = "https://gidonline.net";
 
@@ -17,6 +17,7 @@ const ALIASES = {
   "better call saul": "Лучше звоните Солу",
   "game of thrones": "Игра престолов",
   "house of the dragon": "Дом дракона",
+  "house of dragon": "Дом дракона",
   "the witcher": "Ведьмак",
   witcher: "Ведьмак",
   "stranger things": "Очень странные дела",
@@ -31,7 +32,6 @@ const ALIASES = {
   spiderman: "Человек-паук",
   "человек паук": "Человек-паук",
   "brand new day": "Новый день",
-  "новый день": "Человек-паук: Новый день",
   minions: "Миньоны",
   "minions & monsters": "Миньоны и монстры",
   "despicable me": "Гадкий я",
@@ -48,7 +48,6 @@ const ALIASES = {
   wednesday: "Уэнсдей",
   "the mandalorian": "Мандалорец",
   "house md": "Доктор Хаус",
-  "house m.d.": "Доктор Хаус",
   lanterns: "Фонари",
   "green lantern": "Зелёный фонарь",
 };
@@ -131,7 +130,8 @@ function isBadAudio(name) {
     n.indexOf("original") !== -1 ||
     n.indexOf("оригинал") !== -1 ||
     n.indexOf("english") !== -1 ||
-    n.indexOf("укр") !== -1
+    n.indexOf("укр") !== -1 ||
+    n === "delete"
   );
 }
 
@@ -161,7 +161,6 @@ function buildQueries(keyword) {
     add(w[0] + " " + w[1]);
     add(w[0] + "-" + w[1]);
   }
-  if (w.length >= 3) add(w.slice(0, 3).join(" "));
   return q.slice(0, 10);
 }
 
@@ -182,19 +181,14 @@ function matchScore(query, title) {
   if (t === q) return 100;
   if (t.indexOf(q) !== -1) return 95;
   if (q.indexOf(t) !== -1 && t.length > 5) return 88;
-
   for (const k in ALIASES) {
     const ru = norm(ALIASES[k]);
     if ((q === k || q.indexOf(k) !== -1) && t.indexOf(ru) !== -1) return 96;
   }
-
   const qw = q.split(" ").filter((w) => w.length > 1);
   if (!qw.length) return 0;
   let hit = 0;
-  for (let i = 0; i < qw.length; i++) {
-    if (t.indexOf(qw[i]) !== -1) hit++;
-  }
-  // all words must matter for high score
+  for (let i = 0; i < qw.length; i++) if (t.indexOf(qw[i]) !== -1) hit++;
   const ratio = hit / qw.length;
   if (ratio >= 1) return 92;
   if (ratio >= 0.75) return 75;
@@ -203,23 +197,17 @@ function matchScore(query, title) {
   return Math.round(ratio * 30);
 }
 
-/**
- * Parse each result card as one block so poster stays with its title.
- */
 function parseSearchHtml(html, results, seen) {
   if (!html) return;
-
-  // 1) article.short blocks (best)
+  let m;
   const reArticle =
     /<article[^>]*class="[^"]*short[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
-  let m;
   while ((m = reArticle.exec(html))) {
     const block = m[1];
     const hrefM =
       block.match(
         /href="((?:https?:\/\/gidonline\.net)?\/[a-z0-9\-]+\/\d+-[^"]+\.html)"/i
-      ) ||
-      block.match(/href="([^"]+\.html)"/i);
+      ) || block.match(/href="([^"]+\.html)"/i);
     const titleM =
       block.match(/class="[^"]*shortstory[^"]*"[^>]*title="([^"]+)"/i) ||
       block.match(/title="([^"]+)"[^>]*class="[^"]*shortstory/i) ||
@@ -236,8 +224,6 @@ function parseSearchHtml(html, results, seen) {
     if (imgM) image = absUrl(imgM[1]);
     results.push({ title, image, href });
   }
-
-  // 2) shortstory anchors (if no articles)
   if (results.length < 3) {
     const reA =
       /<a[^>]*class="[^"]*shortstory[^"]*"[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>([\s\S]{0,600}?)<\/a>/gi;
@@ -251,19 +237,6 @@ function parseSearchHtml(html, results, seen) {
       const imgM = m[3].match(/(?:data-src|src)="(\/uploads\/[^"]+)"/i);
       if (imgM) image = absUrl(imgM[1]);
       results.push({ title, image, href });
-    }
-  }
-
-  // 3) title+href shortstory without nested img — try sibling pattern
-  if (results.length < 3) {
-    const reB =
-      /title="([^"]+)"[^>]*href="((?:https?:\/\/gidonline\.net)?\/[a-z0-9\-]+\/\d+-[^"]+\.html)"[^>]*class="[^"]*shortstory[^"]*"/gi;
-    while ((m = reB.exec(html))) {
-      const href = absUrl(m[2]);
-      const title = decodeHtml(m[1]);
-      if (!href || !title || seen[href]) continue;
-      seen[href] = true;
-      results.push({ title, image: "", href });
     }
   }
 }
@@ -302,6 +275,63 @@ function findEmbeds(html, host) {
   return out;
 }
 
+/** Season-aware: do NOT pick S2E1 when asking for S1E1 */
+function findEpisodeInSeason(html, season, episode) {
+  if (!html) return null;
+  const targetS = season || 1;
+  const targetE = episode || 1;
+  const parts = String(html).split(/"season"\s*:\s*/);
+  for (let p = 1; p < parts.length; p++) {
+    const sn = parseInt(parts[p], 10);
+    if (!sn || sn !== targetS) continue;
+    const re = new RegExp(
+      '"episode"\\s*:\\s*"?' +
+        targetE +
+        '"?[\\s\\S]{0,2000}?"hls"\\s*:\\s*"([^"]+)"'
+    );
+    const m = parts[p].match(re);
+    if (!m) continue;
+    let names = [];
+    const block = parts[p].substring(m.index, m.index + 2000);
+    const am = block.match(/"names"\s*:\s*(\[[^\]]*\])/);
+    if (am) {
+      try {
+        names = JSON.parse(am[1]);
+      } catch (e) {}
+    }
+    return {
+      hls: m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/"),
+      names: names,
+    };
+  }
+  return null;
+}
+
+function extractSeasonsArray(html) {
+  if (!html || html.indexOf("seasons:") === -1) return null;
+  const idx = html.indexOf("seasons:");
+  const i = html.indexOf("[", idx);
+  if (i < 0) return null;
+  let depth = 0,
+    end = -1;
+  for (let j = i; j < html.length && j < i + 600000; j++) {
+    if (html[j] === "[") depth++;
+    else if (html[j] === "]") {
+      depth--;
+      if (!depth) {
+        end = j + 1;
+        break;
+      }
+    }
+  }
+  if (end < 0) return null;
+  try {
+    return JSON.parse(html.substring(i, end));
+  } catch (e) {
+    return null;
+  }
+}
+
 function parseOrtMovie(html, out) {
   if (!html || html.indexOf("seasons:") !== -1) return;
   let names = [];
@@ -337,54 +367,93 @@ function parseOrtMovie(html, out) {
 
 function parseOrtSeries(html, season, episode, out) {
   if (!html || html.indexOf("seasons:") === -1) return;
-  const en = episode || 1;
-  const re = new RegExp(
-    '"episode"\\s*:\\s*"?' + en + '"?[\\s\\S]{0,2500}?"hls"\\s*:\\s*"([^"]+)"'
-  );
-  const m = String(html).match(re);
-  if (!m) return;
-  const hls = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
-  let names = [];
-  const block = String(html).substring(m.index, m.index + 2500);
-  const am = block.match(/"names"\s*:\s*(\[[^\]]*\])/);
-  if (am) {
-    try {
-      names = JSON.parse(am[1]);
-    } catch (e) {}
+  const ts = season || 1;
+  const te = episode || 1;
+  const headers = {
+    "User-Agent": defaultHeaders["User-Agent"],
+    Referer: "https://gidonline.net/",
+  };
+
+  // 1) season-aware regex (fast, safe for large series)
+  const found = findEpisodeInSeason(html, ts, te);
+  if (found && found.hls) {
+    const ru = (found.names || []).filter((n) => !isBadAudio(n));
+    push(
+      out,
+      "Смотреть S" + ts + "E" + te + " · " + (ru[0] || "Рус. дубляж"),
+      found.hls,
+      headers
+    );
+    return;
   }
-  const ru = names.filter((n) => !isBadAudio(n));
-  push(
-    out,
-    "Смотреть S" + (season || 1) + "E" + en + " · " + (ru[0] || "Рус. дубляж"),
-    hls,
-    {
-      "User-Agent": defaultHeaders["User-Agent"],
-      Referer: "https://gidonline.net/",
+
+  // 2) full JSON parse
+  const seasons = extractSeasonsArray(html);
+  if (!seasons) return;
+  for (let si = 0; si < seasons.length; si++) {
+    const sObj = seasons[si];
+    if ((sObj.season || si + 1) !== ts) continue;
+    const episodes = sObj.episodes || [];
+    for (let ei = 0; ei < episodes.length; ei++) {
+      const ep = episodes[ei];
+      if (parseInt(ep.episode || ei + 1, 10) !== te) continue;
+      let hls = ep.hls || ep.file || "";
+      if (hls) hls = String(hls).replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+      let names = (ep.audio && ep.audio.names) || [];
+      const ru = names.filter((n) => !isBadAudio(n));
+      push(
+        out,
+        "Смотреть S" + ts + "E" + te + " · " + (ru[0] || "Рус. дубляж"),
+        hls,
+        headers
+      );
+      return;
     }
-  );
+  }
 }
 
 function listEps(html, pageUrl) {
   const eps = [],
     seen = {};
   if (!html || html.indexOf("seasons:") === -1) return eps;
-  const parts = String(html).split(/"season"\s*:\s*/);
-  for (let p = 1; p < parts.length; p++) {
-    const sn = parseInt(parts[p], 10);
-    if (!sn) continue;
-    const re = /"episode"\s*:\s*"?(\d+)"?/g;
-    let m;
-    while ((m = re.exec(parts[p]))) {
-      const en = +m[1];
-      const key = sn + "-" + en;
-      if (!en || seen[key]) continue;
-      seen[key] = true;
-      eps.push({
-        href: pageUrl.split("?")[0] + "?s=" + sn + "&e=" + en,
-        number: en,
-        season: sn,
-        title: "S" + sn + "E" + en,
-      });
+  // Prefer JSON
+  const seasons = extractSeasonsArray(html);
+  if (seasons && seasons.length) {
+    for (let si = 0; si < seasons.length; si++) {
+      const sn = seasons[si].season || si + 1;
+      const episodes = seasons[si].episodes || [];
+      for (let ei = 0; ei < episodes.length; ei++) {
+        const en = parseInt(episodes[ei].episode || ei + 1, 10);
+        const key = sn + "-" + en;
+        if (seen[key]) continue;
+        seen[key] = true;
+        eps.push({
+          href: pageUrl.split("?")[0] + "?s=" + sn + "&e=" + en,
+          number: en,
+          season: sn,
+          title: "S" + sn + "E" + en,
+        });
+      }
+    }
+  } else {
+    const parts = String(html).split(/"season"\s*:\s*/);
+    for (let p = 1; p < parts.length; p++) {
+      const sn = parseInt(parts[p], 10);
+      if (!sn) continue;
+      const re = /"episode"\s*:\s*"?(\d+)"?/g;
+      let m;
+      while ((m = re.exec(parts[p]))) {
+        const en = +m[1];
+        const key = sn + "-" + en;
+        if (!en || seen[key]) continue;
+        seen[key] = true;
+        eps.push({
+          href: pageUrl.split("?")[0] + "?s=" + sn + "&e=" + en,
+          number: en,
+          season: sn,
+          title: "S" + sn + "E" + en,
+        });
+      }
     }
   }
   eps.sort((a, b) => a.season - b.season || a.number - b.number);
@@ -542,7 +611,6 @@ async function searchResults(keyword) {
     if (!queries.length) return JSON.stringify([]);
     const results = [],
       seen = {};
-
     for (let i = 0; i < queries.length; i++) {
       const q = queries[i];
       try {
@@ -572,19 +640,16 @@ async function searchResults(keyword) {
       }
       if (results.length >= 20) break;
     }
-
     const scored = results.map((r) => {
       let best = matchScore(raw, r.title);
       for (let i = 0; i < queries.length; i++)
         best = Math.max(best, matchScore(queries[i], r.title));
       return { r, score: best };
     });
-
     let filtered = scored.filter((x) => x.score >= 50);
     if (filtered.length < 3) filtered = scored.filter((x) => x.score >= 30);
     if (!filtered.length) filtered = scored;
     filtered.sort((a, b) => b.score - a.score);
-
     const out = filtered.slice(0, 15).map((x) => {
       let title = x.r.title;
       if (
@@ -594,13 +659,8 @@ async function searchResults(keyword) {
       ) {
         title = cleanQuery(raw) + " — " + title;
       }
-      return {
-        title,
-        image: x.r.image || "",
-        href: x.r.href,
-      };
+      return { title, image: x.r.image || "", href: x.r.href };
     });
-
     return JSON.stringify(out);
   } catch (e) {
     return JSON.stringify([]);
@@ -693,6 +753,9 @@ async function extractStreamUrl(url) {
   try {
     const clean = String(url).split("#")[0];
     const se = parseSE(clean);
+    // default S1E1 when Services opens series without ?s=&e=
+    const season = se.season || 1;
+    const episode = se.episode || 1;
     const pageUrl = clean.split("?")[0];
     const html = await getText(await soraFetch(pageUrl));
     if (!html) return JSON.stringify({ streams: [], subtitles: "" });
@@ -711,7 +774,7 @@ async function extractStreamUrl(url) {
         );
         if (!eh || eh.length < 40) continue;
         const before = streams.length;
-        parseOrtSeries(eh, se.season || 1, se.episode || 1, streams);
+        parseOrtSeries(eh, season, episode, streams);
         if (streams.length === before) parseOrtMovie(eh, streams);
       } catch (e) {}
     }
@@ -728,12 +791,7 @@ async function extractStreamUrl(url) {
           })
         );
         if (!eh || eh.length < 40) continue;
-        await extractCinemarStreams(
-          eh,
-          se.season || 1,
-          se.episode || 1,
-          streams
-        );
+        await extractCinemarStreams(eh, season, episode, streams);
       } catch (e) {}
     }
 
