@@ -1,8 +1,7 @@
 /**
- * GidOnline.NET – films & series for Sora / Luna
- * Site: https://gidonline.net
- * Player: ortified.ws only (Плеер 2 / cinemar disabled – hangs)
- * v3.2.0 – Смотреть only, no cinemar
+ * GidOnline.NET – Sora / Luna
+ * https://gidonline.net | ortified only
+ * v3.3.0
  */
 
 const baseUrl = "https://gidonline.net";
@@ -11,7 +10,7 @@ const defaultHeaders = {
   "User-Agent":
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
   Referer: baseUrl + "/",
-  "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+  "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 
@@ -22,23 +21,27 @@ async function soraFetch(url, options) {
   const body = options.body || null;
   try {
     if (typeof fetchv2 === "function") {
-      return await fetchv2(url, headers, method, body);
+      const r = await fetchv2(url, headers, method, body);
+      if (r) return r;
     }
   } catch (e) {}
   try {
-    return await fetch(url, { headers: headers, method: method, body: body });
+    return await fetch(url, { method: method, headers: headers, body: body });
   } catch (e2) {
     return null;
   }
 }
 
 async function getText(res) {
-  if (!res) return "";
+  if (res == null) return "";
   try {
     if (typeof res === "string") return res;
-    if (typeof res.text === "function") return await res.text();
-    if (res.data && typeof res.data === "string") return res.data;
-    if (res.body && typeof res.body === "string") return res.body;
+    if (typeof res.text === "function") return String((await res.text()) || "");
+    if (typeof res === "object") {
+      if (typeof res.data === "string") return res.data;
+      if (typeof res.body === "string") return res.body;
+      if (typeof res.content === "string") return res.content;
+    }
     return String(res);
   } catch (e) {
     return "";
@@ -83,7 +86,6 @@ function isEnglishAudio(name) {
     n.indexOf("original") !== -1 ||
     n.indexOf("оригинал") !== -1 ||
     n.indexOf("english") !== -1 ||
-    n.indexOf("flags/us") !== -1 ||
     n.indexOf("укр") !== -1 ||
     n === "en"
   );
@@ -107,59 +109,64 @@ function buildSearchQueries(keyword) {
     if (q && queries.indexOf(q) === -1) queries.push(q);
   };
   add(base);
-  add(base.replace(/&/g, " "));
-  add(base.replace(/[^a-zA-Zа-яА-ЯёЁ0-9\s]/g, " "));
-  const words = base.split(/\s+/).filter(Boolean);
+  add(base.replace(/\s+/g, "-"));
+  add(base.replace(/-/g, " "));
+  const words = base.replace(/-/g, " ").split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    add(words[0] + " " + words[1]);
+    add(words[0] + "-" + words[1]);
+  }
   if (words.length >= 1) add(words[0]);
-  if (words.length >= 2) add(words[0] + " " + words[1]);
   const low = base.toLowerCase();
   const aliases = {
     simpsons: "Симпсоны",
     minions: "Миньоны",
+    "minions & monsters": "Миньоны и монстры",
+    "minions and monsters": "Миньоны и монстры",
     reacher: "Ричер",
     naruto: "Наруто",
     mutiny: "Мятеж",
     rookie: "Новобранец",
+    "spider-man": "Человек-паук",
+    "spider man": "Человек-паук",
+    spiderman: "Человек-паук",
+    "человек паук": "Человек-паук",
   };
   for (const k in aliases) {
     if (low.indexOf(k) !== -1) add(aliases[k]);
   }
-  return queries.slice(0, 5);
+  return queries.slice(0, 8);
 }
 
 function parseSearchHtml(html, results, seen) {
   if (!html) return;
   let m;
-  const re1 =
-    /<a[^>]+href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[^>]*class="[^"]*shortstory[^"]*"[^>]*title="([^"]*)"/gi;
-  while ((m = re1.exec(html)) !== null) {
-    const href = absUrl(m[1]);
-    if (!href || seen[href] || href.indexOf(".html") === -1) continue;
-    seen[href] = true;
-    results.push({ title: decodeHtml(m[2]), image: "", href: href });
-  }
-  const re1b =
-    /class="[^"]*shortstory[^"]*"[^>]*href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[^>]*title="([^"]*)"/gi;
-  while ((m = re1b.exec(html)) !== null) {
+  const reA =
+    /<a[^>]+href="((?:https?:\/\/gidonline\.net)?\/[a-z0-9\-]+\/\d+-[^"]+\.html)"[^>]*title="([^"]+)"/gi;
+  while ((m = reA.exec(html)) !== null) {
     const href = absUrl(m[1]);
     if (!href || seen[href]) continue;
     seen[href] = true;
     results.push({ title: decodeHtml(m[2]), image: "", href: href });
   }
-  const re2 =
-    /<h2>\s*<a[^>]+href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[^>]*(?:title="([^"]*)")?[^>]*>([^<]*)<\/a>/gi;
-  while ((m = re2.exec(html)) !== null) {
+  const reB =
+    /title="([^"]+)"[^>]*href="((?:https?:\/\/gidonline\.net)?\/[a-z0-9\-]+\/\d+-[^"]+\.html)"/gi;
+  while ((m = reB.exec(html)) !== null) {
+    const href = absUrl(m[2]);
+    if (!href || seen[href]) continue;
+    seen[href] = true;
+    results.push({ title: decodeHtml(m[1]), image: "", href: href });
+  }
+  const reC =
+    /<h2[^>]*>\s*<a[^>]+href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[^>]*>([^<]+)<\/a>/gi;
+  while ((m = reC.exec(html)) !== null) {
     const href = absUrl(m[1]);
     if (!href || seen[href]) continue;
     seen[href] = true;
-    results.push({
-      title: decodeHtml(m[2] || m[3] || ""),
-      image: "",
-      href: href,
-    });
+    results.push({ title: decodeHtml(m[2]), image: "", href: href });
   }
   const reImg =
-    /href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[\s\S]{0,500}?data-src="([^"]+)"/gi;
+    /href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[\s\S]{0,600}?(?:data-src|src)="(\/uploads\/[^"]+)"/gi;
   while ((m = reImg.exec(html)) !== null) {
     const href = absUrl(m[1]);
     for (let i = 0; i < results.length; i++) {
@@ -172,14 +179,15 @@ function parseSearchHtml(html, results, seen) {
 
 function pushStream(out, title, url, headers) {
   if (!url) return;
-  url = String(url).replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+  url = String(url).replace(/\\u0026/g, "&").replace(/\\\//g, "/").trim();
   if (!/^https?:\/\//i.test(url)) return;
+  if (url.indexOf(".m3u8") === -1 && url.indexOf(".mp4") === -1) return;
   out.push({
     title: title || "Смотреть",
     streamUrl: url,
     headers: headers || {
       "User-Agent": defaultHeaders["User-Agent"],
-      Referer: baseUrl + "/",
+      Referer: "https://gidonline.net/",
     },
   });
 }
@@ -190,52 +198,22 @@ function pushAudioStreams(out, playerName, hls, audioNames, headers) {
   const ru = names.filter(function (n) {
     return !isEnglishAudio(n);
   });
-  if (ru.length === 0) {
-    pushStream(out, playerName + " · Рус. дубляж", hls, headers);
-    return;
-  }
-  for (let i = 0; i < ru.length; i++) {
-    pushStream(out, playerName + " · " + ru[i], hls, headers);
-  }
-}
-
-function extractSeasonsArray(html) {
-  if (!html || html.indexOf("seasons:") === -1) return null;
-  const idx = html.indexOf("seasons:");
-  const i = html.indexOf("[", idx);
-  if (i === -1) return null;
-  let depth = 0;
-  let end = -1;
-  for (let j = i; j < html.length && j < i + 600000; j++) {
-    const c = html.charAt(j);
-    if (c === "[") depth++;
-    else if (c === "]") {
-      depth--;
-      if (depth === 0) {
-        end = j + 1;
-        break;
-      }
-    }
-  }
-  if (end === -1) return null;
-  try {
-    return JSON.parse(html.substring(i, end));
-  } catch (e) {
-    return null;
-  }
+  const label =
+    ru.length > 0 ? ru[0] : "Рус. дубляж";
+  pushStream(out, (playerName || "Смотреть") + " · " + label, hls, headers);
 }
 
 function findEpisodeStream(html, season, episode) {
   if (!html) return null;
   const en = episode || 1;
   const re = new RegExp(
-    '"episode"\\s*:\\s*"?' + en + '"?[\\s\\S]{0,2000}?"hls"\\s*:\\s*"([^"]+)"'
+    '"episode"\\s*:\\s*"?' + en + '"?[\\s\\S]{0,2500}?"hls"\\s*:\\s*"([^"]+)"'
   );
   const m = String(html).match(re);
   if (!m) return null;
   let hls = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
   let names = [];
-  const block = String(html).substring(m.index, m.index + 2000);
+  const block = String(html).substring(m.index, m.index + 2500);
   const am = block.match(/"names"\s*:\s*(\[[^\]]*\])/);
   if (am) {
     try {
@@ -253,10 +231,9 @@ function listEpisodesLight(html, pageUrl) {
   for (let p = 1; p < parts.length; p++) {
     const sn = parseInt(parts[p], 10);
     if (!sn) continue;
-    const chunk = parts[p];
     const re = /"episode"\s*:\s*"?(\d+)"?/g;
     let m;
-    while ((m = re.exec(chunk)) !== null) {
+    while ((m = re.exec(parts[p])) !== null) {
       const en = parseInt(m[1], 10);
       if (!en) continue;
       const key = sn + "-" + en;
@@ -279,11 +256,10 @@ function listEpisodesLight(html, pageUrl) {
 }
 
 function parseMakePlayerMovie(html, playerName, out) {
-  if (!html || html.indexOf("makePlayer") === -1) return "";
-  if (html.indexOf("seasons:") !== -1) return "";
+  if (!html || html.indexOf("seasons:") !== -1) return;
   const headers = {
     "User-Agent": defaultHeaders["User-Agent"],
-    Referer: baseUrl + "/",
+    Referer: "https://gidonline.net/",
   };
   let audioNames = [];
   const audioMatch = html.match(/audio\s*:\s*\{\s*"names"\s*:\s*(\[[^\]]+\])/);
@@ -293,99 +269,89 @@ function parseMakePlayerMovie(html, playerName, out) {
     } catch (e) {}
   }
   let hls = null;
-  const hlsMatch = html.match(/hls\s*:\s*"([^"]+\.m3u8[^"]*)"/);
-  if (hlsMatch) {
-    hls = hlsMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+  const urls = html.match(/https?:\/\/[^"'\\\s]+master\.m3u8[^"'\\\s]*/g);
+  if (urls && urls.length) {
+    for (let i = 0; i < urls.length; i++) {
+      const u = urls[i].replace(/\\u0026/g, "&");
+      if (u.indexOf("interkh") !== -1 || u.indexOf("showvid") !== -1) {
+        hls = u;
+        break;
+      }
+    }
+    if (!hls) hls = urls[0].replace(/\\u0026/g, "&");
   }
-  if (hls) {
-    pushAudioStreams(out, playerName || "Смотреть", hls, audioNames, headers);
+  if (!hls) {
+    const hlsMatch = html.match(/hls\s*:\s*"([^"]+\.m3u8[^"]*)"/);
+    if (hlsMatch)
+      hls = hlsMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
   }
-  return "";
+  if (hls) pushAudioStreams(out, playerName || "Смотреть", hls, audioNames, headers);
 }
 
 function parseSeasonsPlayer(html, playerName, season, episode, out) {
-  if (!html || html.indexOf("seasons:") === -1) return "";
+  if (!html || html.indexOf("seasons:") === -1) return;
   const headers = {
     "User-Agent": defaultHeaders["User-Agent"],
-    Referer: baseUrl + "/",
+    Referer: "https://gidonline.net/",
   };
-  const targetSeason = season || 1;
-  const targetEpisode = episode || 1;
-  const found = findEpisodeStream(html, targetSeason, targetEpisode);
+  const found = findEpisodeStream(html, season || 1, episode || 1);
   if (found && found.hls) {
     pushAudioStreams(
       out,
-      (playerName || "Смотреть") + " S" + targetSeason + "E" + targetEpisode,
+      (playerName || "Смотреть") +
+        " S" +
+        (season || 1) +
+        "E" +
+        (episode || 1),
       found.hls,
       found.names,
       headers
     );
-    return "";
   }
-  const seasons = extractSeasonsArray(html);
-  if (!seasons || !seasons.length) return "";
-  for (let si = 0; si < seasons.length; si++) {
-    const sObj = seasons[si];
-    const sn = sObj.season || si + 1;
-    if (sn !== targetSeason) continue;
-    const episodes = sObj.episodes || [];
-    for (let ei = 0; ei < episodes.length; ei++) {
-      const ep = episodes[ei];
-      const en = parseInt(ep.episode || ei + 1, 10);
-      if (en !== targetEpisode) continue;
-      let hls = ep.hls || ep.file || "";
-      if (hls) hls = String(hls).replace(/\\u0026/g, "&").replace(/\\\//g, "/");
-      let audioNames = [];
-      if (ep.audio && ep.audio.names) audioNames = ep.audio.names;
-      pushAudioStreams(
-        out,
-        (playerName || "Смотреть") + " S" + sn + "E" + en,
-        hls,
-        audioNames,
-        headers
-      );
-      return "";
-    }
-  }
-  return "";
 }
 
-/** Only ortified – skip cinemar (Плеер 2 hangs) */
-function parsePagePlayers(html) {
-  const players = [];
+function findOrtifiedEmbeds(html) {
+  const out = [];
   const seen = {};
-  if (!html) return players;
-  const iframeRe =
-    /(?:data-src|src)=["']((?:https?:)?\/\/(?:api\.ortified\.ws|api\.embess\.ws)[^"']+)["']/gi;
+  if (!html) return out;
+  const re =
+    /(?:data-src|src)=["']((?:https?:)?\/\/api\.ortified\.ws\/embed\/[^"']+)["']/gi;
   let m;
-  while ((m = iframeRe.exec(html)) !== null) {
-    let src = absUrl(m[1].replace(/&amp;/g, "&"));
+  while ((m = re.exec(html)) !== null) {
+    const src = absUrl(m[1].replace(/&amp;/g, "&"));
     if (!src || seen[src]) continue;
     seen[src] = true;
-    players.push({ name: "Смотреть", src: src });
+    out.push(src);
   }
-  return players;
+  const re2 = /(https?:\/\/api\.ortified\.ws\/embed\/[a-z]+\/\d+)/gi;
+  while ((m = re2.exec(html)) !== null) {
+    if (seen[m[1]]) continue;
+    seen[m[1]] = true;
+    out.push(m[1]);
+  }
+  return out;
 }
 
 async function searchResults(keyword) {
   try {
-    const rawKeyword = String(keyword || "").trim();
-    const queries = buildSearchQueries(rawKeyword);
+    const queries = buildSearchQueries(String(keyword || "").trim());
     if (!queries.length) return JSON.stringify([]);
     const results = [];
     const seen = {};
-    for (let i = 0; i < queries.length; i++) {
-      const url =
-        baseUrl +
-        "/index.php?do=search&subaction=search&story=" +
-        encodeURIComponent(queries[i]);
-      const res = await soraFetch(url);
-      parseSearchHtml(await getText(res), results, seen);
+    for (let qi = 0; qi < queries.length; qi++) {
+      const q = queries[qi];
+      try {
+        const url =
+          baseUrl +
+          "/index.php?do=search&subaction=search&story=" +
+          encodeURIComponent(q);
+        parseSearchHtml(await getText(await soraFetch(url)), results, seen);
+      } catch (e) {}
       if (results.length < 3) {
         try {
           const body =
             "do=search&subaction=search&story=" +
-            encodeURIComponent(queries[i]) +
+            encodeURIComponent(q) +
             "&titleonly=3";
           const res2 = await soraFetch(baseUrl + "/index.php?do=search", {
             method: "POST",
@@ -399,14 +365,16 @@ async function searchResults(keyword) {
           parseSearchHtml(await getText(res2), results, seen);
         } catch (e) {}
       }
-      if (results.length >= 20) break;
+      if (results.length >= 15) break;
     }
-    const q = cleanQuery(rawKeyword).toLowerCase();
+    const q = cleanQuery(keyword).toLowerCase().replace(/-/g, " ");
     const qWords = q.split(/\s+/).filter(function (w) {
       return w.length > 2;
     });
     function score(item) {
-      const t = String(item.title || "").toLowerCase();
+      const t = String(item.title || "")
+        .toLowerCase()
+        .replace(/-/g, " ");
       let s = 0;
       if (t === q) s += 100;
       if (t.indexOf(q) !== -1) s += 50;
@@ -426,21 +394,14 @@ async function searchResults(keyword) {
 
 async function extractDetails(url) {
   try {
-    const res = await soraFetch(String(url).split("?")[0]);
-    const html = await getText(res);
+    const html = await getText(await soraFetch(String(url).split("?")[0]));
     let description = "N/A";
     const dm =
       html.match(/name="description"\s+content="([^"]+)"/i) ||
       html.match(/itemprop="description"[^>]*content="([^"]+)"/i);
     if (dm) description = decodeHtml(dm[1]).slice(0, 900);
-    let aliases = "N/A";
-    const orig = html.match(/Оригинальное[^<]{0,40}<\/[^>]+>\s*([^<]+)/i);
-    if (orig) aliases = decodeHtml(orig[1]);
-    let airdate = "N/A";
-    const year = html.match(/(?:Год|year)[^0-9]{0,30}(\d{4})/i);
-    if (year) airdate = year[1];
     return JSON.stringify([
-      { description: description, aliases: aliases, airdate: airdate },
+      { description: description, aliases: "N/A", airdate: "N/A" },
     ]);
   } catch (e) {
     return JSON.stringify([
@@ -452,23 +413,24 @@ async function extractDetails(url) {
 async function extractEpisodes(url) {
   try {
     const pageUrl = String(url).split("?")[0];
-    const res = await soraFetch(pageUrl);
-    const html = await getText(res);
+    const html = await getText(await soraFetch(pageUrl));
     if (!html) {
       return JSON.stringify([
         { href: pageUrl, number: 1, season: 1, title: "Смотреть" },
       ]);
     }
-    const players = parsePagePlayers(html);
-    for (let i = 0; i < players.length; i++) {
+    const embeds = findOrtifiedEmbeds(html);
+    for (let i = 0; i < embeds.length; i++) {
       try {
-        const er = await soraFetch(players[i].src, {
-          headers: {
-            "User-Agent": defaultHeaders["User-Agent"],
-            Referer: pageUrl,
-          },
-        });
-        const eps = listEpisodesLight(await getText(er), pageUrl);
+        const eh = await getText(
+          await soraFetch(embeds[i], {
+            headers: {
+              "User-Agent": defaultHeaders["User-Agent"],
+              Referer: pageUrl,
+            },
+          })
+        );
+        const eps = listEpisodesLight(eh, pageUrl);
         if (eps.length > 1) return JSON.stringify(eps);
       } catch (e) {}
     }
@@ -492,35 +454,35 @@ async function extractStreamUrl(url) {
     const clean = String(url).split("#")[0];
     const se = parseSeasonEpisode(clean);
     const pageUrl = clean.split("?")[0];
-    const res = await soraFetch(pageUrl);
-    const html = await getText(res);
+    const html = await getText(await soraFetch(pageUrl));
     if (!html) return JSON.stringify({ streams: [], subtitles: "" });
 
     const streams = [];
     const headers = {
       "User-Agent": defaultHeaders["User-Agent"],
-      Referer: baseUrl + "/",
+      Referer: "https://gidonline.net/",
     };
-    const players = parsePagePlayers(html);
+    let embeds = findOrtifiedEmbeds(html);
+    if (!embeds.length) {
+      const m = html.match(/ortified\.ws\/embed\/[a-z]+\/(\d+)/i);
+      if (m) embeds = ["https://api.ortified.ws/embed/movie/" + m[1]];
+    }
 
-    for (let i = 0; i < players.length; i++) {
+    for (let i = 0; i < embeds.length; i++) {
       try {
-        const er = await soraFetch(players[i].src, {
-          headers: Object.assign({}, headers, { Referer: pageUrl }),
-        });
-        const eh = await getText(er);
-        if (!eh || eh.length < 80) continue;
-        const before = streams.length;
-        parseSeasonsPlayer(
-          eh,
-          "Смотреть",
-          se.season || 1,
-          se.episode || 1,
-          streams
+        const eh = await getText(
+          await soraFetch(embeds[i], {
+            headers: {
+              "User-Agent": defaultHeaders["User-Agent"],
+              Referer: pageUrl,
+              Accept: "text/html,*/*",
+            },
+          })
         );
-        if (streams.length === before) {
-          parseMakePlayerMovie(eh, "Смотреть", streams);
-        }
+        if (!eh || eh.length < 50) continue;
+        const before = streams.length;
+        parseSeasonsPlayer(eh, "Смотреть", se.season || 1, se.episode || 1, streams);
+        if (streams.length === before) parseMakePlayerMovie(eh, "Смотреть", streams);
       } catch (e) {}
     }
 
@@ -530,7 +492,7 @@ async function extractStreamUrl(url) {
       const s = streams[i];
       if (!s || !s.streamUrl) continue;
       if (isEnglishAudio(s.title || "")) continue;
-      const key = s.streamUrl.slice(0, 100);
+      const key = s.streamUrl.slice(0, 120);
       if (seenKey[key]) continue;
       seenKey[key] = true;
       uniq.push({
@@ -540,7 +502,7 @@ async function extractStreamUrl(url) {
       });
     }
 
-    return JSON.stringify({ streams: uniq.slice(0, 10), subtitles: "" });
+    return JSON.stringify({ streams: uniq.slice(0, 8), subtitles: "" });
   } catch (err) {
     return JSON.stringify({ streams: [], subtitles: "" });
   }
