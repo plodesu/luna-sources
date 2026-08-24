@@ -1,6 +1,6 @@
 /**
  * GidOnline.NET – Sora / Luna
- * v3.5.0 – accurate search ranking (100% match) + streams
+ * v3.6.0 – correct posters + ranking + streams
  */
 const baseUrl = "https://gidonline.net";
 
@@ -12,7 +12,6 @@ const defaultHeaders = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 
-/* EN / common → RU search aliases */
 const ALIASES = {
   "breaking bad": "Во все тяжкие",
   "better call saul": "Лучше звоните Солу",
@@ -31,41 +30,27 @@ const ALIASES = {
   "spider man": "Человек-паук",
   spiderman: "Человек-паук",
   "человек паук": "Человек-паук",
+  "brand new day": "Новый день",
+  "новый день": "Человек-паук: Новый день",
   minions: "Миньоны",
   "minions & monsters": "Миньоны и монстры",
-  "minions and monsters": "Миньоны и монстры",
   "despicable me": "Гадкий я",
   reacher: "Ричер",
-  "jack reacher": "Ричер",
   mutiny: "Мятеж",
   naruto: "Наруто",
   "naruto shippuden": "Наруто: Ураганные хроники",
-  "naruto: shippuden": "Наруто: Ураганные хроники",
-  "ураганные хроники": "Наруто: Ураганные хроники",
   "the rookie": "Новобранец",
-  rookie: "Новобранец",
   "one piece": "Ван Пис",
   "attack on titan": "Атака титанов",
   "demon slayer": "Клинок, рассекающий демонов",
   "jujutsu kaisen": "Магическая битва",
-  invincible: "Неуязвимый",
-  "the bear": "Медведь",
-  succession: "Наследники",
-  sherlock: "Шерлок",
-  "peaky blinders": "Острые козырьки",
-  "money heist": "Бумажный дом",
-  "la casa de papel": "Бумажный дом",
-  squids: "Игра в кальмара",
   "squid game": "Игра в кальмара",
   wednesday: "Уэнсдей",
-  "loki": "Локи",
   "the mandalorian": "Мандалорец",
   "house md": "Доктор Хаус",
   "house m.d.": "Доктор Хаус",
-  house: "Доктор Хаус",
-  "how i met your mother": "Как я встретил вашу маму",
-  "arcane": "Аркейн",
-  "fallout": "Фоллаут",
+  lanterns: "Фонари",
+  "green lantern": "Зелёный фонарь",
 };
 
 async function soraFetch(url, options) {
@@ -176,83 +161,109 @@ function buildQueries(keyword) {
     add(w[0] + " " + w[1]);
     add(w[0] + "-" + w[1]);
   }
-  return q.slice(0, 8);
+  if (w.length >= 3) add(w.slice(0, 3).join(" "));
+  return q.slice(0, 10);
 }
 
-/** Match score between query and result title */
+function norm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/-/g, " ")
+    .replace(/[^\wа-я\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function matchScore(query, title) {
-  const q = String(query || "")
-    .toLowerCase()
-    .replace(/-/g, " ")
-    .replace(/[^\wа-яё\s]/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const t = String(title || "")
-    .toLowerCase()
-    .replace(/-/g, " ")
-    .replace(/[^\wа-яё\s]/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  const q = norm(query);
+  const t = norm(title);
   if (!q || !t) return 0;
   if (t === q) return 100;
-  if (t.indexOf(q) !== -1 || q.indexOf(t) !== -1) return 90;
+  if (t.indexOf(q) !== -1) return 95;
+  if (q.indexOf(t) !== -1 && t.length > 5) return 88;
 
-  // alias reverse check
   for (const k in ALIASES) {
-    const ru = ALIASES[k].toLowerCase().replace(/-/g, " ");
-    if ((q === k || q.indexOf(k) !== -1) && (t.indexOf(ru) !== -1 || ru.indexOf(t) !== -1))
-      return 95;
-    if ((t.indexOf(k) !== -1) && (q.indexOf(ru) !== -1 || ru.indexOf(q) !== -1))
-      return 95;
+    const ru = norm(ALIASES[k]);
+    if ((q === k || q.indexOf(k) !== -1) && t.indexOf(ru) !== -1) return 96;
   }
 
-  const qw = q.split(" ").filter((w) => w.length > 2);
-  const tw = t.split(" ").filter((w) => w.length > 2);
+  const qw = q.split(" ").filter((w) => w.length > 1);
   if (!qw.length) return 0;
   let hit = 0;
   for (let i = 0; i < qw.length; i++) {
-    for (let j = 0; j < tw.length; j++) {
-      if (tw[j].indexOf(qw[i]) !== -1 || qw[i].indexOf(tw[j]) !== -1) {
-        hit++;
-        break;
-      }
-    }
+    if (t.indexOf(qw[i]) !== -1) hit++;
   }
-  return Math.round((hit / qw.length) * 80);
+  // all words must matter for high score
+  const ratio = hit / qw.length;
+  if (ratio >= 1) return 92;
+  if (ratio >= 0.75) return 75;
+  if (ratio >= 0.5) return 55;
+  if (ratio >= 0.34) return 35;
+  return Math.round(ratio * 30);
 }
 
+/**
+ * Parse each result card as one block so poster stays with its title.
+ */
 function parseSearchHtml(html, results, seen) {
   if (!html) return;
+
+  // 1) article.short blocks (best)
+  const reArticle =
+    /<article[^>]*class="[^"]*short[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
   let m;
-  // ONLY shortstory cards = real search hits (skip sidebar)
-  const re =
-    /<a[^>]*class="[^"]*shortstory[^"]*"[^>]*href="([^"]+)"[^>]*title="([^"]+)"|<a[^>]*href="([^"]+)"[^>]*class="[^"]*shortstory[^"]*"[^>]*title="([^"]+)"|<a[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*class="[^"]*shortstory/gi;
-  while ((m = re.exec(html))) {
-    const href = absUrl(m[1] || m[3] || m[5] || "");
-    const title = decodeHtml(m[2] || m[4] || m[6] || "");
-    if (!href || !title || seen[href]) continue;
-    if (href.indexOf(".html") === -1) continue;
-    seen[href] = true;
-    results.push({ title, image: "", href });
-  }
-  // h2 inside results
-  const reH =
-    /<h2[^>]*>\s*<a[^>]+href="((?:https?:\/\/gidonline\.net)?\/[a-z0-9\-]+\/\d+-[^"]+\.html)"[^>]*>([^<]+)<\/a>/gi;
-  while ((m = reH.exec(html))) {
-    const href = absUrl(m[1]);
-    const title = decodeHtml(m[2]);
+  while ((m = reArticle.exec(html))) {
+    const block = m[1];
+    const hrefM =
+      block.match(
+        /href="((?:https?:\/\/gidonline\.net)?\/[a-z0-9\-]+\/\d+-[^"]+\.html)"/i
+      ) ||
+      block.match(/href="([^"]+\.html)"/i);
+    const titleM =
+      block.match(/class="[^"]*shortstory[^"]*"[^>]*title="([^"]+)"/i) ||
+      block.match(/title="([^"]+)"[^>]*class="[^"]*shortstory/i) ||
+      block.match(/title="([^"]+)"/i);
+    if (!hrefM || !titleM) continue;
+    const href = absUrl(hrefM[1]);
+    const title = decodeHtml(titleM[1]);
     if (!href || !title || seen[href]) continue;
     seen[href] = true;
-    results.push({ title, image: "", href });
+    let image = "";
+    const imgM =
+      block.match(/(?:data-src|src)="(\/uploads\/[^"]+)"/i) ||
+      block.match(/(?:data-src|src)="(https?:\/\/[^"]*\/uploads\/[^"]+)"/i);
+    if (imgM) image = absUrl(imgM[1]);
+    results.push({ title, image, href });
   }
-  // posters
-  const reImg =
-    /href="((?:https?:\/\/gidonline\.net)?\/[^"]+\.html)"[\s\S]{0,500}?(?:data-src|src)="(\/uploads\/[^"]+)"/gi;
-  while ((m = reImg.exec(html))) {
-    const href = absUrl(m[1]);
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].href === href && !results[i].image)
-        results[i].image = absUrl(m[2]);
+
+  // 2) shortstory anchors (if no articles)
+  if (results.length < 3) {
+    const reA =
+      /<a[^>]*class="[^"]*shortstory[^"]*"[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>([\s\S]{0,600}?)<\/a>/gi;
+    while ((m = reA.exec(html))) {
+      const href = absUrl(m[1]);
+      const title = decodeHtml(m[2]);
+      if (!href || !title || seen[href] || href.indexOf(".html") === -1)
+        continue;
+      seen[href] = true;
+      let image = "";
+      const imgM = m[3].match(/(?:data-src|src)="(\/uploads\/[^"]+)"/i);
+      if (imgM) image = absUrl(imgM[1]);
+      results.push({ title, image, href });
+    }
+  }
+
+  // 3) title+href shortstory without nested img — try sibling pattern
+  if (results.length < 3) {
+    const reB =
+      /title="([^"]+)"[^>]*href="((?:https?:\/\/gidonline\.net)?\/[a-z0-9\-]+\/\d+-[^"]+\.html)"[^>]*class="[^"]*shortstory[^"]*"/gi;
+    while ((m = reB.exec(html))) {
+      const href = absUrl(m[2]);
+      const title = decodeHtml(m[1]);
+      if (!href || !title || seen[href]) continue;
+      seen[href] = true;
+      results.push({ title, image: "", href });
     }
   }
 }
@@ -380,7 +391,6 @@ function listEps(html, pageUrl) {
   return eps;
 }
 
-/* cinemar */
 function decodeCinemarFile(fileStr) {
   if (!fileStr || String(fileStr).indexOf("#2") !== 0) return null;
   try {
@@ -525,7 +535,6 @@ async function extractCinemarStreams(embedHtml, season, episode, out) {
   }
 }
 
-/* ---- API ---- */
 async function searchResults(keyword) {
   try {
     const raw = String(keyword || "").trim();
@@ -533,6 +542,7 @@ async function searchResults(keyword) {
     if (!queries.length) return JSON.stringify([]);
     const results = [],
       seen = {};
+
     for (let i = 0; i < queries.length; i++) {
       const q = queries[i];
       try {
@@ -560,35 +570,35 @@ async function searchResults(keyword) {
           parseSearchHtml(await getText(r2), results, seen);
         } catch (e) {}
       }
+      if (results.length >= 20) break;
     }
 
-    // score vs original query AND alias targets
     const scored = results.map((r) => {
       let best = matchScore(raw, r.title);
-      for (let i = 0; i < queries.length; i++) {
+      for (let i = 0; i < queries.length; i++)
         best = Math.max(best, matchScore(queries[i], r.title));
-      }
       return { r, score: best };
     });
 
-    // drop junk (sidebar / unrelated)
-    let filtered = scored.filter((x) => x.score >= 40);
-    if (!filtered.length) filtered = scored.filter((x) => x.score >= 20);
+    let filtered = scored.filter((x) => x.score >= 50);
+    if (filtered.length < 3) filtered = scored.filter((x) => x.score >= 30);
     if (!filtered.length) filtered = scored;
-
     filtered.sort((a, b) => b.score - a.score);
 
-    // Format title for high Luna match % when query is English
-    const out = filtered.slice(0, 12).map((x) => {
+    const out = filtered.slice(0, 15).map((x) => {
       let title = x.r.title;
-      if (x.score >= 90 && /[a-zA-Z]/.test(raw) && !/[a-zA-Z]{3,}/.test(title)) {
-        // e.g. "Breaking Bad — Во все тяжкие"
+      if (
+        x.score >= 90 &&
+        /[a-zA-Z]/.test(raw) &&
+        !/[a-zA-Z]{3,}/.test(title)
+      ) {
         title = cleanQuery(raw) + " — " + title;
-      } else if (x.score >= 90 && cleanQuery(raw).toLowerCase() !== title.toLowerCase()) {
-        // keep RU but if query was exact RU, fine
-        title = title;
       }
-      return { title, image: x.r.image || "", href: x.r.href };
+      return {
+        title,
+        image: x.r.image || "",
+        href: x.r.href,
+      };
     });
 
     return JSON.stringify(out);
@@ -605,7 +615,9 @@ async function extractDetails(url) {
     if (dm) description = decodeHtml(dm[1]).slice(0, 900);
     return JSON.stringify([{ description, aliases: "N/A", airdate: "N/A" }]);
   } catch (e) {
-    return JSON.stringify([{ description: "N/A", aliases: "N/A", airdate: "N/A" }]);
+    return JSON.stringify([
+      { description: "N/A", aliases: "N/A", airdate: "N/A" },
+    ]);
   }
 }
 
@@ -614,7 +626,9 @@ async function extractEpisodes(url) {
     const pageUrl = String(url).split("?")[0];
     const html = await getText(await soraFetch(pageUrl));
     if (!html)
-      return JSON.stringify([{ href: pageUrl, number: 1, season: 1, title: "Смотреть" }]);
+      return JSON.stringify([
+        { href: pageUrl, number: 1, season: 1, title: "Смотреть" },
+      ]);
     const embeds = findEmbeds(html, "api\\.ortified\\.ws").concat(
       findEmbeds(html, "cinemar\\.cc")
     );
@@ -660,10 +674,17 @@ async function extractEpisodes(url) {
         }
       } catch (e) {}
     }
-    return JSON.stringify([{ href: pageUrl, number: 1, season: 1, title: "Смотреть" }]);
+    return JSON.stringify([
+      { href: pageUrl, number: 1, season: 1, title: "Смотреть" },
+    ]);
   } catch (e) {
     return JSON.stringify([
-      { href: String(url).split("?")[0], number: 1, season: 1, title: "Смотреть" },
+      {
+        href: String(url).split("?")[0],
+        number: 1,
+        season: 1,
+        title: "Смотреть",
+      },
     ]);
   }
 }
@@ -707,7 +728,12 @@ async function extractStreamUrl(url) {
           })
         );
         if (!eh || eh.length < 40) continue;
-        await extractCinemarStreams(eh, se.season || 1, se.episode || 1, streams);
+        await extractCinemarStreams(
+          eh,
+          se.season || 1,
+          se.episode || 1,
+          streams
+        );
       } catch (e) {}
     }
 
