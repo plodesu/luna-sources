@@ -1,6 +1,6 @@
 /**
  * Seasonvar.ru – Sora / Luna (series)
- * v1.0.0
+ * v1.0.1 – posters scraped from series pages
  */
 const baseUrl = "https://seasonvar.ru";
 
@@ -84,7 +84,6 @@ function seasonFromTitle(title) {
   return m ? +m[1] : null;
 }
 
-/** Decode seasonvar #2 base64 file links */
 function decodeFile(enc) {
   if (!enc) return "";
   let s = String(enc).trim();
@@ -93,7 +92,6 @@ function decodeFile(enc) {
   s = s.replace(/\/\/b2xvbG8=/g, "").replace(/\\\/\\\/b2xvbG8=/g, "");
   try {
     if (typeof atob !== "function") return "";
-    // pad base64
     const pad = s.length % 4;
     if (pad) s += "====".substring(0, 4 - pad);
     const bin = atob(s);
@@ -114,6 +112,29 @@ function decodeFile(enc) {
 function posterForId(id) {
   if (!id) return "";
   return "https://cdn.seasonvar.ru/oblojka/" + id + ".jpg";
+}
+
+function extractPoster(html, id) {
+  if (!html) return posterForId(id);
+  let m =
+    html.match(
+      /property=["']og:image["'][^>]*content=["']([^"']+)["']/i
+    ) ||
+    html.match(
+      /content=["']([^"']+)["'][^>]*property=["']og:image["']/i
+    ) ||
+    html.match(
+      /(?:src|data-src)=["']((?:https?:)?\/\/[^"']*oblojka[^"']+)["']/i
+    ) ||
+    html.match(
+      /(?:src|data-src)=["']((?:https?:)?\/\/cdn\.seasonvar\.ru\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i
+    ) ||
+    html.match(/(?:src|data-src)=["'](\/[^"']*oblojka[^"']+)["']/i) ||
+    html.match(
+      /background(?:-image)?:\s*url\(['"]?([^'")\s]*oblojka[^'")\s]*)/i
+    );
+  if (m && m[1]) return absUrl(m[1].replace(/&amp;/g, "&"));
+  return posterForId(id);
 }
 
 function extractSecureMark(html) {
@@ -160,10 +181,11 @@ function episodeNumberFromTitle(title, index) {
 
 function translationFromTitle(title) {
   const t = String(title || "").replace(/<br\s*\/?>/gi, " ");
-  // "1 серия SD/HD<br>LostFilm" → LostFilm
   const parts = t.split(/\s{2,}|<br\s*\/?>/i);
   if (parts.length > 1) return parts[parts.length - 1].trim();
-  const m = t.match(/(LostFilm|NewStudio|Amedia|Baibako|HDRezka|Кураж|TVShows|AlexFilm|ColdFilm|VoiceProject|RuDub|AniDub)[^]*/i);
+  const m = t.match(
+    /(LostFilm|NewStudio|Amedia|Baibako|HDRezka|Кураж|TVShows|AlexFilm|ColdFilm|VoiceProject|RuDub|AniDub)[^]*/i
+  );
   return m ? m[0].trim() : "";
 }
 
@@ -200,7 +222,6 @@ async function loadSeasonPlaylist(pageUrl) {
     items = flattenPlaylist(pl);
   }
 
-  // fallback: try serial id if different
   if (!items.length && secure && ids.serialId && ids.serialId !== plId) {
     const pl = await fetchPlaylist(secure, ids.serialId);
     items = flattenPlaylist(pl);
@@ -235,7 +256,6 @@ async function searchResults(keyword) {
     const j = await getJson(res);
     if (!j) return JSON.stringify([]);
 
-    // support both shapes: suggestions.valu[] or suggestions[]
     let titles = [];
     if (j.suggestions && Array.isArray(j.suggestions.valu))
       titles = j.suggestions.valu;
@@ -249,19 +269,46 @@ async function searchResults(keyword) {
     for (let i = 0; i < Math.max(titles.length, data.length); i++) {
       const title = String(titles[i] || "").trim();
       const hrefPath = String(data[i] || "").trim();
-      const id = String(ids[i] || "").trim();
+      let id = String(ids[i] || "").trim();
       if (!title || !hrefPath) continue;
-      if (title.indexOf("<span") === 0) break; // tags/actors section
+      if (title.indexOf("<span") === 0) break;
       const href = absUrl(hrefPath);
       if (seen[href]) continue;
       seen[href] = true;
+      if (!id) {
+        const m = hrefPath.match(/serial-(\d+)/);
+        if (m) id = m[1];
+      }
       results.push({
         title: title.replace(/\s+/g, " "),
         image: posterForId(id),
         href: href,
+        _id: id,
       });
     }
-    return JSON.stringify(results.slice(0, 20));
+
+    // scrape real posters from series pages (first 12)
+    const limit = Math.min(results.length, 12);
+    for (let i = 0; i < limit; i++) {
+      try {
+        const pageHtml = await getText(
+          await soraFetch(results[i].href, {
+            headers: {
+              "User-Agent": defaultHeaders["User-Agent"],
+              Referer: baseUrl + "/",
+            },
+          })
+        );
+        const img = extractPoster(pageHtml, results[i]._id);
+        if (img) results[i].image = img;
+      } catch (e) {}
+    }
+
+    return JSON.stringify(
+      results.slice(0, 20).map(function (r) {
+        return { title: r.title, image: r.image || "", href: r.href };
+      })
+    );
   } catch (e) {
     return JSON.stringify([]);
   }
@@ -274,7 +321,9 @@ async function extractDetails(url) {
     const dm =
       html.match(/itemprop="description"[^>]*content="([^"]+)"/i) ||
       html.match(/name="description"\s+content="([^"]+)"/i) ||
-      html.match(/class="[^"]*pgs-sinfo-info[^"]*"[^>]*>([\s\S]{20,400}?)<\//i);
+      html.match(
+        /class="[^"]*pgs-sinfo-info[^"]*"[^>]*>([\s\S]{20,400}?)<\//i
+      );
     if (dm) {
       description = String(dm[1])
         .replace(/<[^>]+>/g, " ")
@@ -305,16 +354,23 @@ async function extractEpisodes(url) {
     const items = loaded.items || [];
     if (!items.length) {
       return JSON.stringify([
-        { href: pageUrl + "?s=" + sn + "&e=1", number: 1, season: sn, title: "S" + sn + "E1" },
+        {
+          href: pageUrl + "?s=" + sn + "&e=1",
+          number: 1,
+          season: sn,
+          title: "S" + sn + "E1",
+        },
       ]);
     }
 
     const eps = [];
     const seen = {};
     for (let i = 0; i < items.length; i++) {
-      const en = episodeNumberFromTitle(items[i].title || items[i].comment, i);
+      const en = episodeNumberFromTitle(
+        items[i].title || items[i].comment,
+        i
+      );
       const key = sn + "-" + en;
-      // keep first translation variant only for list
       if (seen[key]) continue;
       seen[key] = true;
       eps.push({
@@ -325,9 +381,18 @@ async function extractEpisodes(url) {
       });
     }
     eps.sort((a, b) => a.number - b.number);
-    return JSON.stringify(eps.length ? eps : [
-      { href: pageUrl + "?s=" + sn + "&e=1", number: 1, season: sn, title: "S" + sn + "E1" },
-    ]);
+    return JSON.stringify(
+      eps.length
+        ? eps
+        : [
+            {
+              href: pageUrl + "?s=" + sn + "&e=1",
+              number: 1,
+              season: sn,
+              title: "S" + sn + "E1",
+            },
+          ]
+    );
   } catch (e) {
     return JSON.stringify([
       {
@@ -357,7 +422,6 @@ async function extractStreamUrl(url) {
     if (!items.length)
       return JSON.stringify({ streams: [], subtitles: "" });
 
-    // collect all matching episode translations
     const streams = [];
     const headers = {
       "User-Agent": defaultHeaders["User-Agent"],
@@ -365,26 +429,28 @@ async function extractStreamUrl(url) {
     };
 
     for (let i = 0; i < items.length; i++) {
-      const en = episodeNumberFromTitle(items[i].title || items[i].comment, i);
+      const en = episodeNumberFromTitle(
+        items[i].title || items[i].comment,
+        i
+      );
       if (en !== episode) continue;
-      let file = items[i].file || "";
-      file = decodeFile(file);
+      let file = decodeFile(items[i].file || "");
       if (!file || file.indexOf("http") !== 0) continue;
-      const tr = translationFromTitle(items[i].title || items[i].comment);
-      const label =
-        "S" +
-        seasonHint +
-        "E" +
-        episode +
-        (tr ? " · " + tr : " · Stream");
+      const tr = translationFromTitle(
+        items[i].title || items[i].comment
+      );
       streams.push({
-        title: label,
+        title:
+          "S" +
+          seasonHint +
+          "E" +
+          episode +
+          (tr ? " · " + tr : " · Stream"),
         streamUrl: file,
         headers: headers,
       });
     }
 
-    // if nothing matched exact episode, try index episode-1
     if (!streams.length && items[episode - 1]) {
       let file = decodeFile(items[episode - 1].file || "");
       if (file && file.indexOf("http") === 0) {
@@ -404,9 +470,8 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // dedupe
-    const uniq = [],
-      seen = {};
+    const uniq = [];
+    const seen = {};
     for (let i = 0; i < streams.length; i++) {
       const k = streams[i].streamUrl.slice(0, 120);
       if (seen[k]) continue;
