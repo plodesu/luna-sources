@@ -1,8 +1,8 @@
 {
-    "sourceName": "Kodik Russian Hub",
-    "iconUrl": "https://raw.githubusercontent.com/tomb/tomb/main/icon.png",
+    "sourceName": "Shikimori RU Hub",
+    "iconUrl": "https://shikimori.one/assets/globals/logo-4a2ebad0.svg",
     "author": {
-        "name": "User",
+        "name": "plodesu",
         "icon": ""
     },
     "version": "1.0.0",
@@ -13,10 +13,10 @@
     ],
     "streamType": "HLS",
     "quality": "1080p",
-    "baseUrl": "https://kodikapi.com",
-    "searchBaseUrl": "https://kodikapi.com/search",
-    "scriptUrl": "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPOSITORY_NAME/refs/heads/main/script.js",
-    "type": "movies/shows",
+    "baseUrl": "https://shikimori.one",
+    "searchBaseUrl": "https://shikimori.one/api/animes",
+    "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/main/script.js",
+    "type": "anime",
     "asyncJS": true,
     "softsub": false,
     "downloadSupport": false,
