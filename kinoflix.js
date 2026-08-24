@@ -1,7 +1,7 @@
 /**
  * Kinoflix – films & series for Sora / Luna
  * Site: https://kinoflix.tv
- * v1.3.0 – force RU-only HLS (strip EN) for series+movies
+ * v1.4.0 – series audio: RU-only HLS, spoofed as default so iOS won't pick English
  */
 
 const baseUrl = "https://kinoflix.tv";
@@ -433,11 +433,8 @@ async function buildRussianOnlyHls(masterUrl, headers) {
       }
     }
 
-    // plain working master (often already has RU default on series)
-    const plainMaster = usedUrl;
-
     if (!ruAudioLine || !streamLines.length) {
-      return { url: plainMaster, dataUri: null };
+      return { url: usedUrl, dataUri: null };
     }
 
     streamLines.sort(function (a, b) {
@@ -446,19 +443,36 @@ async function buildRussianOnlyHls(masterUrl, headers) {
       return bw - aw;
     });
 
-    let out = "#EXTM3U\n#EXT-X-VERSION:6\n" + ruAudioLine + "\n";
+    // Only ONE audio: Russian file, but tagged LANGUAGE=en.
+    // iOS/Luna picks English by device language; this makes that pick the RU file.
+    const ruUri = (ruAudioLine.match(/URI="([^"]+)"/) || [])[1];
+    const fakeEnAudio =
+      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Default",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="' +
+      ruUri +
+      '"';
+
+    let out = "#EXTM3U\n#EXT-X-VERSION:6\n" + fakeEnAudio + "\n";
     for (let i = 0; i < Math.min(streamLines.length, 3); i++) {
       out += streamLines[i].inf + "\n" + streamLines[i].url + "\n";
     }
 
     let dataUri = null;
+    let dataUriEnc = null;
     try {
       if (typeof btoa === "function") {
         dataUri = "data:application/vnd.apple.mpegurl;base64," + btoa(out);
       }
+      dataUriEnc =
+        "data:application/vnd.apple.mpegurl;charset=utf-8," +
+        encodeURIComponent(out);
     } catch (e) {}
 
-    return { url: plainMaster, dataUri: dataUri, ruDefault: ruIsDefault };
+    return {
+      url: usedUrl,
+      dataUri: dataUri,
+      dataUriEnc: dataUriEnc,
+      ruDefault: true,
+    };
   } catch (e) {
     return { url: fixHlsUrl(masterUrl), dataUri: null };
   }
@@ -585,28 +599,32 @@ async function extractStreamUrl(url) {
       if (/master\.(txt|m3u8)|\/cdn\/hls\//i.test(f) || (f.indexOf("http") === 0 && f.indexOf("{") === -1 && f.indexOf(".mp4") === -1)) {
         const fixed = fixHlsUrl(f);
         const built = await buildRussianOnlyHls(fixed, headers);
-        // ALWAYS put RU-only rewritten playlist FIRST.
-        // Plain multi-audio masters let Luna pick English from device language.
+        // Do NOT return the original multi-audio master — Luna picks English.
+        const hlsHeaders = Object.assign({}, headers, {
+          "Accept-Language": "ru-RU,ru;q=0.9",
+        });
         if (built && built.dataUri) {
           streams.push({
             title: titleBase + " · RU",
             streamUrl: built.dataUri,
-            headers: headers,
+            headers: hlsHeaders,
+            language: "ru",
           });
         }
-        // Also expose plain master as backup (may still pick EN on some players)
-        if (built && built.url) {
+        if (built && built.dataUriEnc) {
           streams.push({
-            title: titleBase + " · HLS multi",
-            streamUrl: built.url,
-            headers: headers,
+            title: titleBase + " · RU (alt)",
+            streamUrl: built.dataUriEnc,
+            headers: hlsHeaders,
+            language: "ru",
           });
         }
-        if (!built || (!built.dataUri && !built.url)) {
+        if (!built || (!built.dataUri && !built.dataUriEnc)) {
           streams.push({
             title: titleBase + " · HLS",
             streamUrl: fixed,
-            headers: headers,
+            headers: hlsHeaders,
+            language: "ru",
           });
         }
       } else {
