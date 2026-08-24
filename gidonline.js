@@ -1,16 +1,17 @@
 /**
  * GidOnline RU – films & series for Sora / Luna
  * Site: https://gidonline.eu
- * Works for ALL titles
+ * v1.2.0 – mobile UA + embess m3u8 extraction (all titles)
  */
 
 const baseUrl = "https://gidonline.eu";
 
 const defaultHeaders = {
   "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
   Referer: baseUrl + "/",
   "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 
 async function soraFetch(url, options) {
@@ -237,7 +238,8 @@ function findKinopoiskId(html) {
     html.match(/[?&]kp=(\d+)/) ||
     html.match(/kinopoisk[^0-9]{0,20}(\d{3,8})/i) ||
     html.match(/data-kp=["']?(\d+)/i) ||
-    html.match(/\/kp\/(\d+)/);
+    html.match(/\/kp\/(\d+)/) ||
+    html.match(/embed\/kp\/(\d+)/);
   return m ? m[1] : null;
 }
 
@@ -245,22 +247,29 @@ function parseSeasonEpisode(url) {
   const s = (url.match(/[?&#]s=(\d+)/i) || [])[1];
   const e = (url.match(/[?&#]e=(\d+)/i) || [])[1];
   return {
-    season: s ? parseInt(s, 10) : 1,
-    episode: e ? parseInt(e, 10) : 1,
+    season: s ? parseInt(s, 10) : null,
+    episode: e ? parseInt(e, 10) : null,
   };
 }
 
-function collectM3u8(text, out, titlePrefix) {
+function collectStreams(text, out, titlePrefix) {
   if (!text) return;
-  const re = /https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*/gi;
-  let m;
   const seen = {};
+
+  const re = /https?:\/\/[^\s"'<>\\]+?\.m3u8[^\s"'<>\\]*/gi;
+  let m;
   while ((m = re.exec(text)) !== null) {
-    let u = m[0].replace(/\\u0026/g, "&").replace(/\\/g, "");
+    let u = m[0]
+      .replace(/\\u0026/g, "&")
+      .replace(/\\\//g, "/")
+      .replace(/\\/g, "");
+    u = u.replace(/[),;]+$/, "");
     if (seen[u]) continue;
     seen[u] = true;
     out.push({
-      title: titlePrefix || "HLS",
+      title:
+        (titlePrefix || "HLS") +
+        (out.length + 1 > 1 ? " " + (out.length + 1) : ""),
       streamUrl: u,
       headers: {
         "User-Agent": defaultHeaders["User-Agent"],
@@ -268,15 +277,31 @@ function collectM3u8(text, out, titlePrefix) {
       },
     });
   }
+
   const fileRe = /file\s*[:=]\s*["']([^"']+)["']/gi;
   while ((m = fileRe.exec(text)) !== null) {
-    let u = m[1];
+    let u = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
     if (u.indexOf("http") !== 0) continue;
     if (seen[u]) continue;
     seen[u] = true;
-    const isHls = u.indexOf(".m3u8") !== -1;
+    const isHls = u.indexOf("m3u8") !== -1;
     out.push({
       title: (titlePrefix || "Stream") + (isHls ? " HLS" : " MP4"),
+      streamUrl: u,
+      headers: {
+        "User-Agent": defaultHeaders["User-Agent"],
+        Referer: baseUrl + "/",
+      },
+    });
+  }
+
+  const qRe = /\[(\d{3,4}p?)\]\s*(https?:\/\/[^\s,]+)/gi;
+  while ((m = qRe.exec(text)) !== null) {
+    let u = m[2].replace(/\\u0026/g, "&");
+    if (seen[u]) continue;
+    seen[u] = true;
+    out.push({
+      title: m[1],
       streamUrl: u,
       headers: {
         "User-Agent": defaultHeaders["User-Agent"],
@@ -299,20 +324,49 @@ async function extractStreamUrl(url) {
     const streams = [];
     const kp = findKinopoiskId(html);
 
-    collectM3u8(html, streams, "GidOnline");
+    collectStreams(html, streams, "Page");
 
     if (kp) {
-      const embedCandidates = [
+      const embessUrls = [
         "https://api.embess.ws/embed/kp/" + kp + "?host=gidonline.eu",
         "https://api.embess.ws/embed/kp/" + kp,
+      ];
+      if (se.season && se.episode) {
+        embessUrls.push(
+          "https://api.embess.ws/embed/kp/" +
+            kp +
+            "?host=gidonline.eu&s=" +
+            se.season +
+            "&e=" +
+            se.episode
+        );
+        embessUrls.push(
+          "https://api.embess.ws/embed/kp/" +
+            kp +
+            "?s=" +
+            se.season +
+            "&e=" +
+            se.episode
+        );
+      }
+
+      for (let i = 0; i < embessUrls.length; i++) {
+        try {
+          const er = await soraFetch(embessUrls[i]);
+          const eh = await getText(er);
+          if (eh && eh.length > 100) {
+            collectStreams(eh, streams, "GidOnline");
+          }
+        } catch (e) {}
+      }
+
+      const backups = [
         "https://voidboost.net/embed/" + kp,
         "https://voidboost.net/?kp=" + kp,
         "https://api.ninsel.ws/embed/kp/" + kp,
-        "https://cdnmovies-stream.online/embed/kp/" + kp,
       ];
-
       if (se.season && se.episode) {
-        embedCandidates.push(
+        backups.push(
           "https://voidboost.net/serial/" +
             kp +
             "/iframe?s=" +
@@ -321,37 +375,11 @@ async function extractStreamUrl(url) {
             se.episode
         );
       }
-
-      for (let i = 0; i < embedCandidates.length; i++) {
+      for (let i = 0; i < backups.length; i++) {
         try {
-          const er = await soraFetch(embedCandidates[i], {
-            headers: {
-              "User-Agent": defaultHeaders["User-Agent"],
-              Referer: baseUrl + "/",
-            },
-          });
-          const eh = await getText(er);
-          if (!eh || eh.length < 40) continue;
-          collectM3u8(eh, streams, "CDN " + (i + 1));
-
-          const hlsList = eh.match(/hlsList\s*:\s*(\{[^}]+\})/);
-          if (hlsList) {
-            try {
-              const obj = JSON.parse(hlsList[1].replace(/'/g, '"'));
-              for (const q in obj) {
-                if (obj[q] && String(obj[q]).indexOf("http") === 0) {
-                  streams.push({
-                    title: "HLS " + q,
-                    streamUrl: String(obj[q]),
-                    headers: {
-                      "User-Agent": defaultHeaders["User-Agent"],
-                      Referer: baseUrl + "/",
-                    },
-                  });
-                }
-              }
-            } catch (e) {}
-          }
+          const br = await soraFetch(backups[i]);
+          const bh = await getText(br);
+          if (bh && bh.length > 100) collectStreams(bh, streams, "CDN");
         } catch (e) {}
       }
     }
@@ -372,7 +400,7 @@ async function extractStreamUrl(url) {
           },
         });
         const ih = await getText(ir);
-        collectM3u8(ih, streams, "Player");
+        if (ih && ih.length > 100) collectStreams(ih, streams, "Player");
       } catch (e) {}
     }
 
@@ -381,11 +409,18 @@ async function extractStreamUrl(url) {
     for (let i = 0; i < streams.length; i++) {
       const s = streams[i];
       if (!s.streamUrl || seenU[s.streamUrl]) continue;
+      if (
+        s.streamUrl.indexOf(".m3u8") === -1 &&
+        s.streamUrl.indexOf(".mp4") === -1 &&
+        s.streamUrl.indexOf("/hls") === -1
+      ) {
+        continue;
+      }
       seenU[s.streamUrl] = true;
       uniq.push(s);
     }
 
-    return JSON.stringify({ streams: uniq, subtitles: "" });
+    return JSON.stringify({ streams: uniq.slice(0, 12), subtitles: "" });
   } catch (err) {
     return JSON.stringify({ streams: [], subtitles: "" });
   }
