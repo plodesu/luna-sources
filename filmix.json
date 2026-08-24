@@ -1,0 +1,27 @@
+{
+  "sourceName": "Filmix (фильмы/сериалы)",
+  "iconUrl": "https://filmix.gg/favicon.ico",
+  "author": {
+    "name": "plodesu",
+    "icon": ""
+  },
+  "version": "1.0.0",
+  "language": "Russian",
+  "languageType": [
+    "Dubbed",
+    "Subbed"
+  ],
+  "streamType": "MP4",
+  "quality": "HD",
+  "baseUrl": "https://filmix.gg",
+  "searchBaseUrl": "https://filmix.gg",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/filmix.js",
+  "type": "movies/shows",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
