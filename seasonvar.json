@@ -1,0 +1,14 @@
+{
+  "sourceName": "Seasonvar",
+  "iconUrl": "https://seasonvar.ru/favicon.ico",
+  "version": "1.0.0",
+  "language": "Russian",
+  "streamType": "MP4",
+  "quality": "HD",
+  "baseUrl": "https://seasonvar.ru",
+  "scriptUrl": "YOUR_RAW_JS_URL",
+  "type": "shows",
+  "asyncJS": true,
+  "supportsSora": true,
+  "supportsLuna": true
+}
