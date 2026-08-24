@@ -1,7 +1,7 @@
 /**
  * Kinoflix – films & series for Sora / Luna
  * Site: https://kinoflix.tv
- * v1.0.0 – videodb.stream single player, separate RU mp4 for series
+ * v1.1.0 – Russian-only streams (strip EN/KA), RU HLS rewrite
  */
 
 const baseUrl = "https://kinoflix.tv";
@@ -308,44 +308,118 @@ function fixHlsUrl(u) {
  * [HD]{რუსულად}https://...RUS.mp4;{ინგლისურად}https://...ENG.mp4;,[SD]...
  * Prefer Russian tracks.
  */
+function isRussianLabel(label, url) {
+  const l = String(label || "");
+  const u = String(url || "");
+  // Georgian "რუსულად" = Russian; also RUS in filename
+  if (/_ENG\.|\/ENG|_GEO\.|\/GEO|english|ინგლ|ქართ/i.test(u) && !/_RUS\.|\/RUS|_RU\./i.test(u))
+    return false;
+  if (/_RUS\.|\/RUS|_RU\.|rus/i.test(u)) return true;
+  if (/რუს|рус|russian|\bru\b/i.test(l)) return true;
+  if (/ინგლ|eng|english|англ|ქართ|geo|ka\b/i.test(l)) return false;
+  return false;
+}
+
 function parseLangFileString(fileStr, out, baseTitle, headers) {
   if (!fileStr) return;
-  // split quality groups by comma that precedes [
   const parts = String(fileStr).split(/,(?=\[)/);
+  const seen = {};
   for (let p = 0; p < parts.length; p++) {
     const chunk = parts[p];
     const quality = (chunk.match(/^\[([^\]]+)\]/) || [])[1] || "HD";
-    // {label}url pairs
     const pairRe = /\{([^}]+)\}(https?:\/\/[^\s;]+)/g;
     let m;
+    let any = false;
     while ((m = pairRe.exec(chunk)) !== null) {
+      any = true;
       const label = m[1];
       let url = m[2].replace(/;+$/, "");
-      const isRu =
-        /рус|ru|რუს/i.test(label) || /_RUS\.|_RU\./i.test(url);
-      const isEn = /ინგლ|eng|english|англ/i.test(label) || /_ENG\./i.test(url);
-      if (isEn && !isRu) continue; // skip pure English
+      // ONLY Russian – drop English / Georgian completely
+      if (!isRussianLabel(label, url)) continue;
+      if (seen[url]) continue;
+      seen[url] = true;
       out.push({
-        title:
-          baseTitle +
-          " · " +
-          quality +
-          (isRu ? " · RU" : " · " + label.slice(0, 20)),
+        title: baseTitle + " · " + quality + " · RU",
         streamUrl: url,
         headers: headers,
       });
     }
-    // plain url without labels
-    if (!pairRe.test(chunk)) {
+    // no labels: only keep if filename looks Russian
+    if (!any) {
       const plain = chunk.match(/https?:\/\/[^\s;,]+/);
-      if (plain) {
-        out.push({
-          title: baseTitle + " · " + quality,
-          streamUrl: plain[0].replace(/;+$/, ""),
-          headers: headers,
-        });
+      if (plain && isRussianLabel("", plain[0])) {
+        const url = plain[0].replace(/;+$/, "");
+        if (!seen[url]) {
+          seen[url] = true;
+          out.push({
+            title: baseTitle + " · " + quality + " · RU",
+            streamUrl: url,
+            headers: headers,
+          });
+        }
       }
     }
+  }
+}
+
+/** Fetch master.m3u8 and rebuild with ONLY Russian audio as default */
+async function buildRussianOnlyHls(masterUrl, headers) {
+  try {
+    const res = await soraFetch(masterUrl, { headers: headers });
+    const text = await getText(res);
+    if (!text || text.indexOf("#EXTM3U") === -1) return null;
+
+    // base path for relative URIs
+    const base = masterUrl.replace(/\/[^\/]*$/, "/");
+    const lines = text.split(/\r?\n/);
+    let ruAudioLine = null;
+    const streamLines = []; // pairs of INF + url
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.indexOf("TYPE=AUDIO") !== -1 && /LANGUAGE="ru"|NAME="Russian"/i.test(line)) {
+        let uri = (line.match(/URI="([^"]+)"/) || [])[1];
+        if (uri && uri.indexOf("http") !== 0) uri = base + uri;
+        ruAudioLine =
+          '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Russian",LANGUAGE="ru",DEFAULT=YES,AUTOSELECT=YES,URI="' +
+          uri +
+          '"';
+      }
+      if (line.indexOf("#EXT-X-STREAM-INF:") === 0) {
+        const next = lines[i + 1] || "";
+        let vurl = next.trim();
+        if (vurl && vurl.indexOf("http") !== 0) vurl = base + vurl;
+        // force AUDIO="audio"
+        let inf = line.replace(/AUDIO="[^"]*"/, 'AUDIO="audio"');
+        if (inf.indexOf("AUDIO=") === -1) inf += ',AUDIO="audio"';
+        streamLines.push({ inf: inf, url: vurl });
+      }
+    }
+
+    if (!ruAudioLine || !streamLines.length) return null;
+
+    // Prefer 1080 / 720
+    streamLines.sort(function (a, b) {
+      const aw = /1080/.test(a.url) ? 3 : /720/.test(a.url) ? 2 : /480/.test(a.url) ? 1 : 0;
+      const bw = /1080/.test(b.url) ? 3 : /720/.test(b.url) ? 2 : /480/.test(b.url) ? 1 : 0;
+      return bw - aw;
+    });
+
+    let out = "#EXTM3U\n#EXT-X-VERSION:6\n" + ruAudioLine + "\n";
+    for (let i = 0; i < Math.min(streamLines.length, 3); i++) {
+      out += streamLines[i].inf + "\n" + streamLines[i].url + "\n";
+    }
+
+    // data URI so player gets RU-only master (blob links are local-only, unusable)
+    try {
+      if (typeof btoa === "function") {
+        return "data:application/vnd.apple.mpegurl;base64," + btoa(out);
+      }
+    } catch (e) {}
+    // fallback: return best absolute 1080 playlist + hope (still multi-audio)
+    return streamLines[0] ? streamLines[0].url : null;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -496,20 +570,23 @@ async function extractStreamUrl(url) {
         parseLangFileString(ep.file, streams, "S1E1", headers);
       }
     } else if (Array.isArray(data) && data[0] && data[0].file) {
-      // movie playlist
-      let file = data[0].file;
-      file = fixHlsUrl(file);
+      // movie: rebuild HLS with ONLY Russian audio (no EN/KA)
+      let file = fixHlsUrl(data[0].file);
+      const ruOnly = await buildRussianOnlyHls(file, headers);
       streams.push({
         title: "Смотреть · RU",
-        streamUrl: file,
+        streamUrl: ruOnly || file,
         headers: headers,
       });
-      if (data[0].subtitle) {
-        const sm = String(data[0].subtitle).match(/https?:\/\/\S+/);
-        if (sm) subtitle = sm[0];
-      }
-      if (data[0].subtitles && data[0].subtitles[0] && data[0].subtitles[0].file) {
-        subtitle = data[0].subtitles[0].file;
+      // skip English subtitles if that's all they offer as "default"
+      if (data[0].subtitles && data[0].subtitles.length) {
+        for (let si = 0; si < data[0].subtitles.length; si++) {
+          const lab = String(data[0].subtitles[si].label || "").toLowerCase();
+          if (/ru|рус|russian/.test(lab) && data[0].subtitles[si].file) {
+            subtitle = data[0].subtitles[si].file;
+            break;
+          }
+        }
       }
     }
 
