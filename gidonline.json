@@ -15,7 +15,7 @@
   "quality": "HD",
   "baseUrl": "https://gidonline.eu",
   "searchBaseUrl": "https://gidonline.eu",
-  "scriptUrl": "REPLACE_WITH_RAW_JS_URL",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/gidonline.js",
   "type": "movies/shows",
   "asyncJS": true,
   "softsub": true,
