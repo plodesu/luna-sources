@@ -1,6 +1,6 @@
 /**
  * Seasonvar.ru – Sora / Luna (series)
- * v1.0.1 – posters scraped from series pages
+ * v1.1.0 – multi-translation streams (like GidOnline)
  */
 const baseUrl = "https://seasonvar.ru";
 
@@ -98,7 +98,9 @@ function decodeFile(enc) {
     try {
       return decodeURIComponent(
         Array.prototype.map
-          .call(bin, (c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+          .call(bin, function (c) {
+            return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
+          })
           .join("")
       );
     } catch (e) {
@@ -116,7 +118,7 @@ function posterForId(id) {
 
 function extractPoster(html, id) {
   if (!html) return posterForId(id);
-  let m =
+  const m =
     html.match(
       /property=["']og:image["'][^>]*content=["']([^"']+)["']/i
     ) ||
@@ -129,17 +131,14 @@ function extractPoster(html, id) {
     html.match(
       /(?:src|data-src)=["']((?:https?:)?\/\/cdn\.seasonvar\.ru\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i
     ) ||
-    html.match(/(?:src|data-src)=["'](\/[^"']*oblojka[^"']+)["']/i) ||
-    html.match(
-      /background(?:-image)?:\s*url\(['"]?([^'")\s]*oblojka[^'")\s]*)/i
-    );
+    html.match(/(?:src|data-src)=["'](\/[^"']*oblojka[^"']+)["']/i);
   if (m && m[1]) return absUrl(m[1].replace(/&amp;/g, "&"));
   return posterForId(id);
 }
 
 function extractSecureMark(html) {
   if (!html) return null;
-  let m =
+  const m =
     html.match(/secureMark'\s*:\s*'([a-f0-9]+)'/i) ||
     html.match(/secureMark"\s*:\s*"([a-f0-9]+)"/i) ||
     html.match(/secureMark['"]?\s*[:=]\s*['"]([a-f0-9]+)/i);
@@ -157,16 +156,12 @@ function extractIds(html, fallbackId) {
 function flattenPlaylist(pl, out) {
   out = out || [];
   if (!pl) return out;
-  const list = Array.isArray(pl) ? pl : pl.playlist || [];
-  for (let i = 0; i < list.length; i++) {
-    const row = list[i];
-    if (!row) continue;
-    if (row.playlist) {
-      flattenPlaylist(row.playlist, out);
-    } else if (row.file) {
-      out.push(row);
-    }
+  if (Array.isArray(pl)) {
+    for (let i = 0; i < pl.length; i++) flattenPlaylist(pl[i], out);
+    return out;
   }
+  if (pl.playlist) return flattenPlaylist(pl.playlist, out);
+  if (pl.file) out.push(pl);
   return out;
 }
 
@@ -181,18 +176,99 @@ function episodeNumberFromTitle(title, index) {
 
 function translationFromTitle(title) {
   const t = String(title || "").replace(/<br\s*\/?>/gi, " ");
-  const parts = t.split(/\s{2,}|<br\s*\/?>/i);
-  if (parts.length > 1) return parts[parts.length - 1].trim();
+  const parts = t.split(/<br\s*\/?>/i);
+  if (parts.length > 1) return parts[parts.length - 1].replace(/\s+/g, " ").trim();
   const m = t.match(
-    /(LostFilm|NewStudio|Amedia|Baibako|HDRezka|Кураж|TVShows|AlexFilm|ColdFilm|VoiceProject|RuDub|AniDub)[^]*/i
+    /(LostFilm|NewStudio|Amedia|Baibako|HDRezka|Кураж|TVShows|AlexFilm|ColdFilm|VoiceProject|RuDub|AniDub|Гоблин|кубик|Субтитры|Стандартный)[^]*/i
   );
   return m ? m[0].trim() : "";
 }
 
-async function fetchPlaylist(secureMark, id) {
-  if (!secureMark || !id) return null;
-  const url =
-    baseUrl + "/playls2/" + secureMark + "x/trans/" + id + "/list.xml";
+/** Parse all translation tabs + playlist paths from page HTML */
+function extractTranslations(html, secure, seasonId) {
+  const list = [];
+  if (!html) return list;
+
+  // paths embedded next to each translate option
+  const pathRe =
+    /playls2\/([a-f0-9]+)\/trans([^"'\\\s]*?)\/(\d+)\/plist\.txt/gi;
+  let m;
+  const paths = [];
+  while ((m = pathRe.exec(html))) {
+    paths.push({
+      secure: m[1],
+      transRaw: m[2], // may be empty or URL-encoded name
+      id: m[3],
+      path:
+        "/playls2/" +
+        m[1] +
+        "/trans" +
+        m[2] +
+        "/" +
+        m[3] +
+        "/plist.txt",
+    });
+  }
+
+  // names from <li data-translate>
+  const names = [];
+  const nameRe =
+    /<li[^>]*data-translate=["'](\d+)["'][^>]*>\s*([^<]+)/gi;
+  while ((m = nameRe.exec(html))) {
+    const name = m[2].replace(/\s+/g, " ").trim();
+    if (/трейлер/i.test(name)) continue;
+    names.push({ id: m[1], name: name });
+  }
+
+  // default list.xml (стандартный / LostFilm etc.)
+  if (secure && seasonId) {
+    list.push({
+      name: names[0] ? names[0].name : "Стандартный",
+      url:
+        baseUrl +
+        "/playls2/" +
+        secure +
+        "x/trans/" +
+        seasonId +
+        "/list.xml",
+    });
+  }
+
+  // alternate named translations
+  for (let i = 0; i < paths.length; i++) {
+    const p = paths[i];
+    if (!p.transRaw) continue; // default already added
+    let label = decodeURIComponent(p.transRaw.replace(/\+/g, " "));
+    label = label.replace(/^\s+|\s+$/g, "");
+    if (/трейлер/i.test(label)) continue;
+    // match nicer name from li if possible
+    for (let j = 0; j < names.length; j++) {
+      if (
+        names[j].name.toLowerCase().indexOf(label.toLowerCase()) !== -1 ||
+        label.toLowerCase().indexOf(names[j].name.toLowerCase()) !== -1
+      ) {
+        label = names[j].name;
+        break;
+      }
+    }
+    list.push({
+      name: label || "Перевод",
+      url: baseUrl + p.path,
+    });
+  }
+
+  // dedupe by url
+  const seen = {};
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    if (seen[list[i].url]) continue;
+    seen[list[i].url] = true;
+    out.push(list[i]);
+  }
+  return out;
+}
+
+async function fetchPlaylistUrl(url) {
   try {
     const res = await soraFetch(url, {
       headers: {
@@ -209,21 +285,21 @@ async function fetchPlaylist(secureMark, id) {
 
 async function loadSeasonPlaylist(pageUrl) {
   const html = await getText(await soraFetch(pageUrl));
-  if (!html) return { html: "", items: [], seasonId: null };
+  if (!html) return { html: "", items: [], seasonId: null, translations: [] };
 
   const idFromUrl = (pageUrl.match(/serial-(\d+)/) || [])[1];
   const ids = extractIds(html, idFromUrl);
   const secure = extractSecureMark(html);
   const plId = ids.seasonId || idFromUrl;
 
+  const translations = extractTranslations(html, secure, plId);
+
+  // default playlist for episode list
   let items = [];
   if (secure && plId) {
-    const pl = await fetchPlaylist(secure, plId);
-    items = flattenPlaylist(pl);
-  }
-
-  if (!items.length && secure && ids.serialId && ids.serialId !== plId) {
-    const pl = await fetchPlaylist(secure, ids.serialId);
+    const pl = await fetchPlaylistUrl(
+      baseUrl + "/playls2/" + secure + "x/trans/" + plId + "/list.xml"
+    );
     items = flattenPlaylist(pl);
   }
 
@@ -233,6 +309,7 @@ async function loadSeasonPlaylist(pageUrl) {
     seasonId: plId,
     serialId: ids.serialId,
     secure,
+    translations,
   };
 }
 
@@ -276,8 +353,8 @@ async function searchResults(keyword) {
       if (seen[href]) continue;
       seen[href] = true;
       if (!id) {
-        const m = hrefPath.match(/serial-(\d+)/);
-        if (m) id = m[1];
+        const mm = hrefPath.match(/serial-(\d+)/);
+        if (mm) id = mm[1];
       }
       results.push({
         title: title.replace(/\s+/g, " "),
@@ -287,7 +364,6 @@ async function searchResults(keyword) {
       });
     }
 
-    // scrape real posters from series pages (first 12)
     const limit = Math.min(results.length, 12);
     for (let i = 0; i < limit; i++) {
       try {
@@ -347,6 +423,11 @@ async function extractEpisodes(url) {
     const seasonHint =
       seasonFromTitle(pageUrl) ||
       (pageUrl.match(/(\d+)-season/i) || [])[1] ||
+      seasonFromTitle(
+        (await getText(await soraFetch(pageUrl))).match(
+          /<title>([^<]+)/
+        )?.[1] || ""
+      ) ||
       1;
     const sn = +seasonHint || 1;
 
@@ -380,7 +461,9 @@ async function extractEpisodes(url) {
         title: "S" + sn + "E" + en,
       });
     }
-    eps.sort((a, b) => a.number - b.number);
+    eps.sort(function (a, b) {
+      return a.number - b.number;
+    });
     return JSON.stringify(
       eps.length
         ? eps
@@ -418,68 +501,63 @@ async function extractStreamUrl(url) {
     const episode = se.episode || 1;
 
     const loaded = await loadSeasonPlaylist(pageUrl);
-    const items = loaded.items || [];
-    if (!items.length)
-      return JSON.stringify({ streams: [], subtitles: "" });
-
-    const streams = [];
+    const translations = loaded.translations || [];
     const headers = {
       "User-Agent": defaultHeaders["User-Agent"],
       Referer: baseUrl + "/",
     };
 
-    for (let i = 0; i < items.length; i++) {
-      const en = episodeNumberFromTitle(
-        items[i].title || items[i].comment,
-        i
-      );
-      if (en !== episode) continue;
-      let file = decodeFile(items[i].file || "");
-      if (!file || file.indexOf("http") !== 0) continue;
-      const tr = translationFromTitle(
-        items[i].title || items[i].comment
-      );
-      streams.push({
-        title:
-          "S" +
-          seasonHint +
-          "E" +
-          episode +
-          (tr ? " · " + tr : " · Stream"),
-        streamUrl: file,
-        headers: headers,
-      });
-    }
+    const streams = [];
+    const seen = {};
 
-    if (!streams.length && items[episode - 1]) {
-      let file = decodeFile(items[episode - 1].file || "");
-      if (file && file.indexOf("http") === 0) {
-        const tr = translationFromTitle(
-          items[episode - 1].title || items[episode - 1].comment
+    async function addFromPlaylist(pl, label) {
+      const items = flattenPlaylist(pl);
+      for (let i = 0; i < items.length; i++) {
+        const en = episodeNumberFromTitle(
+          items[i].title || items[i].comment,
+          i
         );
+        if (en !== episode) continue;
+        let file = items[i].file || "";
+        if (file.indexOf("#2") === 0 || (file && file.indexOf("http") !== 0)) {
+          file = decodeFile(file);
+        }
+        if (!file || file.indexOf("http") !== 0) continue;
+        const tr =
+          label ||
+          translationFromTitle(items[i].title || items[i].comment) ||
+          "Stream";
+        const key = file.slice(0, 100) + "|" + tr;
+        if (seen[key]) continue;
+        seen[key] = true;
         streams.push({
-          title:
-            "S" +
-            seasonHint +
-            "E" +
-            episode +
-            (tr ? " · " + tr : " · Stream"),
+          title: tr + " · S" + seasonHint + "E" + episode,
           streamUrl: file,
           headers: headers,
         });
       }
     }
 
-    const uniq = [];
-    const seen = {};
-    for (let i = 0; i < streams.length; i++) {
-      const k = streams[i].streamUrl.slice(0, 120);
-      if (seen[k]) continue;
-      seen[k] = true;
-      uniq.push(streams[i]);
+    // all translation playlists
+    if (translations.length) {
+      for (let i = 0; i < translations.length; i++) {
+        const tr = translations[i];
+        if (/трейлер/i.test(tr.name || "")) continue;
+        const pl = await fetchPlaylistUrl(tr.url);
+        await addFromPlaylist(pl, tr.name);
+      }
+    } else if (loaded.items && loaded.items.length) {
+      await addFromPlaylist({ playlist: loaded.items }, null);
     }
 
-    return JSON.stringify({ streams: uniq.slice(0, 12), subtitles: "" });
+    // sort: prefer non-subtitle first
+    streams.sort(function (a, b) {
+      const as = /субтитр/i.test(a.title) ? 1 : 0;
+      const bs = /субтитр/i.test(b.title) ? 1 : 0;
+      return as - bs;
+    });
+
+    return JSON.stringify({ streams: streams.slice(0, 15), subtitles: "" });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "" });
   }
