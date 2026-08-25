@@ -1,0 +1,24 @@
+{
+  "sourceName": "Kinobadi",
+  "iconUrl": "https://no.kinobadi.im/img/logo_kinobadi_192.png",
+  "author": {
+    "name": "plodesu",
+    "icon": ""
+  },
+  "version": "1.0.0",
+  "language": "Russian",
+  "languageType": ["Dubbed", "Subbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://no.kinobadi.im",
+  "searchBaseUrl": "https://no.kinobadi.im",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/kinobadi.js",
+  "type": "movies/shows",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
