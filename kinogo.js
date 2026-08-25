@@ -1,15 +1,9 @@
 /**
- * Kinogo – Sora / Luna
- * Search + posters + multi-player (Collaps / Alloha) + series
- * Mirrors: kinogo.online, kinogo.sh, …
- * v1.0.0
+ * Kinogo.sh – Sora / Luna
+ * Single host, no mirrors
+ * v1.1.0
  */
-const MIRRORS = [
-  "https://kinogo.online",
-  "https://kinogo.sh",
-  "https://kinogo.ac",
-  "https://kinogo.la",
-];
+const baseUrl = "https://kinogo.sh";
 
 const ALLOHA_API = "https://api.apbugall.org/";
 const ALLOHA_TOKEN = "60b252fdcd2f53e8492fca2f44e8c5";
@@ -17,16 +11,14 @@ const ALLOHA_TOKEN = "60b252fdcd2f53e8492fca2f44e8c5";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
-let BASE = MIRRORS[0];
-
 async function soraFetch(url, options) {
   options = options || {};
   const headers = Object.assign(
     {
       "User-Agent": UA,
-      "Accept-Language": "ru-RU,ru;q=0.9",
+      "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
       Accept: "text/html,application/json,*/*",
-      Referer: BASE + "/",
+      Referer: baseUrl + "/",
     },
     options.headers || {}
   );
@@ -74,11 +66,11 @@ function isHttp(u) {
   return /^https?:\/\//i.test(String(u || ""));
 }
 
-function absUrl(u, base) {
+function absUrl(u) {
   if (!u) return "";
   u = String(u).replace(/&amp;/g, "&").trim();
   if (u.indexOf("//") === 0) return "https:" + u;
-  if (u.charAt(0) === "/") return (base || BASE) + u;
+  if (u.charAt(0) === "/") return baseUrl + u;
   return u;
 }
 
@@ -88,8 +80,8 @@ function cleanQuery(keyword) {
     .replace(/\b\d{1,2}\s*x\s*\d{1,3}\b/gi, " ")
     .replace(/\bseason\s*\d+\b/gi, " ")
     .replace(/\bсезон[а]?\s*\d+\b/gi, " ")
-    .replace(/\bсери[яи]\s*\d+/gi, " ")
     .replace(/\bTV\s*Show\b/gi, " ")
+    .replace(/\bMovie\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -119,45 +111,16 @@ function titleScore(query, title) {
   return Math.round((hit / qw.length) * 80);
 }
 
-async function pickMirror() {
-  for (let i = 0; i < MIRRORS.length; i++) {
-    try {
-      const t = await getText(
-        await soraFetch(MIRRORS[i] + "/", {
-          headers: { Accept: "text/html" },
-        })
-      );
-      if (
-        t &&
-        t.length > 2000 &&
-        !/just a moment|verify you are human|cf-browser-verification/i.test(
-          t.slice(0, 800)
-        )
-      ) {
-        BASE = MIRRORS[i];
-        return BASE;
-      }
-    } catch (e) {}
-  }
-  BASE = MIRRORS[1] || MIRRORS[0];
-  return BASE;
-}
-
-/* ---- search ---- */
+/* ---- search (POST to kinogo.sh only) ---- */
 
 async function searchResults(keyword) {
   try {
-    await pickMirror();
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
 
     const variants = [cleaned];
     const noThe = cleaned.replace(/^the\s+/i, "").trim();
     if (noThe && noThe !== cleaned) variants.push(noThe);
-    const parts = cleaned.split(/\s+/).filter(function (w) {
-      return w.length > 3;
-    });
-    if (parts.length > 1) variants.push(parts[parts.length - 1]);
 
     const results = [];
     const seen = {};
@@ -165,18 +128,20 @@ async function searchResults(keyword) {
     for (let v = 0; v < variants.length; v++) {
       const q = variants[v];
       const html = await getText(
-        await soraFetch(BASE + "/index.php?do=search", {
+        await soraFetch(baseUrl + "/index.php?do=search", {
           method: "POST",
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
-            Referer: BASE + "/",
+            Origin: baseUrl,
+            Referer: baseUrl + "/",
           },
           body:
             "do=search&subaction=search&story=" + encodeURIComponent(q),
         })
       );
-      if (!html) continue;
+
+      if (!html || html.length < 500) continue;
 
       const arts = html.split(/<article class="short"/i);
       for (let i = 1; i < arts.length; i++) {
@@ -185,7 +150,7 @@ async function searchResults(keyword) {
           /<h2>\s*<a\s+href=["']([^"']+)["'][^>]*>([^<]+)<\/a>/i
         );
         if (!tm) continue;
-        const href = absUrl(tm[1], BASE);
+        const href = absUrl(tm[1]);
         if (seen[href]) continue;
         seen[href] = true;
         const title = tm[2].replace(/\s+/g, " ").trim();
@@ -195,14 +160,13 @@ async function searchResults(keyword) {
         const im = a.match(
           /(?:src|data-src)=["']([^"']*\/uploads\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i
         );
-        if (im) image = absUrl(im[1], BASE);
+        if (im) image = absUrl(im[1]);
 
-        const score = titleScore(cleaned, title);
         results.push({
           title: title,
           image: image,
           href: href,
-          _score: score,
+          _score: titleScore(cleaned, title),
         });
       }
     }
@@ -210,14 +174,9 @@ async function searchResults(keyword) {
     results.sort(function (a, b) {
       return (b._score || 0) - (a._score || 0);
     });
-    const best = results.length ? results[0]._score : 0;
-    const filtered = results.filter(function (r) {
-      if (best >= 55) return r._score >= 25;
-      return true;
-    });
 
     return JSON.stringify(
-      filtered.slice(0, 20).map(function (r) {
+      results.slice(0, 20).map(function (r) {
         return { title: r.title, image: r.image || "", href: r.href };
       })
     );
@@ -228,9 +187,7 @@ async function searchResults(keyword) {
 
 async function extractDetails(url) {
   try {
-    await pickMirror();
-    let pageUrl = String(url).split("?")[0].split("#")[0];
-    pageUrl = pageUrl.replace(/^https?:\/\/[^/]+/, BASE);
+    const pageUrl = String(url).split("?")[0].split("#")[0];
     const html = await getText(await soraFetch(pageUrl));
     let description = "N/A";
     const dm =
@@ -255,35 +212,19 @@ async function extractDetails(url) {
 
 function parsePlayers(html) {
   const list = [];
-  const re =
-    /data-player=["']([^"']+)["'][^>]*>([^<]*)/gi;
+  const re = /data-player=["']([^"']+)["'][^>]*>([^<]*)/gi;
   let m;
   while ((m = re.exec(html || ""))) {
-    let src = absUrl(m[1], BASE);
+    const src = absUrl(m[1]);
     const name = (m[2] || "").replace(/\s+/g, " ").trim() || "Плеер";
     if (/трейлер|trailer/i.test(name) || /trailer/i.test(src)) continue;
     list.push({ name: name, url: src });
-  }
-  if (!list.length) {
-    const iframe = (html || "").match(
-      /<iframe[^>]+src=["']([^"']+)["']/i
-    );
-    if (iframe) {
-      list.push({ name: "Плеер", url: absUrl(iframe[1], BASE) });
-    }
   }
   return list;
 }
 
 function extractAllohaTokenMovie(html) {
-  const m =
-    html.match(/token_movie=([a-f0-9]+)/i) ||
-    html.match(/token_movie["']?\s*[:=]\s*["']([a-f0-9]+)/i);
-  return m ? m[1] : "";
-}
-
-function extractOrtifiedId(html) {
-  const m = html.match(/api\.ortified\.ws\/embed\/movie\/(\d+)/i);
+  const m = (html || "").match(/token_movie=([a-f0-9]{20,})/i);
   return m ? m[1] : "";
 }
 
@@ -295,14 +236,14 @@ async function fetchAlloha(tokenMovie) {
     encodeURIComponent(ALLOHA_TOKEN) +
     "&token_movie=" +
     encodeURIComponent(tokenMovie);
-  return await getJson(await soraFetch(url, { headers: { Referer: BASE + "/" } }));
+  return await getJson(
+    await soraFetch(url, { headers: { Referer: baseUrl + "/" } })
+  );
 }
 
 async function extractEpisodes(url) {
   try {
-    await pickMirror();
-    let pageUrl = String(url).split("?")[0].split("#")[0];
-    pageUrl = pageUrl.replace(/^https?:\/\/[^/]+/, BASE);
+    const pageUrl = String(url).split("?")[0].split("#")[0];
     const html = await getText(await soraFetch(pageUrl));
     const tokenMovie = extractAllohaTokenMovie(html);
     const eps = [];
@@ -331,17 +272,14 @@ async function extractEpisodes(url) {
       }
     }
 
-    // title fallback: "1-5 сезон 1-16 серия"
     if (!eps.length) {
       const titleM = html.match(/<title>([^<]+)/i);
       const title = titleM ? titleM[1] : "";
       const sm = title.match(/(\d+)\s*[-–]\s*(\d+)\s*сезон/i);
       const em = title.match(/(\d+)\s*[-–]\s*(\d+)\s*сери/i);
       if (sm) {
-        const s1 = +sm[1];
-        const s2 = +sm[2];
         const eMax = em ? +em[2] : 20;
-        for (let s = s1; s <= s2; s++) {
+        for (let s = +sm[1]; s <= +sm[2]; s++) {
           for (let e = 1; e <= eMax; e++) {
             eps.push({
               href: pageUrl + "?s=" + s + "&e=" + e,
@@ -379,8 +317,6 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ---- streams ---- */
-
 function parseSE(url) {
   const s = (String(url).match(/[?&#]s=(\d+)/i) || [])[1];
   const e = (String(url).match(/[?&#]e=(\d+)/i) || [])[1];
@@ -394,18 +330,11 @@ async function resolveEmbed(embedUrl, label) {
   try {
     const html = await getText(
       await soraFetch(embedUrl, {
-        headers: {
-          Referer: BASE + "/",
-          Accept: "text/html,*/*",
-        },
+        headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
       })
     );
     if (!html) return out;
-    if (
-      /недоступен в вашем регионе|region not available|just a moment/i.test(
-        html
-      )
-    ) {
+    if (/недоступен в вашем регионе|region not available/i.test(html)) {
       return out;
     }
 
@@ -426,8 +355,7 @@ async function resolveEmbed(embedUrl, label) {
       html.match(/["']file["']\s*:\s*["']([^"']+)["']/i) ||
       html.match(/file:\s*["']([^"']+)["']/i);
     if (fileM) {
-      let f = fileM[1];
-      // quality list [720]url
+      const f = fileM[1];
       if (f.indexOf("[") >= 0) {
         const re = /\[(\d{3,4})\]([^,\[]+)/g;
         let m;
@@ -449,55 +377,37 @@ async function resolveEmbed(embedUrl, label) {
         });
       }
     }
-
-    // hls source
-    const hls = html.match(
-      /(?:hls|src|source)\s*[:=]\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i
-    );
-    if (hls) {
-      out.push({
-        title: label + " · HLS",
-        streamUrl: hls[1],
-        headers: { "User-Agent": UA, Referer: embedUrl },
-      });
-    }
   } catch (e) {}
   return out;
 }
 
 async function extractStreamUrl(url) {
   try {
-    await pickMirror();
     const raw = String(url);
-    let pageUrl = raw.split("?")[0].split("#")[0];
-    pageUrl = pageUrl.replace(/^https?:\/\/[^/]+/, BASE);
+    const pageUrl = raw.split("?")[0].split("#")[0];
     const se = parseSE(raw);
-
     const html = await getText(await soraFetch(pageUrl));
     const players = parsePlayers(html);
     const tokenMovie = extractAllohaTokenMovie(html);
     const streams = [];
 
-    // Alloha: all translations for this episode
     if (tokenMovie) {
       const j = await fetchAlloha(tokenMovie);
       const data = j && j.data ? j.data : null;
       if (data) {
-        // series path
         if (se.season && data.seasons && data.seasons[String(se.season)]) {
           const season = data.seasons[String(se.season)];
           const ep =
             season.episodes && season.episodes[String(se.episode || 1)];
           if (ep && ep.translation) {
             const ids = Object.keys(ep.translation);
-            // prefer RU
             ids.sort(function (a, b) {
               const an = ep.translation[a].translation || "";
               const bn = ep.translation[b].translation || "";
-              const ar = /дубл|lost|кубик|гоблин|кравец|проф|сериб/i.test(an)
+              const ar = /дубл|lost|кубик|гоблин|кравец|проф/i.test(an)
                 ? 0
                 : 1;
-              const br = /дубл|lost|кубик|гоблин|кравец|проф|сериб/i.test(bn)
+              const br = /дубл|lost|кубик|гоблин|кравец|проф/i.test(bn)
                 ? 0
                 : 1;
               return ar - br;
@@ -513,7 +423,6 @@ async function extractStreamUrl(url) {
             }
           }
         } else if (data.translation_iframe) {
-          // movie
           const ids = Object.keys(data.translation_iframe);
           ids.sort(function (a, b) {
             const an = data.translation_iframe[a].name || "";
@@ -535,7 +444,6 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // Collaps + other page players
     for (let i = 0; i < players.length; i++) {
       let u = players[i].url;
       if (se.season && /ortified\.ws/i.test(u)) {
