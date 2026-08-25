@@ -1,11 +1,11 @@
 {
-  "sourceName": "MioAnime คุณต้องค้นหาด้วยชื่อภาษาอังกฤษ หรือชื่อไทยแบบทับศัพท์ (romanized) ถึงจะเจออนิเมะ!",
-  "iconUrl": "https://www.mioanime.net/icon/favicon.png",
+  "sourceName": "MioAnime ค้นหาอนิเมะด้วยชื่ออังกฤษทับศัพท์ เช่น Tensei Shitara Slime Datta Ken",
+  "iconUrl": "https://imgs.search.brave.com/YhDA3-CrpNvvmi8IWRGCCc16dNkVHJRbvd8EEZq9d9E/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly91cGxv/YWRzLnR1cmJvbG9n/by5jb20vdXBsb2Fk/cy9kZXNpZ24vcHJl/dmlld19pbWFnZS80/NTUxODM1L3ByZXZp/ZXdfaW1hZ2UyMDI0/MDcyNC0xLXN1MGtl/aS5wbmc",
   "author": {
     "name": "plodesu",
     "icon": ""
   },
-  "version": "1.0.3",
+  "version": "1.0.4",
   "language": "Thai",
   "languageType": [
     "Subbed",
