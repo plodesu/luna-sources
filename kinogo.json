@@ -2,7 +2,7 @@
   "sourceName": "Kinogo",
   "iconUrl": "https://kinogo.sh/favicon.ico",
   "author": { "name": "plodesu", "icon": "" },
-  "version": "1.8.0",
+  "version": "1.9.0",
   "language": "Russian",
   "languageType": ["Dubbed", "Subbed"],
   "streamType": "HLS",
