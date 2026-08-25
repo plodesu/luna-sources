@@ -1,7 +1,7 @@
 /**
  * Kinogo.sh – Sora / Luna
- * Alloha first (named dubs) → Collaps fallback if Alloha geo-blocked
- * v1.6.0
+ * Russian dub only · Alloha first → Collaps fallback
+ * v1.7.0
  */
 const baseUrl = "https://kinogo.sh";
 
@@ -115,6 +115,41 @@ function parseSE(url) {
   const s = (String(url).match(/[?&#]s=(\d+)/i) || [])[1];
   const e = (String(url).match(/[?&#]e=(\d+)/i) || [])[1];
   return { season: s ? +s : null, episode: e ? +e : null };
+}
+
+/** Reject English / original / subs-only / Ukrainian-only labels */
+function isRussianVoice(name) {
+  const n = String(name || "").toLowerCase();
+  if (!n.trim()) return false;
+
+  // hard reject
+  if (
+    /original|оригинал|eng(?:lish)?|английск|eng dub|eng sub|english|eng\b|eng\.|en\b|sub(?:title)?s? only|только субтитр|без перевода|raw\b/i.test(
+      n
+    )
+  ) {
+    return false;
+  }
+  // optional: drop pure Ukrainian if you want RU only
+  if (/^украинск|українськ|ukrainian/i.test(n) && !/дубл|рус/i.test(n)) {
+    return false;
+  }
+
+  // accept known Russian dub / studio labels
+  if (
+    /дубл|русск|lost\s*film|lostfilm|кубик|гоблин|кравец|сериб|гаврилов|живов|hdrezka|winmedia|tvshows|dragon|money|студи|профессион|многоголос|закадр|плее?р|alloha|collaps/i.test(
+      n
+    )
+  ) {
+    return true;
+  }
+
+  // Cyrillic name that isn't original/subs → treat as RU
+  if (/[а-яё]/i.test(n) && !/субтитр|оригинал/i.test(n)) {
+    return true;
+  }
+
+  return false;
 }
 
 function voiceRank(name) {
@@ -324,8 +359,6 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ---- extract playable URLs from player HTML ---- */
-
 function collectMediaFromHtml(html, label, referer) {
   const out = [];
   if (!html) return out;
@@ -340,11 +373,11 @@ function collectMediaFromHtml(html, label, referer) {
 
   function push(title, url) {
     if (!isHttp(url)) return;
+    if (!isRussianVoice(title)) return;
     url = url.replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
     out.push({ title: title, streamUrl: url, headers: headers });
   }
 
-  // Collaps makePlayer: one HLS + many voice names → one row per name
   const mp = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
   if (mp) {
     const body = mp[1];
@@ -361,9 +394,11 @@ function collectMediaFromHtml(html, label, referer) {
     }
     if (hls && names.length) {
       for (let i = 0; i < names.length; i++) {
-        if (names[i].trim()) push(label + " · " + names[i].trim(), hls);
+        const n = names[i].trim();
+        if (!n) continue;
+        push(label + " · " + n, hls);
       }
-    } else if (hls) {
+    } else if (hls && isRussianVoice(label)) {
       push(label, hls);
     }
   }
@@ -371,7 +406,7 @@ function collectMediaFromHtml(html, label, referer) {
   const media = html.match(
     /https?:\/\/[^"'\s<>\\]+(?:\.m3u8|\.mp4)[^"'\s<>\\]*/gi
   );
-  if (media) {
+  if (media && isRussianVoice(label)) {
     const have = {};
     for (let i = 0; i < out.length; i++) have[out[i].streamUrl] = true;
     let n = 0;
@@ -389,7 +424,7 @@ function collectMediaFromHtml(html, label, referer) {
   const fileM =
     html.match(/["']file["']\s*:\s*["']([^"']+)["']/i) ||
     html.match(/file:\s*["']([^"']+)["']/i);
-  if (fileM) {
+  if (fileM && isRussianVoice(label)) {
     const f = fileM[1];
     if (f.indexOf("[") >= 0) {
       const re = /\[(\d{3,4}[^\]]*)\]([^,\[]+)/g;
@@ -461,8 +496,6 @@ async function resolveCollaps(htmlPage, season, episode) {
   return out;
 }
 
-/* ---- streams ---- */
-
 async function extractStreamUrl(url) {
   try {
     const raw = String(url);
@@ -477,6 +510,7 @@ async function extractStreamUrl(url) {
     function add(item) {
       if (!item || !isHttp(item.streamUrl)) return;
       const title = String(item.title || "Stream").trim();
+      if (!isRussianVoice(title)) return;
       const key = title + "||" + item.streamUrl.slice(0, 120);
       if (seen[key]) return;
       seen[key] = true;
@@ -491,7 +525,7 @@ async function extractStreamUrl(url) {
       });
     }
 
-    // 1) ALLOHA first – separate stream per voice
+    // 1) Alloha – Russian voices only
     if (tokenMovie) {
       const j = await fetchAlloha(tokenMovie);
       const data = j && j.data ? j.data : null;
@@ -505,8 +539,10 @@ async function extractStreamUrl(url) {
         });
         for (let i = 0; i < ids.length; i++) {
           const tr = map[ids[i]];
-          const voice = tr.translation || tr.name || "Alloha";
-          const label = "Alloha · " + voice + (tr.quality ? " · " + tr.quality : "");
+          const voice = tr.translation || tr.name || "";
+          if (!isRussianVoice(voice)) continue;
+          const label =
+            "Alloha · " + voice + (tr.quality ? " · " + tr.quality : "");
           if (!tr.iframe) continue;
           const more = await resolveEmbed(tr.iframe, label);
           for (let k = 0; k < more.length; k++) add(more[k]);
@@ -525,7 +561,7 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // 2) Collaps fallback if Alloha returned nothing (geo-block)
+    // 2) Collaps fallback – Russian-named tracks only
     if (!streams.length) {
       const collaps = await resolveCollaps(html, se.season, se.episode);
       for (let i = 0; i < collaps.length; i++) add(collaps[i]);
