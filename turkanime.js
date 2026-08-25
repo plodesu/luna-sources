@@ -1,8 +1,9 @@
 /**
  * TürkAnime TV – Sora / Luna
  * Turkish sub/dub anime (turkanime.tv)
- * Search: GET/POST /arama
- * v1.0.1
+ * Search: POST/GET /arama
+ * Stream: ajax/videosec
+ * v1.1.0
  */
 const baseUrl = "https://www.turkanime.tv";
 const UA =
@@ -101,7 +102,8 @@ async function searchResults(keyword) {
     function push(href, title, image) {
       href = absUrl(String(href || "").split("?")[0]);
       if (!href || seen[href]) return;
-      if (!/\/anime\//i.test(href)) return;
+      // Prefer /anime/ links for series pages
+      if (!/\/anime\//i.test(href) && !/\/video\//i.test(href)) return;
       seen[href] = true;
 
       let img = absUrl(image || "");
@@ -116,22 +118,20 @@ async function searchResults(keyword) {
 
     let html = "";
 
-    // 1) Try GET first (more reliable in Sora/Luna)
+    // GET first
     try {
-      const getUrl = baseUrl + "/arama?arama=" + encodeURIComponent(cleaned);
       html = await getText(
-        await soraFetch(getUrl, {
+        await soraFetch(baseUrl + "/arama?arama=" + encodeURIComponent(cleaned), {
           headers: {
             "User-Agent": UA,
             Accept: "text/html,*/*",
-            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
             Referer: baseUrl + "/",
           },
         })
       );
     } catch (e) {}
 
-    // 2) Fallback to POST if GET failed
+    // POST fallback
     if (!html || html.length < 1500 || /Just a moment|404|Bulunamadı/i.test(html)) {
       try {
         html = await getText(
@@ -141,7 +141,6 @@ async function searchResults(keyword) {
               "User-Agent": UA,
               "Content-Type": "application/x-www-form-urlencoded",
               Accept: "text/html,*/*",
-              "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
               Referer: baseUrl + "/",
               Origin: baseUrl,
             },
@@ -151,43 +150,44 @@ async function searchResults(keyword) {
       } catch (e2) {}
     }
 
-    if (!html || html.length < 1000) {
-      return JSON.stringify([]);
+    if (!html || html.length < 1000) return JSON.stringify([]);
+
+    // Best pattern: data-title + data-img + href/data-url
+    let re =
+      /data-title="([^"]+)"[\s\S]{0,400}?data-img="([^"]+)"[\s\S]{0,400}?(?:data-url|href)="([^"]+)"/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      push(m[3], m[1], m[2]);
     }
 
-    // --- Parsing ---
+    // Reverse order sometimes
+    re =
+      /(?:data-url|href)="([^"]*\/(?:anime|video)\/[^"]+)"[\s\S]{0,400}?data-title="([^"]+)"[\s\S]{0,200}?data-img="([^"]+)"/gi;
+    while ((m = re.exec(html))) {
+      push(m[1], m[2], m[3]);
+    }
 
-    // Pattern A: full anime links
-    let re = /href="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/anime\/[^"]+)"/gi;
-    let m;
+    // data-src lazy images
+    re =
+      /href="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/anime\/[^"]+)"[\s\S]{0,300}?(?:data-src|src)="([^"]*imajlar[^"]+)"[\s\S]{0,200}?(?:title|alt|data-title)="([^"]+)"/gi;
+    while ((m = re.exec(html))) {
+      push(m[1], m[3], m[2]);
+    }
+
+    // Simple /anime/ links
+    re = /href="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/anime\/[^"]+)"/gi;
     while ((m = re.exec(html))) {
       const slug = m[1].split("/").pop().replace(/\/$/, "");
       push(m[1], slug.replace(/-/g, " "), "");
     }
 
-    // Pattern B: relative links
     re = /href="(\/anime\/[^"]+)"/gi;
     while ((m = re.exec(html))) {
       const slug = m[1].split("/").pop().replace(/\/$/, "");
       push(m[1], slug.replace(/-/g, " "), "");
     }
 
-    // Pattern C: link + image + title nearby
-    re =
-      /href="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/anime\/[^"]+|\/anime\/[^"]+)"[^>]*>[\s\S]{0,400}?src="([^"]+)"[\s\S]{0,200}?(?:title|alt)="([^"]+)"/gi;
-    while ((m = re.exec(html))) {
-      push(m[1], m[3], m[2]);
-    }
-
-    // Pattern D: title inside the <a>
-    re =
-      /href="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/anime\/[^"]+|\/anime\/[^"]+)"[^>]*>([^<]{3,100})</gi;
-    while ((m = re.exec(html))) {
-      const t = decodeEntities(m[2]).trim();
-      if (t.length > 2) push(m[1], t, "");
-    }
-
-    // Score by relevance
+    // Score
     const q = cleaned.toLowerCase();
     const scored = results.map(function (r) {
       const t = r.title.toLowerCase();
@@ -196,9 +196,9 @@ async function searchResults(keyword) {
       q.split(/\s+/).forEach(function (w) {
         if (w.length > 2 && t.indexOf(w) >= 0) score += 4;
       });
+      if (r.image) score += 2;
       return { r: r, score: score };
     });
-
     scored.sort(function (a, b) {
       return b.score - a.score;
     });
@@ -226,8 +226,7 @@ async function extractDetails(url) {
     const dm =
       html.match(/name=["']description["']\s+content=["']([^"']+)/i) ||
       html.match(/property=["']og:description["'][^>]*content=["']([^"']+)/i) ||
-      html.match(/class="[^"]*ozet[^"]*"[^>]*>([\s\S]*?)<\/div>/i) ||
-      html.match(/<p[^>]*class="[^"]*text[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+      html.match(/data-ozet="([^"]+)"/i);
     if (dm) {
       description = decodeEntities(dm[1].replace(/<[^>]+>/g, " "))
         .replace(/\s+/g, " ")
@@ -248,14 +247,18 @@ async function extractDetails(url) {
 
 async function extractEpisodes(url) {
   try {
-    const html = await getText(await soraFetch(absUrl(url)));
+    const pageUrl = absUrl(url);
+    const html = await getText(await soraFetch(pageUrl));
     const eps = [];
     const seen = {};
 
+    // Prefer /video/ links
     const patterns = [
       /href="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/video\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi,
       /href="(\/video\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi,
       /href="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/video\/[^"]+)"/gi,
+      /href="(\/video\/[^"]+)"/gi,
+      /data-url="((?:https?:)?\/\/(?:www\.)?turkanime\.tv\/video\/[^"]+)"/gi,
     ];
 
     for (let p = 0; p < patterns.length; p++) {
@@ -272,7 +275,7 @@ async function extractEpisodes(url) {
           title.match(/(\d+)\s*\.?\s*[Bb]ölüm/i) ||
           title.match(/[Bb]ölüm\s*(\d+)/i) ||
           href.match(/(?:bolum|episode|ep)[_-]?(\d+)/i) ||
-          href.match(/-(\d+)(?:\.html)?$/);
+          href.match(/-(\d+)(?:-bolum)?(?:\.html)?$/i);
         if (nm) num = parseInt(nm[1], 10);
         if (!num) num = eps.length + 1;
         if (!title || title.length < 2) title = "Bölüm " + num;
@@ -286,7 +289,7 @@ async function extractEpisodes(url) {
     });
 
     if (!eps.length) {
-      eps.push({ href: String(url), number: 1, title: "Bölüm 1" });
+      eps.push({ href: pageUrl, number: 1, title: "Bölüm 1" });
     }
 
     return JSON.stringify(eps.slice(0, 500));
@@ -301,8 +304,9 @@ async function extractEpisodes(url) {
 
 async function extractStreamUrl(url) {
   try {
+    const pageUrl = absUrl(url);
     const html = await getText(
-      await soraFetch(absUrl(url), {
+      await soraFetch(pageUrl, {
         headers: { Referer: baseUrl + "/", "User-Agent": UA },
       })
     );
@@ -322,13 +326,8 @@ async function extractStreamUrl(url) {
           .replace(/&amp;/g, "&")
       );
       if (!isHttp(u) || seen[u]) return;
-      if (
-        !/\.m3u8|\.mp4|googlevideo|sibnet|drive|ok\.ru|vidmoly|dood|alucard|bankai|amaterasu|pixeldrain|sendvid|uqload|vudea/i.test(
-          u
-        ) &&
-        !/player|embed|video/i.test(u)
-      )
-        return;
+      // Filter noise
+      if (/a-ads\.com|google-analytics|facebook|twitter|cdnjs/i.test(u)) return;
       seen[u] = true;
       streams.push({
         title: "TürkAnime · " + (label || "Stream"),
@@ -341,35 +340,87 @@ async function extractStreamUrl(url) {
       });
     }
 
-    // iframe embeds
+    // 1) Collect all ajax/videosec endpoints from the page
+    const ajaxList = [];
+    const reAjax =
+      /ajax\/videosec&b=([A-Za-z0-9+/=]+)(?:&|&amp;)f=([A-Za-z0-9+/=]+)/gi;
     let m;
-    const reIframe = /<iframe[^>]+src=["']([^"']+)["']/gi;
-    while ((m = reIframe.exec(html))) add(absUrl(m[1]), "Embed");
+    while ((m = reAjax.exec(html))) {
+      ajaxList.push({
+        url:
+          baseUrl +
+          "/ajax/videosec&b=" +
+          encodeURIComponent(m[1]) +
+          "&f=" +
+          encodeURIComponent(m[2]),
+      });
+    }
 
-    // data-src / data-url
-    const reData = /data-(?:src|url|video|file)=["']([^"']+)["']/gi;
-    while ((m = reData.exec(html))) add(absUrl(m[1]), "Data");
+    // Also catch already-encoded variants
+    const reAjax2 =
+      /IndexIcerik\(['"]ajax\/videosec&b=([^&'"]+)&f=([^&'"]+)['"]/gi;
+    while ((m = reAjax2.exec(html))) {
+      ajaxList.push({
+        url:
+          baseUrl +
+          "/ajax/videosec&b=" +
+          m[1] +
+          "&f=" +
+          m[2],
+      });
+    }
 
-    // direct m3u8 / mp4
-    const reM3u = /https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*/gi;
-    while ((m = reM3u.exec(html))) add(m[0], "HLS");
+    // 2) Fetch each player endpoint (limit to first 6)
+    for (let i = 0; i < Math.min(ajaxList.length, 6); i++) {
+      try {
+        const playerHtml = await getText(
+          await soraFetch(ajaxList[i].url, {
+            headers: {
+              "User-Agent": UA,
+              Referer: pageUrl,
+              "X-Requested-With": "XMLHttpRequest",
+              Accept: "*/*",
+            },
+          })
+        );
+        if (!playerHtml) continue;
 
-    const reMp4 = /https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*/gi;
-    while ((m = reMp4.exec(html))) add(m[0], "MP4");
+        // iframe
+        const reIframe = /<iframe[^>]+src=["']([^"']+)["']/gi;
+        while ((m = reIframe.exec(playerHtml))) add(absUrl(m[1]), "Embed");
 
-    // JS file: "..."
-    const reFile = /["']file["']\s*:\s*["']([^"']+)["']/gi;
-    while ((m = reFile.exec(html))) add(m[1], "File");
+        // direct media
+        const reM3u = /https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*/gi;
+        while ((m = reM3u.exec(playerHtml))) add(m[0], "HLS");
 
-    // Player names
-    const rePlayer =
-      /(?:alucard|bankai|amaterasu|gdrive|sibnet|sendvid|uqload|vudea)[^"']*["']\s*:\s*["'](https?:\/\/[^"']+)["']/gi;
-    while ((m = rePlayer.exec(html))) add(m[1], "Player");
+        const reMp4 = /https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*/gi;
+        while ((m = reMp4.exec(playerHtml))) add(m[0], "MP4");
 
-    // Generic player/embed links
-    const reLink =
-      /href=["'](https?:\/\/[^"']+(?:player|embed|video)[^"']*)["']/gi;
-    while ((m = reLink.exec(html))) add(m[1], "Link");
+        // file: "..."
+        const reFile = /["']file["']\s*:\s*["']([^"']+)["']/gi;
+        while ((m = reFile.exec(playerHtml))) add(m[1], "File");
+
+        // source / src
+        const reSrc =
+          /["'](?:src|source|url|videoSource|securedLink)["']\s*:\s*["'](https?:\/\/[^"']+)["']/gi;
+        while ((m = reSrc.exec(playerHtml))) add(m[1], "Source");
+
+        // common hosts
+        const reHost =
+          /https?:\/\/[^"'\\\s<>]*(?:sibnet|drive\.google|ok\.ru|vidmoly|dood|pixeldrain|sendvid|uqload|vudea|alucard|bankai|amaterasu)[^"'\\\s<>]*/gi;
+        while ((m = reHost.exec(playerHtml))) add(m[0], "Host");
+      } catch (e) {}
+    }
+
+    // 3) Fallback: anything already on the main page
+    const reIframe2 = /<iframe[^>]+src=["']([^"']+)["']/gi;
+    while ((m = reIframe2.exec(html))) add(absUrl(m[1]), "PageEmbed");
+
+    const reM3u2 = /https?:\/\/[^"'\\\s<>]+?\.m3u8[^"'\\\s<>]*/gi;
+    while ((m = reM3u2.exec(html))) add(m[0], "HLS");
+
+    const reMp42 = /https?:\/\/[^"'\\\s<>]+?\.mp4[^"'\\\s<>]*/gi;
+    while ((m = reMp42.exec(html))) add(m[0], "MP4");
 
     return JSON.stringify({
       streams: streams.slice(0, 12),
