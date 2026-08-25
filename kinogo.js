@@ -1,7 +1,7 @@
 /**
  * Kinogo.sh – Sora / Luna
- * Multi-stream Select Server · named voices when possible
- * v1.3.0
+ * GidOnline-style Select Server: one row per voice
+ * v1.4.0
  */
 const baseUrl = "https://kinogo.sh";
 
@@ -331,7 +331,7 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ---- collect EVERY playable URL from an embed page ---- */
+/* ---- media from embed HTML ---- */
 
 function collectMediaFromHtml(html, label, referer) {
   const out = [];
@@ -344,17 +344,14 @@ function collectMediaFromHtml(html, label, referer) {
     "User-Agent": UA,
     Referer: referer || baseUrl + "/",
   };
-  const seen = {};
 
   function push(title, url) {
     if (!isHttp(url)) return;
     url = url.replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
-    if (seen[url]) return;
-    seen[url] = true;
     out.push({ title: title, streamUrl: url, headers: headers });
   }
 
-  // makePlayer primary + audio names
+  // makePlayer → ONE hls + MANY audio names → one row per voice (GidOnline style)
   const mp = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
   if (mp) {
     const body = mp[1];
@@ -369,39 +366,48 @@ function collectMediaFromHtml(html, label, referer) {
         names.push(nm[i].replace(/["']/g, ""));
       }
     }
-    if (hls) {
-      const t =
-        names.length > 0
-          ? label + " · " + names.slice(0, 4).join(", ")
-          : label;
-      push(t, hls);
+
+    if (hls && names.length > 0) {
+      // Prefer Russian / studio dubs first in list order (keep API order, filter junk later)
+      for (let i = 0; i < names.length; i++) {
+        const n = names[i].trim();
+        if (!n) continue;
+        // GidOnline-like label
+        push(label + " · " + n, hls);
+      }
+    } else if (hls) {
+      push(label, hls);
     }
-    // quality map
+
+    // quality variants (different URLs)
     const qRe =
       /["'](\d{3,4})["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/g;
     let qm;
     while ((qm = qRe.exec(body))) {
+      if (hls && qm[2] === hls) continue;
       push(label + " · " + qm[1] + "p", qm[2]);
     }
   }
 
-  // ALL m3u8 / mp4 in page (this is what previously showed Select Server)
+  // extra unique m3u8/mp4 not already covered
   const media = html.match(
     /https?:\/\/[^"'\s<>\\]+(?:\.m3u8|\.mp4)[^"'\s<>\\]*/gi
   );
   if (media) {
+    const have = {};
+    for (let i = 0; i < out.length; i++) have[out[i].streamUrl] = true;
     let n = 0;
     for (let i = 0; i < media.length; i++) {
       let u = media[i].replace(/\\u0026/g, "&").replace(/\\/g, "");
-      // skip thumbnails / tiny junk
       if (/\.(jpg|png|gif|webp)/i.test(u)) continue;
       if (/preview|thumb|poster|sprite/i.test(u)) continue;
+      if (have[u]) continue;
+      have[u] = true;
       n++;
-      push(label + " · " + n, u);
+      push(label + " · stream " + n, u);
     }
   }
 
-  // JW file: "[1080]url or [720]url"
   const fileM =
     html.match(/["']file["']\s*:\s*["']([^"']+)["']/i) ||
     html.match(/file:\s*["']([^"']+)["']/i);
@@ -470,13 +476,14 @@ async function resolveCollaps(htmlPage, season, episode) {
       );
       const got = collectMediaFromHtml(html, "Collaps", urls[i]);
       for (let j = 0; j < got.length; j++) out.push(got[j]);
+      // stop once we have named voices
       if (out.length >= 2) break;
     } catch (e) {}
   }
   return out;
 }
 
-/* ---- extractStreamUrl – ALWAYS multi if possible ---- */
+/* ---- streams ---- */
 
 async function extractStreamUrl(url) {
   try {
@@ -488,16 +495,18 @@ async function extractStreamUrl(url) {
     const tokenMovie = extractAllohaTokenMovie(html);
 
     const streams = [];
+    // Dedupe by TITLE+URL so same HLS can appear once per voice name
     const seen = {};
 
     function add(item) {
       if (!item || !isHttp(item.streamUrl)) return;
-      const key = item.streamUrl.slice(0, 160);
+      const title = String(item.title || "Stream").trim();
+      const key = title + "||" + item.streamUrl.slice(0, 120);
       if (seen[key]) return;
       seen[key] = true;
       streams.push({
-        title: item.title,
-        name: item.title,
+        title: title,
+        name: title,
         streamUrl: item.streamUrl,
         headers: item.headers || {
           "User-Agent": UA,
@@ -506,7 +515,7 @@ async function extractStreamUrl(url) {
       });
     }
 
-    // 1) Alloha – separate stream per voice
+    // 1) Alloha – one row per translation (real separate streams when available)
     if (tokenMovie) {
       const j = await fetchAlloha(tokenMovie);
       const data = j && j.data ? j.data : null;
@@ -546,11 +555,11 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // 2) Collaps – collect ALL m3u8 variants (forces Select Server)
+    // 2) Collaps – one Select Server row per voice name
     const collaps = await resolveCollaps(html, se.season, se.episode);
     for (let i = 0; i < collaps.length; i++) add(collaps[i]);
 
-    // 3) Every page player tab
+    // 3) Page players
     for (let i = 0; i < players.length; i++) {
       let u = players[i].url;
       if (se.season && /ortified|delivembd/i.test(u)) {
@@ -561,20 +570,24 @@ async function extractStreamUrl(url) {
           "&episode=" +
           (se.episode || 1);
       }
-      const more = await resolveEmbed(u, players[i].name || "Плеер");
+      const more = await resolveEmbed(
+        u,
+        players[i].name || "Плеер"
+      );
       for (let k = 0; k < more.length; k++) add(more[k]);
     }
 
+    // Sort: dubs first
     streams.sort(function (a, b) {
       const rank = function (t) {
-        if (/дубл|lost|кубик|гоблин|кравец|hdrezka/i.test(t)) return 0;
+        if (/дубл|hdrezka|winmedia|tvshows|dragon|lost|кубик|гоблин/i.test(t))
+          return 0;
         if (/субтитр|оригинал/i.test(t)) return 2;
         return 1;
       };
       return rank(a.title) - rank(b.title);
     });
 
-    // NEVER return a bare URL string — always the multi object
     return JSON.stringify({
       streams: streams.slice(0, 15),
       subtitles: "",
