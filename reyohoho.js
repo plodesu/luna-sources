@@ -1,16 +1,9 @@
 /**
  * ReYohoho (reyohoho.com) – Sora / Luna
- * Search: /?q= · Films: /films/{kp_id}
- * Streams: Alloha multi-voice (HDrezka, LostFilm, …)
- * v1.0.0
+ * Player: VideoSeed ONLY (tv-2-kinoserial.net)
+ * v1.1.0
  */
 const baseUrl = "https://reyohoho.com";
-const allohaApi = "https://api.alloha.tv/";
-const allohaHosts = [
-  "https://reuse-as.stravers.live/",
-  "https://api.apbugall.org/",
-  "https://api.alloha.tv/",
-];
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
@@ -52,20 +45,6 @@ async function getText(res) {
     return String(res);
   } catch (e) {
     return "";
-  }
-}
-
-async function getJson(url, headers) {
-  try {
-    const t = await getText(
-      await soraFetch(url, { headers: headers || {} })
-    );
-    if (!t) return null;
-    const c = t.charAt(0);
-    if (c !== "{" && c !== "[") return null;
-    return JSON.parse(t);
-  } catch (e) {
-    return null;
   }
 }
 
@@ -115,112 +94,93 @@ function parseHref(url) {
   if (m) id = m[1];
   const se = s.match(/[?&#]s=(\d+)/i);
   const ee = s.match(/[?&#]e=(\d+)/i);
-  const tr = s.match(/[?&#]tr=(\d+)/i);
   return {
     id: id,
     season: se ? parseInt(se[1], 10) : 1,
     episode: ee ? parseInt(ee[1], 10) : 1,
-    translation: tr ? tr[1] : "",
   };
 }
 
-function makeHref(id, season, episode, translation) {
+function makeHref(id, season, episode) {
   let h = baseUrl + "/films/" + id;
   const q = [];
   if (season) q.push("s=" + season);
   if (episode) q.push("e=" + episode);
-  if (translation) q.push("tr=" + translation);
   if (q.length) h += "?" + q.join("&");
   return h;
 }
 
-function isEnglish(name) {
-  return /eng\.?\s*original|eng\.?original|english|английск|\beng\b|оригинальный/i.test(
-    String(name || "")
-  ) && !/рус|дубл|hdrezka|lost|tvshows/i.test(String(name || ""));
+/** Extract VideoSeed iframe only */
+function extractVideoSeedUrl(html) {
+  if (!html) return "";
+  // preferred: pane = videoseed
+  let m = html.match(
+    /data-player-pane=["']videoseed["'][\s\S]{0,500}?src=["'](https?:\/\/[^"']+)["']/i
+  );
+  if (m) return decodeEntities(m[1]);
+
+  m = html.match(
+    /(https?:\/\/[^"'\s]*kinoserial\.net\/embed_auto\/[^"'\s]+)/i
+  );
+  if (m) return decodeEntities(m[1]);
+
+  m = html.match(
+    /(https?:\/\/[^"'\s]*videoseed[^"'\s]*\/embed[^"'\s]*)/i
+  );
+  if (m) return decodeEntities(m[1]);
+
+  return "";
 }
 
-function isRussianVoice(name) {
-  const n = String(name || "");
-  if (!n.trim()) return false;
-  if (/субтитр|subtitle|^sub\b|укр\.?\s*суб/i.test(n) && !/рус/i.test(n))
-    return false;
-  if (/украин|україн|ukr/i.test(n) && !/рус|дубл|hdrezka|lost/i.test(n))
-    return false;
-  if (isEnglish(n)) return false;
-  return true;
+function withSeasonEpisode(embedUrl, season, episode) {
+  if (!embedUrl) return "";
+  let u = embedUrl;
+  // strip old s/e
+  u = u.replace(/([?&])(season|episode|s|e)=\d+/gi, "");
+  u = u.replace(/\?&/, "?").replace(/&&/g, "&").replace(/\?$/, "");
+  const sep = u.indexOf("?") >= 0 ? "&" : "?";
+  if (season) u += sep + "season=" + season + "&s=" + season;
+  if (episode)
+    u += (u.indexOf("?") >= 0 ? "&" : "?") + "episode=" + episode + "&e=" + episode;
+  return u;
 }
 
-function voiceRank(name) {
-  const n = String(name || "");
-  if (/hdrezka|rezka/i.test(n) && /дубл|18\+/i.test(n)) return 0;
-  if (/hdrezka|rezka/i.test(n)) return 1;
-  if (/дубл/i.test(n)) return 2;
-  if (/lostfilm|tvshows|coldfilm|baibako|rudub|dragon|newstudio|le-production|red head/i.test(n))
-    return 3;
-  return 4;
-}
+function parseStreamsFromPlayer(html) {
+  const out = [];
+  if (!html || html.length < 50) return out;
+  if (/недоступен|unavailable|403|access denied/i.test(html) && html.length < 2000)
+    return out;
 
-function extractAllohaTokens(html) {
-  const out = { tokenMovie: "", token: "" };
-  if (!html) return out;
-  const tm = html.match(/token_movie=([a-f0-9]+)/i);
-  if (tm) out.tokenMovie = tm[1];
-  // prefer site-wide alloha token (usually starts with 7b in samples)
-  const all = html.match(/token=([a-f0-9]{24,})/gi) || [];
-  for (let i = 0; i < all.length; i++) {
-    const t = all[i].replace(/^token=/i, "");
-    if (t === out.tokenMovie) continue;
-    out.token = t;
-    if (/^7b/i.test(t)) break;
-  }
-  return out;
-}
-
-async function loadAllohaData(tokenMovie, token) {
-  if (!tokenMovie || !token) return null;
-  const url =
-    allohaApi +
-    "?token_movie=" +
-    encodeURIComponent(tokenMovie) +
-    "&token=" +
-    encodeURIComponent(token);
-  const json = await getJson(url);
-  if (!json || json.status !== "success" || !json.data) return null;
-  return json.data;
-}
-
-/** Parse stream URL from Alloha player HTML */
-function parsePlayerStreams(html) {
-  const streams = [];
-  if (!html || /недоступен|unavailable|region/i.test(html)) return streams;
-
-  function add(label, u) {
-    u = forceHttps(String(u || "").replace(/\\u0026/g, "&").replace(/\\\//g, "/"));
+  function add(label, raw) {
+    let u = forceHttps(
+      String(raw || "")
+        .replace(/\\u0026/g, "&")
+        .replace(/\\\//g, "/")
+        .replace(/&amp;/g, "&")
+        .trim()
+    );
     if (!isHttp(u)) return;
-    if (!/\.(m3u8|mp4)(\?|$)/i.test(u) && u.indexOf("m3u8") < 0) return;
-    streams.push({ label: label || "Stream", url: u });
+    if (!/\.(m3u8|mp4)(\?|$)/i.test(u) && u.indexOf("m3u8") < 0 && u.indexOf("mp4") < 0)
+      return;
+    out.push({ label: label || "VideoSeed", url: u });
   }
 
   let m;
-  // file: "..."
   const fileRe = /["']?file["']?\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi;
   while ((m = fileRe.exec(html))) add("file", m[1]);
 
-  // hls: "..."
   const hlsRe = /["']?hls["']?\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi;
   while ((m = hlsRe.exec(html))) add("hls", m[1]);
 
-  // source src=
-  const srcRe = /(?:src|source)\s*=\s*["'](https?:\/\/[^"']+\.(?:m3u8|mp4)[^"']*)["']/gi;
+  const srcRe =
+    /(?:src|source)\s*=\s*["'](https?:\/\/[^"']+\.(?:m3u8|mp4)[^"']*)["']/gi;
   while ((m = srcRe.exec(html))) add("src", m[1]);
 
-  // raw m3u8/mp4 urls
   const rawRe = /(https?:\/\/[^"'\s<>]+?\.(?:m3u8|mp4)[^"'\s<>]*)/gi;
   while ((m = rawRe.exec(html))) add("raw", m[1]);
 
-  // quality map {"720":"url"}
-  const mapRe = /\{[^{}]{0,20}"(?:1080|720|480|360)"[^{}]{10,800}\}/g;
+  // Playerjs / quality map
+  const mapRe = /\{[^{}]{0,30}"(?:1080|720|480|360)"[^{}]{10,1200}\}/g;
   while ((m = mapRe.exec(html))) {
     try {
       const obj = JSON.parse(m[0]);
@@ -230,60 +190,47 @@ function parsePlayerStreams(html) {
       for (let i = 0; i < keys.length; i++) {
         if (isHttp(obj[keys[i]])) {
           add(keys[i] + "p", obj[keys[i]]);
-          break; // highest only
+          break;
         }
       }
     } catch (e) {}
   }
 
-  // dedupe
+  // playlist array [{title, file}]
+  const plRe =
+    /\{[^{}]*["']?title["']?\s*:\s*["']([^"']+)["'][^{}]*["']?file["']?\s*:\s*["'](https?:\/\/[^"']+)["'][^{}]*\}/gi;
+  while ((m = plRe.exec(html))) add(m[1], m[2]);
+  const plRe2 =
+    /\{[^{}]*["']?file["']?\s*:\s*["'](https?:\/\/[^"']+)["'][^{}]*["']?title["']?\s*:\s*["']([^"']+)["'][^{}]*\}/gi;
+  while ((m = plRe2.exec(html))) add(m[2], m[1]);
+
   const seen = {};
   const uniq = [];
-  for (let i = 0; i < streams.length; i++) {
-    if (seen[streams[i].url]) continue;
-    seen[streams[i].url] = true;
-    uniq.push(streams[i]);
+  for (let i = 0; i < out.length; i++) {
+    if (seen[out[i].url]) continue;
+    seen[out[i].url] = true;
+    uniq.push(out[i]);
   }
   return uniq;
 }
 
-async function fetchAllohaPlayer(iframeUrl) {
-  // try given host + mirrors with same query
-  const q = iframeUrl.indexOf("?") >= 0 ? iframeUrl.slice(iframeUrl.indexOf("?")) : "";
-  const urls = [iframeUrl];
-  for (let i = 0; i < allohaHosts.length; i++) {
-    const u = allohaHosts[i] + q.replace(/^\?/, "?");
-    if (urls.indexOf(u) < 0) urls.push(u);
-  }
-
-  for (let i = 0; i < urls.length; i++) {
-    try {
-      const html = await getText(
-        await soraFetch(urls[i], {
-          headers: {
-            Referer: baseUrl + "/",
-            Accept: "text/html,*/*",
-            "User-Agent": UA,
-          },
-        })
-      );
-      const found = parsePlayerStreams(html);
-      if (found.length) return found;
-    } catch (e) {}
-  }
-  return [];
+function isRussianLabel(name) {
+  const n = String(name || "");
+  if (!n.trim()) return true;
+  if (/eng\.?original|english|английск|\beng\b/i.test(n)) return false;
+  if (/укр|ukr|україн/i.test(n) && !/рус|дубл|hdrezka|lost/i.test(n))
+    return false;
+  if (/субтитр|subtitle/i.test(n) && !/рус/i.test(n)) return false;
+  return true;
 }
 
-function buildIframeUrl(tokenMovie, token, translation, season, episode) {
-  let q =
-    "token_movie=" +
-    encodeURIComponent(tokenMovie) +
-    "&token=" +
-    encodeURIComponent(token);
-  if (translation) q += "&translation=" + encodeURIComponent(translation);
-  if (season) q += "&season=" + season;
-  if (episode) q += "&episode=" + episode;
-  return allohaHosts[0] + "?" + q;
+function voiceRank(name) {
+  const n = String(name || "");
+  if (/hdrezka|rezka/i.test(n)) return 0;
+  if (/дубл/i.test(n)) return 1;
+  if (/lostfilm|tvshows|coldfilm|баибако|rudub|dragon/i.test(n)) return 2;
+  if (/рус/i.test(n)) return 3;
+  return 4;
 }
 
 /* ===================== search ===================== */
@@ -307,13 +254,14 @@ async function searchResults(keyword) {
       const href = absUrl(m[1]);
       if (seen[href]) continue;
       seen[href] = true;
-      const title = decodeEntities(m[3]).replace(/\s+/g, " ").trim();
-      const image = absUrl(m[2]);
-      results.push({ title: title, image: image, href: href });
+      results.push({
+        title: decodeEntities(m[3]).replace(/\s+/g, " ").trim(),
+        image: absUrl(m[2]),
+        href: href,
+      });
       if (results.length >= 20) break;
     }
 
-    // fallback
     if (!results.length) {
       const re2 = /href="(\/films\/\d+)"[\s\S]{0,400}?alt="([^"]+)"/gi;
       while ((m = re2.exec(html))) {
@@ -343,17 +291,10 @@ async function extractDetails(url) {
     let description = "N/A";
     const dm =
       html.match(/name=["']description["']\s+content=["']([^"']+)/i) ||
-      html.match(/property=["']og:description["'][^>]*content=["']([^"']+)/i);
+      html.match(
+        /property=["']og:description["'][^>]*content=["']([^"']+)/i
+      );
     if (dm) description = decodeEntities(dm[1]).slice(0, 900);
-
-    const tokens = extractAllohaTokens(html);
-    if (tokens.tokenMovie && tokens.token) {
-      const data = await loadAllohaData(tokens.tokenMovie, tokens.token);
-      if (data && data.description) {
-        description = String(data.description).slice(0, 900);
-      }
-    }
-
     return JSON.stringify([
       { description: description || "N/A", aliases: "N/A", airdate: "N/A" },
     ]);
@@ -372,26 +313,61 @@ async function extractEpisodes(url) {
         { href: String(url), number: 1, season: 1, title: "Смотреть" },
       ]);
     }
+
     const pageUrl = baseUrl + "/films/" + p.id;
     const html = await getText(await soraFetch(pageUrl));
-    const tokens = extractAllohaTokens(html);
+    const embed = extractVideoSeedUrl(html);
     const eps = [];
 
-    if (tokens.tokenMovie && tokens.token) {
-      const data = await loadAllohaData(tokens.tokenMovie, tokens.token);
-      if (data && data.seasons && typeof data.seasons === "object") {
-        const seasonKeys = Object.keys(data.seasons).sort(function (a, b) {
-          return parseInt(a, 10) - parseInt(b, 10);
+    // Try to discover seasons/episodes from VideoSeed player HTML
+    if (embed) {
+      const playerHtml = await getText(
+        await soraFetch(embed, {
+          headers: {
+            Referer: baseUrl + "/",
+            Accept: "text/html,*/*",
+          },
+        })
+      );
+
+      // seasons:[{season:1,episodes:[{episode:1}...]}] style
+      const seasonBlocks = playerHtml.split(/"season"\s*:\s*/);
+      for (let i = 1; i < seasonBlocks.length; i++) {
+        const sm = seasonBlocks[i].match(/^(\d+)/);
+        if (!sm) continue;
+        const sid = parseInt(sm[1], 10);
+        const chunk = seasonBlocks[i].slice(0, 8000);
+        const epNums = [];
+        const er = /"episode"\s*:\s*"?(\d+)"?/g;
+        let em;
+        while ((em = er.exec(chunk))) {
+          const n = parseInt(em[1], 10);
+          if (epNums.indexOf(n) < 0) epNums.push(n);
+        }
+        epNums.sort(function (a, b) {
+          return a - b;
         });
-        for (let s = 0; s < seasonKeys.length; s++) {
-          const sid = parseInt(seasonKeys[s], 10) || s + 1;
-          const seasonObj = data.seasons[seasonKeys[s]] || {};
-          const episodes = seasonObj.episodes || {};
-          const epKeys = Object.keys(episodes).sort(function (a, b) {
-            return parseInt(a, 10) - parseInt(b, 10);
+        for (let e = 0; e < epNums.length; e++) {
+          eps.push({
+            href: makeHref(p.id, sid, epNums[e]),
+            number: epNums[e],
+            season: sid,
+            title: "S" + sid + "E" + epNums[e],
           });
-          for (let e = 0; e < epKeys.length; e++) {
-            const eid = parseInt(epKeys[e], 10) || e + 1;
+        }
+      }
+
+      // folder / playlist titles S1E1
+      if (!eps.length) {
+        const titleRe = /["']title["']\s*:\s*["']([^"']*(?:сезон|season|S\d+|Эпизод|episode)[^"']*)["']/gi;
+        let tm;
+        while ((tm = titleRe.exec(playerHtml))) {
+          const t = tm[1];
+          const sM = t.match(/(?:сезон|season|S)\s*(\d+)/i);
+          const eM = t.match(/(?:эпизод|серия|episode|E)\s*(\d+)/i);
+          if (sM && eM) {
+            const sid = parseInt(sM[1], 10);
+            const eid = parseInt(eM[1], 10);
             eps.push({
               href: makeHref(p.id, sid, eid),
               number: eid,
@@ -412,7 +388,20 @@ async function extractEpisodes(url) {
       });
     }
 
-    return JSON.stringify(eps.slice(0, 500));
+    // dedupe
+    const seen = {};
+    const uniq = [];
+    for (let i = 0; i < eps.length; i++) {
+      const k = eps[i].season + ":" + eps[i].number;
+      if (seen[k]) continue;
+      seen[k] = true;
+      uniq.push(eps[i]);
+    }
+    uniq.sort(function (a, b) {
+      return a.season - b.season || a.number - b.number;
+    });
+
+    return JSON.stringify(uniq.slice(0, 500));
   } catch (e) {
     return JSON.stringify([
       {
@@ -432,115 +421,98 @@ async function extractStreamUrl(url) {
 
     const pageUrl = baseUrl + "/films/" + p.id;
     const html = await getText(await soraFetch(pageUrl));
-    const tokens = extractAllohaTokens(html);
-    if (!tokens.tokenMovie || !tokens.token) {
+
+    let embed = extractVideoSeedUrl(html);
+    if (!embed) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
 
-    const data = await loadAllohaData(tokens.tokenMovie, tokens.token);
-    if (!data) {
-      return JSON.stringify({ streams: [], subtitles: "" });
+    // series episode
+    if (p.season && p.episode) {
+      embed = withSeasonEpisode(embed, p.season, p.episode);
     }
 
-    const season = p.season || 1;
-    const episode = p.episode || 1;
-    const isSeries = data.category === 2 || !!data.seasons;
+    const playerHtml = await getText(
+      await soraFetch(embed, {
+        headers: {
+          Referer: baseUrl + "/",
+          Accept: "text/html,*/*",
+          "User-Agent": UA,
+          Origin: "https://reyohoho.com",
+        },
+      })
+    );
 
-    // collect voices (translation ids)
-    const voices = [];
-    const ti = data.translation_iframe || {};
-    const ids = Object.keys(ti);
-    for (let i = 0; i < ids.length; i++) {
-      const v = ti[ids[i]];
-      if (!v || !v.name) continue;
-      if (!isRussianVoice(v.name)) continue;
-      voices.push({ id: ids[i], name: v.name, quality: v.quality || "" });
-    }
-    voices.sort(function (a, b) {
-      return voiceRank(a.name) - voiceRank(b.name);
-    });
+    let found = parseStreamsFromPlayer(playerHtml);
 
-    // if none after filter, take all non-subtitle
-    if (!voices.length) {
-      for (let i = 0; i < ids.length; i++) {
-        const v = ti[ids[i]];
-        if (!v || !v.name) continue;
-        if (/субтитр/i.test(v.name)) continue;
-        voices.push({ id: ids[i], name: v.name, quality: v.quality || "" });
+    // try alternate season query forms if empty
+    if (!found.length && p.season && p.episode) {
+      const alts = [
+        embed.replace(/[?&]season=\d+/i, "").replace(/[?&]s=\d+/i, "") +
+          (embed.indexOf("?") >= 0 ? "&" : "?") +
+          "s=" +
+          p.season +
+          "&e=" +
+          p.episode,
+        embed +
+          (embed.indexOf("?") >= 0 ? "&" : "?") +
+          "season_id=" +
+          p.season +
+          "&episode_id=" +
+          p.episode,
+      ];
+      for (let i = 0; i < alts.length && !found.length; i++) {
+        const h2 = await getText(
+          await soraFetch(alts[i], {
+            headers: {
+              Referer: baseUrl + "/",
+              Accept: "text/html,*/*",
+              "User-Agent": UA,
+            },
+          })
+        );
+        found = parseStreamsFromPlayer(h2);
       }
     }
+
+    const headers = {
+      "User-Agent": UA,
+      Referer: "https://tv-2-kinoserial.net/",
+      Origin: "https://tv-2-kinoserial.net",
+    };
 
     const streams = [];
     const seen = {};
-    const maxVoices = 8;
 
-    for (let i = 0; i < voices.length && i < maxVoices; i++) {
-      const voice = voices[i];
-      let iframeUrl = buildIframeUrl(
-        tokens.tokenMovie,
-        tokens.token,
-        voice.id,
-        isSeries ? season : null,
-        isSeries ? episode : null
-      );
-
-      // prefer iframe from seasons tree if present
-      if (isSeries && data.seasons) {
-        const sObj = data.seasons[String(season)] || data.seasons[season];
-        if (sObj && sObj.episodes) {
-          const eObj =
-            sObj.episodes[String(episode)] || sObj.episodes[episode];
-          if (eObj && eObj.iframe) {
-            // inject translation into season episode iframe
-            iframeUrl = eObj.iframe;
-            if (iframeUrl.indexOf("translation=") < 0) {
-              iframeUrl +=
-                (iframeUrl.indexOf("?") >= 0 ? "&" : "?") +
-                "translation=" +
-                encodeURIComponent(voice.id);
-            }
-          }
-        }
+    for (let i = 0; i < found.length; i++) {
+      const f = found[i];
+      if (!isRussianLabel(f.label) && found.length > 1) continue;
+      let title = "VideoSeed";
+      if (f.label && f.label !== "file" && f.label !== "hls" && f.label !== "raw" && f.label !== "src") {
+        title = "VideoSeed · " + f.label;
       }
-
-      const found = await fetchAllohaPlayer(iframeUrl);
-      for (let f = 0; f < found.length; f++) {
-        const title = voice.name;
-        if (seen[title] || seen[found[f].url]) continue;
-        seen[title] = true;
-        seen[found[f].url] = true;
-        streams.push({
-          title: title,
-          name: title,
-          streamUrl: found[f].url,
-          headers: {
-            "User-Agent": UA,
-            Referer: "https://reyohoho.com/",
-          },
-        });
-        break; // one stream per voice
-      }
+      if (seen[f.url] || seen[title]) continue;
+      seen[f.url] = true;
+      seen[title] = true;
+      streams.push({
+        title: title,
+        name: title,
+        streamUrl: f.url,
+        headers: headers,
+      });
     }
 
-    // fallback: default iframe without translation
+    // if filter removed everything, take first raw hits
     if (!streams.length) {
-      const iframeUrl = buildIframeUrl(
-        tokens.tokenMovie,
-        tokens.token,
-        null,
-        isSeries ? season : null,
-        isSeries ? episode : null
-      );
-      const found = await fetchAllohaPlayer(iframeUrl);
-      for (let f = 0; f < found.length; f++) {
+      for (let i = 0; i < found.length; i++) {
+        const f = found[i];
+        if (seen[f.url]) continue;
+        seen[f.url] = true;
         streams.push({
-          title: data.translation || "Alloha",
-          name: data.translation || "Alloha",
-          streamUrl: found[f].url,
-          headers: {
-            "User-Agent": UA,
-            Referer: "https://reyohoho.com/",
-          },
+          title: "VideoSeed",
+          name: "VideoSeed",
+          streamUrl: f.url,
+          headers: headers,
         });
       }
     }
@@ -550,7 +522,7 @@ async function extractStreamUrl(url) {
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 12),
+      streams: streams.slice(0, 10),
       subtitles: "",
     });
   } catch (e) {
