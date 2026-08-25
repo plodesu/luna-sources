@@ -1,0 +1,21 @@
+{
+  "sourceName": "Asya Animeleri",
+  "iconUrl": "https://asyaanimeleri.top/wp-content/uploads/2022/01/cropped-Asya-animeleri-12-e1629130525708-2-e1641560729784-32x32.png",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
+  "language": "Turkish",
+  "languageType": ["Subbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://asyaanimeleri.top",
+  "searchBaseUrl": "https://asyaanimeleri.top",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/asyaanimeleri.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
