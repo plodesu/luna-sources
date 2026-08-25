@@ -1,7 +1,7 @@
 /**
  * Runetflix.cc – Sora / Luna
- * Full HLS quality ladder (360–1080+) for movies AND series
- * v1.3.0
+ * Fixed search (grid-item cards) + full HLS qualities for movies & series
+ * v1.3.1
  */
 const baseUrl = "https://runetflix.cc";
 const UA =
@@ -12,7 +12,7 @@ async function soraFetch(url, options) {
   const headers = Object.assign(
     {
       "User-Agent": UA,
-      "Accept-Language": "ru-RU,ru;q=0.9",
+      "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
       Accept: "text/html,application/json,*/*",
       Referer: baseUrl + "/",
     },
@@ -27,7 +27,7 @@ async function soraFetch(url, options) {
     }
   } catch (e) {}
   try {
-    return await fetch(url, { method, headers, body });
+    return await fetch(url, { method: method, headers: headers, body: body });
   } catch (e2) {
     return null;
   }
@@ -67,7 +67,11 @@ function absUrl(u, base) {
 
 function cleanQuery(keyword) {
   return String(keyword || "")
+    .replace(/&/g, " ")
     .replace(/\bS\d{1,2}\s*E\d{1,3}\b/gi, " ")
+    .replace(/\b\d{1,2}\s*x\s*\d{1,3}\b/gi, " ")
+    .replace(/\bseason\s*\d+\b/gi, " ")
+    .replace(/\bсезон[а]?\s*\d+\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -90,12 +94,6 @@ function heightToLabel(h) {
   return h ? h + "p" : "Auto";
 }
 
-/**
- * Expand master OR media m3u8 into quality list.
- * - Master: every #EXT-X-STREAM-INF variant (360…1080+)
- * - Media-only (series bug): still return that stream as one quality
- * - Never caps at 720
- */
 async function expandHlsQualities(hlsUrl, labelPrefix, headers) {
   const out = [];
   if (!isHttp(hlsUrl)) return out;
@@ -117,8 +115,8 @@ async function expandHlsQualities(hlsUrl, labelPrefix, headers) {
   } catch (e) {
     return out;
   }
+
   if (!text || text.indexOf("#EXT") !== 0) {
-    // not a playlist – still offer raw url
     out.push({
       title: (labelPrefix ? labelPrefix + " · " : "") + "Stream",
       streamUrl: hlsUrl,
@@ -147,18 +145,18 @@ async function expandHlsQualities(hlsUrl, labelPrefix, headers) {
     const url = absUrl(next, hlsUrl);
     if (!isHttp(url)) continue;
 
-    const height = resM ? +resM[1] : 0;
-    const bw = bwM ? +bwM[1] : 0;
-    variants.push({ height: height, bw: bw, url: url });
+    variants.push({
+      height: resM ? +resM[1] : 0,
+      bw: bwM ? +bwM[1] : 0,
+      url: url,
+    });
   }
 
-  // Master with variants → one stream per quality (no 720 cap)
   if (variants.length) {
-    // unique by height (keep highest bandwidth)
     const byH = {};
     for (let i = 0; i < variants.length; i++) {
       const v = variants[i];
-      const key = v.height || v.bw;
+      const key = String(v.height || v.bw);
       if (!byH[key] || v.bw > byH[key].bw) byH[key] = v;
     }
     const list = Object.keys(byH).map(function (k) {
@@ -167,12 +165,10 @@ async function expandHlsQualities(hlsUrl, labelPrefix, headers) {
     list.sort(function (a, b) {
       return (b.height || b.bw) - (a.height || a.bw);
     });
-
     for (let i = 0; i < list.length; i++) {
       const v = list[i];
-      const q = heightToLabel(v.height);
       out.push({
-        title: (labelPrefix ? labelPrefix + " · " : "") + q,
+        title: (labelPrefix ? labelPrefix + " · " : "") + heightToLabel(v.height),
         streamUrl: v.url,
         headers: headers,
       });
@@ -180,9 +176,6 @@ async function expandHlsQualities(hlsUrl, labelPrefix, headers) {
     return out;
   }
 
-  // Media playlist only (single quality – common on series episode links)
-  // Offer master URL as Auto so player can still ABR if CDN redirects,
-  // plus label inferred from EXT-X-STREAM or default
   out.push({
     title: (labelPrefix ? labelPrefix + " · " : "") + "Auto",
     streamUrl: hlsUrl,
@@ -190,8 +183,6 @@ async function expandHlsQualities(hlsUrl, labelPrefix, headers) {
   });
   return out;
 }
-
-/* ---- ids from page ---- */
 
 function extractIds(html) {
   const ids = { cdHId: "", kpId: "", imId: "", pid: "" };
@@ -201,22 +192,24 @@ function extractIds(html) {
   if (m) ids.kpId = m[1];
   m = (html || "").match(/const\s+imId\s*=\s*['"]([^'"]+)['"]/);
   if (m) ids.imId = m[1];
-  m = (html || "").match(/const\s+pid\s*=\s*['"]?(\d+)/);
+  m = (html || "").match(/(?:const|var)\s+pid\s*=\s*['"]?(\d+)/);
   if (m) ids.pid = m[1];
   if (!ids.kpId) {
     m = (html || "").match(/kinopoisk\.ru\/(?:film|series)\/(\d+)/i);
     if (m) ids.kpId = m[1];
+  }
+  if (!ids.cdHId) {
+    m = (html || "").match(/priceios\.live\/videos\/(\d+)\//i);
+    if (m) ids.cdHId = m[1];
   }
   return ids;
 }
 
 function playerUrls(ids, season, episode) {
   const list = [];
-  const se =
-    (season ? "&season=" + season : "") +
-    (episode ? "&episode=" + episode : "");
+  const s = season || 1;
+  const e = episode || 1;
 
-  // Primary FlixCDN / Priceios
   if (ids.cdHId) {
     list.push({
       label: "FlixCDN",
@@ -224,20 +217,16 @@ function playerUrls(ids, season, episode) {
         "https://tarantino.priceios.live/show/" +
         ids.cdHId +
         "?extrans=1&unfseason=1&extepi=1&season=" +
-        (season || 1) +
+        s +
         "&episode=" +
-        (episode || 1),
+        e,
     });
   }
-  // Domem / Alloha-style
   if (ids.kpId) {
     list.push({
       label: "Domem",
       embed: "https://api.domem.ws/embed/kp/" + ids.kpId,
     });
-  }
-  // UA CDN
-  if (ids.kpId) {
     list.push({
       label: "UACDN",
       embed: "https://franko.uacdn.online/show/kinopoisk/" + ids.kpId,
@@ -246,13 +235,10 @@ function playerUrls(ids, season, episode) {
   return list;
 }
 
-/** Pull every m3u8/mp4 from player HTML + common JSON shapes */
 function collectRawFromHtml(html) {
   const urls = [];
   if (!html) return urls;
-  if (/недоступен в вашем регионе|captcha_required\":true/i.test(html)) {
-    return urls;
-  }
+  if (/недоступен в вашем регионе/i.test(html)) return urls;
 
   const re = /https?:\/\/[^"'\s<>\\]+(?:\.m3u8|\.mp4)[^"'\s<>\\]*/gi;
   const found = html.match(re);
@@ -264,15 +250,17 @@ function collectRawFromHtml(html) {
     }
   }
 
-  // files / quality maps: "1080":"https://...m3u8"
-  const qm = html.matchAll(
-    /["']?(360|480|720|1080|1440|2160|240)["']?\s*:\s*["'](https?:\/\/[^"']+)["']/gi
-  );
-  for (const m of qm) {
-    urls.push(m[2]);
-  }
+  const qm = html.matchAll
+    ? html.matchAll(
+        /["']?(360|480|720|1080|1440|2160|240)["']?\s*:\s*["'](https?:\/\/[^"']+)["']/gi
+      )
+    : [];
+  try {
+    for (const m of qm) {
+      urls.push(m[2]);
+    }
+  } catch (e) {}
 
-  // PLAYER_PAYLOAD / media field
   const media = html.match(/["']media["']\s*:\s*["'](https?:\/\/[^"']+)["']/);
   if (media) urls.push(media[1]);
   const video = html.match(/["']video["']\s*:\s*["'](https?:\/\/[^"']+)["']/);
@@ -280,7 +268,6 @@ function collectRawFromHtml(html) {
   const files = html.match(/["']files["']\s*:\s*["'](https?:\/\/[^"']+)["']/);
   if (files) urls.push(files[1]);
 
-  // dedupe
   const seen = {};
   const out = [];
   for (let i = 0; i < urls.length; i++) {
@@ -298,9 +285,7 @@ async function resolveEmbed(embedUrl, label) {
     Origin: baseUrl,
   };
   try {
-    const html = await getText(
-      await soraFetch(embedUrl, { headers: headers })
-    );
+    const html = await getText(await soraFetch(embedUrl, { headers: headers }));
     const raw = collectRawFromHtml(html);
     const streams = [];
 
@@ -323,49 +308,85 @@ async function resolveEmbed(embedUrl, label) {
   }
 }
 
-/* ---- search / details / episodes ---- */
+/* ---------------- search ---------------- */
 
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
-    const html = await getText(
-      await soraFetch(baseUrl + "/index.php?do=search", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-          Origin: baseUrl,
-          Referer: baseUrl + "/",
-        },
-        body:
-          "do=search&subaction=search&story=" + encodeURIComponent(cleaned),
-      })
-    );
+
+    const variants = [cleaned];
+    const first = cleaned.split(/\s+/)[0];
+    if (first && first.length > 2 && first !== cleaned) variants.push(first);
+
     const results = [];
     const seen = {};
-    const re =
-      /<a[^>]+href=["'](https?:\/\/runetflix\.cc\/[^"']+\.html)["'][^>]*>\s*([^<]{2,120})/gi;
-    let m;
-    while ((m = re.exec(html || ""))) {
-      const href = m[1];
-      const title = m[2].replace(/\s+/g, " ").trim();
-      if (seen[href] || title.length < 2) continue;
-      if (/поиск|search|войти|избран/i.test(title)) continue;
-      seen[href] = true;
-      results.push({ title: title, image: "", href: href });
-    }
-    // posters
-    for (let i = 0; i < results.length; i++) {
-      const im = (html || "").match(
-        new RegExp(
-          results[i].href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
-            "[\\s\\S]{0,400}?(?:src|data-src)=[\"']([^\"']+\\.(?:jpg|jpeg|png|webp)[^\"']*)[\"']",
-          "i"
-        )
+
+    for (let v = 0; v < variants.length; v++) {
+      const html = await getText(
+        await soraFetch(baseUrl + "/index.php?do=search", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Requested-With": "XMLHttpRequest",
+            Origin: baseUrl,
+            Referer: baseUrl + "/",
+            "User-Agent": UA,
+          },
+          body:
+            "do=search&subaction=search&story=" +
+            encodeURIComponent(variants[v]),
+        })
       );
-      if (im) results[i].image = absUrl(im[1], baseUrl);
+      if (!html || html.length < 500) continue;
+
+      const parts = html.split(/<article[^>]*class="[^"]*grid-item/i);
+      for (let i = 1; i < parts.length; i++) {
+        const p = parts[i];
+
+        let hm = p.match(
+          /href=["'](https?:\/\/runetflix\.cc\/(?:movies|series|cartoon|film)\/[^"']+\.html)["']/i
+        );
+        if (!hm) {
+          hm = p.match(
+            /href=["'](https?:\/\/runetflix\.cc\/[^"']+\.html)["']/i
+          );
+        }
+        if (!hm) continue;
+        const href = hm[1];
+        if (seen[href]) continue;
+
+        let title = "";
+        let tm = p.match(/title=["']([^"']+)["']/i);
+        if (tm) title = tm[1].replace(/\s+/g, " ").trim();
+        if (!title) {
+          tm = p.match(/class="[^"]*item-title[^"]*"[^>]*>([^<]+)/i);
+          if (tm) title = tm[1].replace(/\s+/g, " ").trim();
+        }
+        if (!title || title.length < 2) continue;
+        if (/поиск|войти|избран|скачать|apk/i.test(title)) continue;
+
+        let image = "";
+        let im = p.match(/srcset=["']([^"'\s]+)/i);
+        if (im) image = im[1];
+        if (!image) {
+          im = p.match(
+            /(?:src|data-src)=["'](https?:\/\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i
+          );
+          if (im) image = im[1];
+        }
+
+        seen[href] = true;
+        results.push({
+          title: title,
+          image: image || "",
+          href: href,
+        });
+      }
+
+      if (results.length) break;
     }
+
     return JSON.stringify(results.slice(0, 20));
   } catch (e) {
     return JSON.stringify([]);
@@ -374,17 +395,26 @@ async function searchResults(keyword) {
 
 async function extractDetails(url) {
   try {
-    const pageUrl = String(url).split("?")[0];
+    const pageUrl = String(url).split("?")[0].split("#")[0];
     const html = await getText(await soraFetch(pageUrl));
     let description = "N/A";
-    const dm = (html || "").match(
-      /name=["']description["']\s+content=["']([^"']+)/i
-    );
+    const dm =
+      (html || "").match(
+        /name=["']description["']\s+content=["']([^"']+)/i
+      ) ||
+      (html || "").match(
+        /property=["']og:description["'][^>]*content=["']([^"']+)/i
+      );
     if (dm) {
-      description = dm[1].replace(/\s+/g, " ").trim().slice(0, 900);
+      description = String(dm[1])
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, "&")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 900);
     }
     return JSON.stringify([
-      { description: description, aliases: "N/A", airdate: "N/A" },
+      { description: description || "N/A", aliases: "N/A", airdate: "N/A" },
     ]);
   } catch (e) {
     return JSON.stringify([
@@ -395,16 +425,22 @@ async function extractDetails(url) {
 
 async function extractEpisodes(url) {
   try {
-    const pageUrl = String(url).split("?")[0];
+    const pageUrl = String(url).split("?")[0].split("#")[0];
     const html = await getText(await soraFetch(pageUrl));
     const eps = [];
-    // series episode buttons if any
-    const re = /[?&]s=(\d+)[^"'>\s]*e=(\d+)/gi;
-    let m;
     const seen = {};
+
+    const re = /[?&]s=(\d+)[^"'>\s]*[?&]?e=(\d+)|[?&]e=(\d+)[^"'>\s]*[?&]?s=(\d+)/gi;
+    let m;
     while ((m = re.exec(html || ""))) {
-      const s = +m[1];
-      const e = +m[2];
+      let s, e;
+      if (m[1] && m[2]) {
+        s = +m[1];
+        e = +m[2];
+      } else {
+        e = +m[3];
+        s = +m[4];
+      }
       const key = s + "-" + e;
       if (seen[key]) continue;
       seen[key] = true;
@@ -415,6 +451,7 @@ async function extractEpisodes(url) {
         title: "S" + s + "E" + e,
       });
     }
+
     if (!eps.length) {
       eps.push({
         href: pageUrl,
@@ -423,6 +460,7 @@ async function extractEpisodes(url) {
         title: "Смотреть",
       });
     }
+
     eps.sort(function (a, b) {
       return a.season - b.season || a.number - b.number;
     });
@@ -453,7 +491,7 @@ async function extractStreamUrl(url) {
 
     function add(item) {
       if (!item || !isHttp(item.streamUrl)) return;
-      const key = item.title + "||" + item.streamUrl.slice(0, 100);
+      const key = item.title + "||" + item.streamUrl.slice(0, 120);
       if (seen[key]) return;
       seen[key] = true;
       streams.push({
@@ -471,14 +509,12 @@ async function extractStreamUrl(url) {
       const p = players[i];
       const got = await resolveEmbed(p.embed, p.label);
       for (let j = 0; j < got.length; j++) add(got[j]);
-      // stop early if we already have multiple qualities
-      const has1080 = streams.some(function (s) {
+      const hasHi = streams.some(function (s) {
         return /1080|1440|2160/i.test(s.title);
       });
-      if (has1080 || streams.length >= 6) break;
+      if (hasHi || streams.length >= 8) break;
     }
 
-    // Sort: higher quality first
     streams.sort(function (a, b) {
       const ha = +(String(a.title).match(/(\d{3,4})p/) || [0, 0])[1];
       const hb = +(String(b.title).match(/(\d{3,4})p/) || [0, 0])[1];
