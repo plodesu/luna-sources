@@ -1,9 +1,8 @@
 /**
  * TürkAnime (turkanime.tv) – Sora / Luna
- * Search: /arama?arama=
- * Posters: data-img / serilerb
- * Streams: resolve VOE / Filemoon / Dood / Sibnet / MediaCM → m3u8|mp4
- * v1.0.2
+ * Search + posters OK
+ * Streams: SIBNET (primary), Mail.ru, clear VOE/Dood/Filemoon
+ * v1.0.3
  */
 const baseUrl = "https://www.turkanime.tv";
 const UA =
@@ -73,9 +72,7 @@ function decodeEntities(s) {
     })
     .replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+    .replace(/&amp;/g, "&");
 }
 function cleanQuery(keyword) {
   return String(keyword || "")
@@ -105,258 +102,12 @@ function parseHref(url) {
 function hostRank(name) {
   const n = String(name || "").toLowerCase();
   if (/sibnet/.test(n)) return 0;
-  if (/voe/.test(n)) return 1;
-  if (/filemoon|moon/.test(n)) return 2;
-  if (/dood/.test(n)) return 3;
-  if (/mediacm|media\.cm/.test(n)) return 4;
-  if (/streamwish|wish/.test(n)) return 5;
+  if (/mail\.ru|mailru/.test(n)) return 1;
+  if (/ok\.ru|odnoklassniki/.test(n)) return 2;
+  if (/voe/.test(n)) return 3;
+  if (/dood/.test(n)) return 4;
+  if (/filemoon|moon/.test(n)) return 5;
   return 6;
-}
-function labelFromUrl(u) {
-  u = String(u || "").toLowerCase();
-  if (/sibnet/.test(u)) return "Sibnet";
-  if (/voe\.sx|voe\.video/.test(u)) return "VOE";
-  if (/filemoon|moon|bysesukior|kerapoxy|farordoms/.test(u)) return "Filemoon";
-  if (/dood\./.test(u)) return "Doodstream";
-  if (/media\.cm|mediacm/.test(u)) return "MediaCM";
-  if (/streamwish|swish/.test(u)) return "StreamWish";
-  return "Host";
-}
-
-/* ---------- unpack helpers ---------- */
-function b64decode(str) {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  str = String(str || "").replace(/[^A-Za-z0-9+/=]/g, "");
-  let out = "";
-  for (let i = 0; i < str.length; i += 4) {
-    const a = chars.indexOf(str.charAt(i));
-    const b = chars.indexOf(str.charAt(i + 1));
-    const c = chars.indexOf(str.charAt(i + 2));
-    const d = chars.indexOf(str.charAt(i + 3));
-    out += String.fromCharCode((a << 2) | (b >> 4));
-    if (c !== -1 && str.charAt(i + 2) !== "=")
-      out += String.fromCharCode(((b & 15) << 4) | (c >> 2));
-    if (d !== -1 && str.charAt(i + 3) !== "=")
-      out += String.fromCharCode(((c & 3) << 6) | d);
-  }
-  return out;
-}
-function baseN(n, base) {
-  const chars =
-    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  if (n === 0) return "0";
-  let s = "";
-  while (n > 0) {
-    s = chars.charAt(n % base) + s;
-    n = Math.floor(n / base);
-  }
-  return s;
-}
-function unpackDeanEdwards(packed) {
-  const m = packed.match(
-    /\}\('(.*)',(\d+),(\d+),'([^']*)'\.split\('\|'\)/s
-  );
-  if (!m) return packed;
-  let p = m[1];
-  const a = parseInt(m[2], 10);
-  const c0 = parseInt(m[3], 10);
-  const k = m[4].split("|");
-  const dict = {};
-  for (let i = 0; i < c0; i++) {
-    const key = baseN(i, a);
-    dict[key] = k[i] && k[i].length ? k[i] : key;
-  }
-  const keys = Object.keys(dict).sort(function (x, y) {
-    return y.length - x.length;
-  });
-  for (let i = 0; i < keys.length; i++) {
-    const key = keys[i];
-    if (dict[key] === key) continue;
-    const re = new RegExp(
-      "\\b" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b",
-      "g"
-    );
-    p = p.replace(re, dict[key]);
-  }
-  return p;
-}
-
-function findMediaUrls(text) {
-  const out = [];
-  if (!text) return out;
-  let m;
-  const re =
-    /https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mp4)[^"'\\\s<>]*/gi;
-  while ((m = re.exec(text))) {
-    let u = m[0]
-      .replace(/\\u0026/g, "&")
-      .replace(/\\\//g, "/")
-      .replace(/\\+$/g, "");
-    if (isHttp(u)) out.push(forceHttps(u));
-  }
-  return out;
-}
-
-/** Resolve VOE embed → m3u8 */
-async function resolveVoe(embedUrl) {
-  try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: {
-          Referer: baseUrl + "/",
-          "User-Agent": UA,
-          Accept: "text/html,*/*",
-        },
-      })
-    );
-    if (!html || html.length < 200) return [];
-    const found = findMediaUrls(html);
-    // sources / hls json
-    let m = html.match(
-      /["']hls["']\s*:\s*["'](https?:\/\/[^"']+)["']/i
-    );
-    if (m) found.push(m[1]);
-    m = html.match(
-      /["']file["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i
-    );
-    if (m) found.push(m[1]);
-    // base64 blob
-    const b64s = html.match(/["']([A-Za-z0-9+/]{60,}={0,2})["']/g) || [];
-    for (let i = 0; i < b64s.length && i < 8; i++) {
-      try {
-        const raw = b64decode(b64s[i].replace(/['"]/g, ""));
-        findMediaUrls(raw).forEach(function (u) {
-          found.push(u);
-        });
-        if (/https?:\/\//.test(raw) && /\.m3u8/.test(raw)) {
-          const um = raw.match(/https?:\/\/[^\s"']+\.m3u8[^\s"']*/);
-          if (um) found.push(um[0]);
-        }
-      } catch (e) {}
-    }
-    return dedupeUrls(found);
-  } catch (e) {
-    return [];
-  }
-}
-
-/** Filemoon-family (packer) */
-async function resolveFilemoon(embedUrl) {
-  try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: {
-          Referer: baseUrl + "/",
-          "User-Agent": UA,
-          Accept: "text/html,*/*",
-        },
-      })
-    );
-    if (!html) return [];
-    let text = html;
-    if (/eval\(function\(p,a,c,k,e/.test(html)) {
-      const pm = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]+?\}\('[\s\S]+?'\.split\('\|'\)\)\)/);
-      if (pm) text += "\n" + unpackDeanEdwards(pm[0]);
-    }
-    const found = findMediaUrls(text);
-    const fm = text.match(
-      /["']file["']\s*:\s*["'](https?:\/\/[^"']+)["']/i
-    );
-    if (fm) found.push(fm[1]);
-    return dedupeUrls(found);
-  } catch (e) {
-    return [];
-  }
-}
-
-/** Doodstream pass_md5 → mp4 */
-async function resolveDood(embedUrl) {
-  try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: {
-          Referer: "https://dood.watch/",
-          "User-Agent": UA,
-        },
-      })
-    );
-    if (!html) return [];
-    const pass = html.match(/\/pass_md5\/([a-zA-Z0-9\/]+)/);
-    if (!pass) {
-      return dedupeUrls(findMediaUrls(html));
-    }
-    const passUrl =
-      forceHttps(embedUrl).replace(/\/e\/.*/, "") +
-      "/pass_md5/" +
-      pass[1];
-    const tokenPart = await getText(
-      await soraFetch(passUrl, {
-        headers: {
-          Referer: embedUrl,
-          "User-Agent": UA,
-        },
-      })
-    );
-    if (!tokenPart || tokenPart.length < 10 || tokenPart.length > 500)
-      return [];
-    // dood final url = token + random chars + ?token=
-    const chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let rnd = "";
-    for (let i = 0; i < 10; i++)
-      rnd += chars.charAt(Math.floor(Math.random() * chars.length));
-    const tok = html.match(/[?&]token=([a-zA-Z0-9]+)/) ||
-      html.match(/makePlay\(['"]([^'"]+)/);
-    let finalUrl = String(tokenPart).trim() + rnd;
-    if (tok) finalUrl += "?token=" + tok[1] + "&expiry=" + Date.now();
-    if (isHttp(finalUrl)) return [forceHttps(finalUrl)];
-    return [];
-  } catch (e) {
-    return [];
-  }
-}
-
-/** Sibnet – often direct video */
-async function resolveSibnet(embedUrl) {
-  try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
-    if (!html) return [];
-    const found = findMediaUrls(html);
-    const m =
-      html.match(/src:\s*["']([^"']+\.mp4[^"']*)["']/i) ||
-      html.match(/player\.src\(([^)]+)\)/i);
-    if (m) {
-      let u = m[1].replace(/['"]/g, "");
-      if (u.indexOf("//") === 0) u = "https:" + u;
-      if (isHttp(u)) found.push(u);
-    }
-    // sibnet video path
-    const sm = html.match(
-      /(https?:\/\/[^"' ]*sibnet[^"' ]+\.(?:mp4|m3u8)[^"' ]*)/i
-    );
-    if (sm) found.push(sm[1]);
-    return dedupeUrls(found);
-  } catch (e) {
-    return [];
-  }
-}
-
-async function resolveGeneric(embedUrl) {
-  try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
-    return dedupeUrls(findMediaUrls(html));
-  } catch (e) {
-    return [];
-  }
 }
 
 function dedupeUrls(arr) {
@@ -372,55 +123,184 @@ function dedupeUrls(arr) {
   return out;
 }
 
-async function resolveEmbed(embedUrl) {
-  const u = forceHttps(embedUrl);
-  if (/voe\.sx|voe\.video/i.test(u)) return resolveVoe(u);
-  if (/dood\./i.test(u)) return resolveDood(u);
-  if (/sibnet/i.test(u)) return resolveSibnet(u);
-  if (
-    /filemoon|bysesukior|kerapoxy|farordoms|moon\.|mediacm|media\.cm|streamwish|swish/i.test(
-      u
-    )
-  )
-    return resolveFilemoon(u);
+function findMediaUrls(text) {
+  const out = [];
+  if (!text) return out;
+  let m;
+  const re = /https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mp4)[^"'\\\s<>]*/gi;
+  while ((m = re.exec(text))) {
+    out.push(
+      m[0].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\+$/g, "")
+    );
+  }
+  return out;
+}
+
+/** SIBNET: shell.php?videoid= → mp4 */
+async function resolveSibnet(embedUrl) {
+  try {
+    let u = forceHttps(embedUrl);
+    if (u.indexOf("//") === 0) u = "https:" + u;
+    const html = await getText(
+      await soraFetch(u, {
+        headers: {
+          Referer: baseUrl + "/",
+          "User-Agent": UA,
+          Accept: "text/html,*/*",
+        },
+      })
+    );
+    if (!html) return [];
+    const found = [];
+    // src: "/v/....mp4" or full url
+    let m =
+      html.match(/src:\s*["']([^"']+\.mp4[^"']*)["']/i) ||
+      html.match(/["']file["']\s*:\s*["']([^"']+\.mp4[^"']*)["']/i);
+    if (m) {
+      let src = m[1];
+      if (src.indexOf("//") === 0) src = "https:" + src;
+      else if (src.charAt(0) === "/") src = "https://video.sibnet.ru" + src;
+      found.push(src);
+    }
+    // player.src([{src:"...
+    m = html.match(/player\.src\(\s*\[\s*\{\s*src:\s*["']([^"']+)["']/i);
+    if (m) {
+      let src = m[1];
+      if (src.indexOf("//") === 0) src = "https:" + src;
+      else if (src.charAt(0) === "/") src = "https://video.sibnet.ru" + src;
+      found.push(src);
+    }
+    findMediaUrls(html).forEach(function (x) {
+      found.push(x);
+    });
+    // path-only /v/xxx.mp4
+    const paths = html.match(/\/v\/[0-9]+\/[^"'\\\s]+\.mp4/gi) || [];
+    for (let i = 0; i < paths.length; i++) {
+      found.push("https://video.sibnet.ru" + paths[i]);
+    }
+    return dedupeUrls(found);
+  } catch (e) {
+    return [];
+  }
+}
+
+/** Mail.ru embed */
+async function resolveMailru(embedUrl) {
+  try {
+    let u = forceHttps(embedUrl);
+    if (u.indexOf("//") === 0) u = "https:" + u;
+    const html = await getText(
+      await soraFetch(u, {
+        headers: { Referer: baseUrl + "/", "User-Agent": UA },
+      })
+    );
+    if (!html) return [];
+    const found = findMediaUrls(html);
+    const m =
+      html.match(/["']metadataUrl["']\s*:\s*["']([^"']+)["']/i) ||
+      html.match(/videoSrc\s*=\s*["']([^"']+)["']/i);
+    if (m) {
+      let meta = m[1];
+      if (meta.indexOf("//") === 0) meta = "https:" + meta;
+      const metaTxt = await getText(
+        await soraFetch(meta, {
+          headers: { Referer: u, "User-Agent": UA },
+        })
+      );
+      findMediaUrls(metaTxt).forEach(function (x) {
+        found.push(x);
+      });
+      try {
+        const j = JSON.parse(metaTxt);
+        if (j && j.videos) {
+          for (let i = 0; i < j.videos.length; i++) {
+            if (j.videos[i].url) found.push(j.videos[i].url);
+          }
+        }
+      } catch (e2) {}
+    }
+    return dedupeUrls(found);
+  } catch (e) {
+    return [];
+  }
+}
+
+/** Generic clear host (VOE/Dood/Filemoon patterns) */
+async function resolveGeneric(embedUrl) {
+  try {
+    let u = forceHttps(embedUrl);
+    if (u.indexOf("//") === 0) u = "https:" + u;
+    const html = await getText(
+      await soraFetch(u, {
+        headers: { Referer: baseUrl + "/", "User-Agent": UA },
+      })
+    );
+    return dedupeUrls(findMediaUrls(html));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function resolveEmbed(embedUrl, playerName) {
+  const u = String(embedUrl || "");
+  const n = String(playerName || "").toLowerCase();
+  if (/sibnet/i.test(u) || /sibnet/i.test(n)) return resolveSibnet(u);
+  if (/mail\.ru/i.test(u) || /mail/i.test(n)) return resolveMailru(u);
+  if (/voe\.|dood\.|filemoon|streamwish|media\.cm/i.test(u))
+    return resolveGeneric(u);
+  // skip encrypted turkanime embed for now
+  if (/turkanime\.tv\/embed/i.test(u)) return [];
   return resolveGeneric(u);
 }
 
-function extractEmbedsFromHtml(html) {
-  const out = [];
-  if (!html) return out;
-  let m;
-  const iframeRe = /<iframe[^>]+src=["']([^"']+)["']/gi;
-  while ((m = iframeRe.exec(html))) {
-    let u = absUrl(decodeEntities(m[1]));
-    if (!u || /turkanime\.tv\/embed/i.test(u)) continue;
-    if (u.indexOf("//") === 0) u = "https:" + u;
-    if (isHttp(u)) out.push(forceHttps(u));
-  }
-  const hostRe =
-    /(https?:)?\/\/(?:[a-z0-9.-]+\.)?(?:voe\.sx|voe\.video|dood\.(?:watch|to|so|ws|pm|la|li)|sibnet\.ru|filemoon\.|bysesukior\.|media\.cm|streamwish\.|mp4upload\.)[^\s"'<>\\]+/gi;
-  while ((m = hostRe.exec(html))) {
-    let u = m[0];
-    if (u.indexOf("//") === 0) u = "https:" + u;
-    out.push(forceHttps(u));
-  }
-  return dedupeUrls(out);
-}
-
-function collectVideosecUrls(html) {
-  const urls = [];
-  if (!html) return urls;
+/**
+ * Collect {playerName, videosecUrl} pairs and iframe embeds from a videosec HTML
+ */
+function parseVideosecPanel(html) {
+  const players = [];
+  if (!html) return players;
+  // button with fa-play → name, onclick videosec
   const re =
-    /ajax\/videosec&b=([^&"'\s]+)&(?:v=([^&"'\s]+)&)?f=([^&"'\s]+)/gi;
+    /IndexIcerik\('(ajax\/videosec[^']+)'[^>]*>[\s\S]{0,120}?<span class="fa fa-play[^"]*"><\/span>\s*([^<]+)/gi;
   let m;
   while ((m = re.exec(html))) {
-    let q = "ajax/videosec&b=" + m[1];
-    if (m[2]) q += "&v=" + m[2];
-    q += "&f=" + m[3];
-    const full = baseUrl + "/" + q;
-    if (urls.indexOf(full) < 0) urls.push(full);
+    players.push({
+      name: m[2].trim(),
+      videosec: baseUrl + "/" + m[1],
+    });
   }
-  return urls.slice(0, 16);
+  // alternate order: name then we already have from fa-play lines
+  if (!players.length) {
+    const re2 =
+      /<span class="fa fa-play[^"]*"><\/span>\s*([^<]+)/gi;
+    const names = [];
+    while ((m = re2.exec(html))) names.push(m[1].trim());
+    const re3 = /IndexIcerik\('(ajax\/videosec[^']+)'/gi;
+    const urls = [];
+    while ((m = re3.exec(html))) urls.push(baseUrl + "/" + m[1]);
+    // map by order is unreliable; still push urls with generic name
+    for (let i = 0; i < urls.length; i++) {
+      players.push({
+        name: names[i] || "Host",
+        videosec: urls[i],
+      });
+    }
+  }
+  return players;
+}
+
+function extractClearIframes(html) {
+  const out = [];
+  if (!html) return out;
+  const re = /<iframe[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    let u = absUrl(decodeEntities(m[1]));
+    if (!u) continue;
+    if (/turkanime\.tv\/embed/i.test(u)) continue; // encrypted
+    out.push(forceHttps(u.indexOf("//") === 0 ? "https:" + u.replace(/^\/\//, "//") : u));
+  }
+  return dedupeUrls(out);
 }
 
 /* ===================== search ===================== */
@@ -429,14 +309,11 @@ async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
-
     const results = [];
     const seen = {};
-
     function push(href, title, image) {
       href = absUrl(String(href || "").split("?")[0]).replace(/\/$/, "");
-      if (!href || seen[href]) return;
-      if (!/\/anime\/[^/]+$/.test(href)) return;
+      if (!href || seen[href] || !/\/anime\/[^/]+$/.test(href)) return;
       seen[href] = true;
       let img = absUrl(image || "");
       if (img.indexOf("data:") === 0) img = "";
@@ -449,87 +326,48 @@ async function searchResults(keyword) {
         href: href,
       });
     }
-
-    const searchUrl =
-      baseUrl + "/arama?arama=" + encodeURIComponent(cleaned);
     const html = await getText(
-      await soraFetch(searchUrl, {
-        headers: {
-          "User-Agent": UA,
-          Accept: "text/html,*/*",
-          Referer: baseUrl + "/",
-        },
-      })
+      await soraFetch(
+        baseUrl + "/arama?arama=" + encodeURIComponent(cleaned),
+        {
+          headers: {
+            "User-Agent": UA,
+            Accept: "text/html,*/*",
+            Referer: baseUrl + "/",
+          },
+        }
+      )
     );
-
     if (!html || html.length < 1000) return JSON.stringify([]);
 
-    // top-airing style: data-title + data-img
     let re =
       /href="((?:\/\/www\.turkanime\.tv)?\/anime\/[^"]+)"[^>]*class="top-airing-item"[^>]*data-title="([^"]+)"[^>]*data-img="([^"]+)"/gi;
     let m;
     while ((m = re.exec(html))) push(m[1], m[2], m[3]);
 
     re =
-      /data-title="([^"]+)"[^>]*data-img="([^"]+)"[^>]*data-url="[^"]*"[^>]*href="((?:\/\/www\.turkanime\.tv)?\/anime\/[^"]+)"/gi;
-    while ((m = re.exec(html))) push(m[3], m[1], m[2]);
-
-    // panel title links
-    re =
       /href="((?:\/\/www\.turkanime\.tv)?\/anime\/([^"]+))"[^>]*title="([^"]+)"/gi;
     while ((m = re.exec(html))) {
       let img = "";
-      // look nearby for seriler image
       const slug = m[2];
-      const imgRe = new RegExp(
-        "serilerb?/" +
-          "[0-9]+\\.(?:jpg|png|webp)[\\s\\S]{0,80}" +
-          slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
-          "|" +
-          slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
-          "[\\s\\S]{0,300}?((?:imajlar/)?serilerb?/[0-9]+\\.(?:jpg|png|webp))",
-        "i"
-      );
-      const im = html.match(imgRe);
-      if (im) {
-        img = im[1] || im[0];
-        if (img.indexOf("seriler") >= 0 && img.indexOf("imajlar") < 0)
-          img = "imajlar/" + img.replace(/^.*?(seriler)/, "$1");
-      }
-      // data-src near this slug
       const ds = html.match(
         new RegExp(
-          'data-(?:src|img)="([^"]*serilerb?/[0-9]+\\.(?:jpg|png|webp))"[\\s\\S]{0,200}' +
+          'data-(?:src|img)="([^"]*serilerb?/[0-9]+\\.(?:jpg|png|webp))"[\\s\\S]{0,250}' +
             slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
           "i"
         )
       );
-      if (ds) img = ds[1];
       const ds2 = html.match(
         new RegExp(
           slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
-            '[\\s\\S]{0,200}data-(?:src|img)="([^"]*serilerb?/[0-9]+\\.(?:jpg|png|webp))"',
+            '[\\s\\S]{0,250}data-(?:src|img)="([^"]*serilerb?/[0-9]+\\.(?:jpg|png|webp))"',
           "i"
         )
       );
+      if (ds) img = ds[1];
       if (ds2) img = ds2[1];
       push(m[1], m[3], img);
     }
-
-    // fill missing posters from known pattern after opening anime is heavy;
-    // try global data-img map by order
-    if (results.length) {
-      const imgs = [];
-      const ire =
-        /data-(?:src|img)="((?:\/\/www\.turkanime\.tv)?\/?imajlar\/serilerb?\/[0-9]+\.(?:jpg|png|webp))"/gi;
-      while ((m = ire.exec(html))) imgs.push(absUrl(m[1]));
-      // also seriler without prefix in path
-      for (let i = 0; i < results.length; i++) {
-        if (results[i].image) continue;
-        // guess from slug hash not possible; leave empty or match by index if counts align
-      }
-    }
-
     return JSON.stringify(results.slice(0, 25));
   } catch (e) {
     return JSON.stringify([]);
@@ -577,7 +415,6 @@ async function extractEpisodes(url) {
       html.match(/animeId[=:](\d+)/i) ||
       html.match(/imajlar\/serilerb\/(\d+)\./i);
     if (idM) animeId = idM[1];
-
     const eps = [];
     const seen = {};
     if (animeId) {
@@ -660,19 +497,41 @@ async function extractStreamUrl(url) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
 
-    // collect all embed candidates from every videosec panel
-    const embedJobs = [];
-    const videosecUrls = collectVideosecUrls(epHtml);
+    // 1) First videosec load (default fansub panel) — has player buttons
+    const firstVs = epHtml.match(
+      /ajax\/videosec&b=[^&"'\s]+(?:&v=[^&"'\s]+)?&f=[^&"'\s]+/
+    );
+    let panelHtml = "";
+    if (firstVs) {
+      panelHtml = await getText(
+        await soraFetch(baseUrl + "/" + firstVs[0], {
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            Referer: epUrl,
+            "User-Agent": UA,
+          },
+        })
+      );
+    }
+    if (!panelHtml) panelHtml = epHtml;
 
-    // also parse any clear embeds on page
-    extractEmbedsFromHtml(epHtml).forEach(function (u) {
-      embedJobs.push({ url: u, fansub: "" });
+    // 2) Collect player list (SIBNET, VOE, MAIL, ...)
+    const players = parseVideosecPanel(panelHtml);
+
+    // Prefer order: SIBNET, MAIL, OK.RU, VOE, others
+    players.sort(function (a, b) {
+      return hostRank(a.name) - hostRank(b.name);
     });
 
-    for (let i = 0; i < videosecUrls.length; i++) {
+    const streams = [];
+    const seen = {};
+    const maxPlayers = Math.min(players.length, 10);
+
+    for (let i = 0; i < maxPlayers && streams.length < 8; i++) {
+      const pl = players[i];
       try {
         const vh = await getText(
-          await soraFetch(videosecUrls[i], {
+          await soraFetch(pl.videosec, {
             headers: {
               "X-Requested-With": "XMLHttpRequest",
               Referer: epUrl,
@@ -680,45 +539,58 @@ async function extractStreamUrl(url) {
             },
           })
         );
-        let fs = "";
-        const active = vh.match(
-          /btn-danger[^>]*>[\s\S]{0,100}<\/span>\s*([^<]{1,40})</i
-        );
-        if (active) fs = active[1].trim();
-        extractEmbedsFromHtml(vh).forEach(function (u) {
-          embedJobs.push({ url: u, fansub: fs });
-        });
+        const iframes = extractClearIframes(vh);
+        // also check player name even if iframe list empty
+        for (let j = 0; j < iframes.length; j++) {
+          const resolved = await resolveEmbed(iframes[j], pl.name);
+          for (let r = 0; r < resolved.length; r++) {
+            const media = forceHttps(resolved[r]);
+            if (!isHttp(media) || seen[media]) continue;
+            if (
+              !/\.(m3u8|mp4)(\?|$)/i.test(media) &&
+              media.indexOf(".mp4") < 0 &&
+              media.indexOf("m3u8") < 0
+            )
+              continue;
+            seen[media] = true;
+            const title = pl.name || "Stream";
+            streams.push({
+              title: title,
+              name: title,
+              streamUrl: media,
+              headers: {
+                "User-Agent": UA,
+                Referer: /sibnet/i.test(media)
+                  ? "https://video.sibnet.ru/"
+                  : baseUrl + "/",
+                Accept: "*/*",
+              },
+            });
+          }
+        }
       } catch (e2) {}
     }
 
-    const streams = [];
-    const seen = {};
-
-    for (let i = 0; i < embedJobs.length && streams.length < 10; i++) {
-      const job = embedJobs[i];
-      const host = labelFromUrl(job.url);
-      const resolved = await resolveEmbed(job.url);
-      for (let r = 0; r < resolved.length; r++) {
-        const media = forceHttps(resolved[r]);
-        if (!isHttp(media) || seen[media]) continue;
-        // must look like media
-        if (!/\.(m3u8|mp4)(\?|$)/i.test(media) && media.indexOf("m3u8") < 0)
-          continue;
-        seen[media] = true;
-        let title = host;
-        if (job.fansub) title = job.fansub + " · " + host;
-        const headers = {
-          "User-Agent": UA,
-          Referer: job.url,
-          Origin: job.url.replace(/^(https?:\/\/[^/]+).*/, "$1"),
-          Accept: "*/*",
-        };
-        streams.push({
-          title: title,
-          name: title,
-          streamUrl: media,
-          headers: headers,
-        });
+    // 3) Fallback: any clear iframe already on first panel
+    if (!streams.length) {
+      const iframes = extractClearIframes(panelHtml);
+      for (let j = 0; j < iframes.length; j++) {
+        const resolved = await resolveEmbed(iframes[j], "");
+        for (let r = 0; r < resolved.length; r++) {
+          const media = forceHttps(resolved[r]);
+          if (!isHttp(media) || seen[media]) continue;
+          if (!/\.(m3u8|mp4)/i.test(media)) continue;
+          seen[media] = true;
+          streams.push({
+            title: "Stream",
+            streamUrl: media,
+            headers: {
+              "User-Agent": UA,
+              Referer: baseUrl + "/",
+              Accept: "*/*",
+            },
+          });
+        }
       }
     }
 
@@ -727,7 +599,7 @@ async function extractStreamUrl(url) {
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 10),
+      streams: streams.slice(0, 8),
       subtitles: "",
     });
   } catch (e) {
