@@ -1,8 +1,9 @@
 /**
  * TürkAnime (turkanime.tv) – Sora / Luna
- * Turkish sub/dub anime
- * Streams: VOE, Doodstream, StreamWish (clear embeds)
- * v1.0.0
+ * Search: /arama?arama=KEYWORD
+ * Episodes: ajax/bolumler
+ * Streams: VOE / Doodstream / StreamWish embeds (clear hosts)
+ * v1.0.1
  */
 const baseUrl = "https://www.turkanime.tv";
 const UA =
@@ -92,28 +93,19 @@ function parseHref(url) {
   const s = String(url || "");
   let m = s.match(/\/video\/([^/?#]+)/i);
   if (m) {
-    const slug = m[1];
-    const em = slug.match(/-(\d+)-bolum$/i) || slug.match(/-(\d+)$/i);
+    const epSlug = m[1];
+    const em = epSlug.match(/-(\d+)-bolum$/i);
+    let seriesSlug = epSlug.replace(/-\d+-bolum$/i, "");
     return {
       type: "episode",
-      slug: slug.replace(/-\d+-bolum$/i, "").replace(/-\d+$/i, ""),
-      epSlug: slug,
+      slug: seriesSlug,
+      epSlug: epSlug,
       episode: em ? parseInt(em[1], 10) : 1,
     };
   }
   m = s.match(/\/anime\/([^/?#]+)/i);
-  if (m) {
-    return { type: "series", slug: m[1], epSlug: "", episode: 0 };
-  }
+  if (m) return { type: "series", slug: m[1], epSlug: "", episode: 0 };
   return { type: "unknown", slug: "", epSlug: "", episode: 0 };
-}
-
-function makeSeriesHref(slug) {
-  return baseUrl + "/anime/" + slug;
-}
-
-function makeEpHref(epSlug) {
-  return baseUrl + "/video/" + epSlug;
 }
 
 function hostRank(name) {
@@ -122,79 +114,70 @@ function hostRank(name) {
   if (/streamwish|wish/.test(n)) return 1;
   if (/dood/.test(n)) return 2;
   if (/hdvid/.test(n)) return 3;
-  if (/mediacm|mp4upload|sibnet/.test(n)) return 4;
+  if (/mediacm|mp4upload|sibnet|filemoon/.test(n)) return 4;
   return 5;
 }
 
 function labelFromUrl(u) {
   u = String(u || "").toLowerCase();
   if (/voe\.sx|voe\.video/.test(u)) return "VOE";
-  if (/dood\.(watch|to|so|ws|pm|la)/.test(u)) return "Doodstream";
-  if (/streamwish|wish\.|swish/.test(u)) return "StreamWish";
+  if (/dood\.(watch|to|so|ws|pm|la|li)/.test(u)) return "Doodstream";
+  if (/streamwish|wish\.|swishvideo/.test(u)) return "StreamWish";
   if (/hdvid|hd-vid/.test(u)) return "HDVID";
   if (/mediacm/.test(u)) return "MediaCM";
   if (/mp4upload/.test(u)) return "MP4Upload";
   if (/sibnet/.test(u)) return "Sibnet";
-  if (/filemoon|moon/.test(u)) return "Filemoon";
+  if (/filemoon|moonplayer/.test(u)) return "Filemoon";
   return "Host";
 }
 
-/** Collect external embed URLs from videosec HTML */
 function extractEmbeds(html) {
   const out = [];
   if (!html) return out;
   let m;
 
-  // iframe src
   const iframeRe = /<iframe[^>]+src=["']([^"']+)["']/gi;
   while ((m = iframeRe.exec(html))) {
     let u = absUrl(decodeEntities(m[1]));
-    if (!u || /turkanime\.tv\/embed/i.test(u)) continue; // skip encrypted native embed
-    if (isHttp(u) || u.indexOf("//") === 0) {
-      out.push(forceHttps(u.indexOf("//") === 0 ? "https:" + u : u));
-    }
+    if (!u) continue;
+    if (/turkanime\.tv\/embed/i.test(u)) continue;
+    if (u.indexOf("//") === 0) u = "https:" + u;
+    if (isHttp(u)) out.push(forceHttps(u));
   }
 
-  // raw known host patterns
   const hostRe =
-    /(https?:)?\/\/(?:[a-z0-9.-]+\.)?(?:voe\.sx|voe\.video|dood\.(?:watch|to|so|ws|pm|la)|streamwish\.|filemoon\.|mp4upload\.|sibnet\.ru|hdvid\.)[^\s"'<>]+/gi;
+    /(https?:)?\/\/(?:[a-z0-9.-]+\.)?(?:voe\.sx|voe\.video|dood\.(?:watch|to|so|ws|pm|la|li)|streamwish\.|swishvideo\.|filemoon\.|mp4upload\.|sibnet\.ru|hdvid\.)[^\s"'<>\\]+/gi;
   while ((m = hostRe.exec(html))) {
     let u = m[0];
     if (u.indexOf("//") === 0) u = "https:" + u;
-    out.push(forceHttps(u));
+    out.push(forceHttps(u.replace(/\\+$/g, "")));
   }
 
   const seen = {};
   const uniq = [];
   for (let i = 0; i < out.length; i++) {
     const u = out[i].split("#")[0];
-    if (seen[u]) continue;
+    if (seen[u] || !isHttp(u)) continue;
     seen[u] = true;
     uniq.push(u);
   }
   return uniq;
 }
 
-/** Parse all videosec AJAX URLs from episode HTML */
 function collectVideosecUrls(html) {
   const urls = [];
   if (!html) return urls;
-  const re = /ajax\/videosec&b=([^&"'\s]+)&(?:v=([^&"'\s]+)&)?f=([^&"'\s]+)/gi;
+  const re =
+    /ajax\/videosec&b=([^&"'\s]+)&(?:v=([^&"'\s]+)&)?f=([^&"'\s]+)/gi;
   let m;
   while ((m = re.exec(html))) {
     let q = "ajax/videosec&b=" + m[1];
     if (m[2]) q += "&v=" + m[2];
     q += "&f=" + m[3];
-    urls.push(baseUrl + "/" + q);
-  }
-  // also bare videosec without full path
-  const re2 = /['"]ajax\/videosec&b=[^'"]+['"]/gi;
-  while ((m = re2.exec(html))) {
-    const inner = m[0].replace(/['"]/g, "");
-    const full = baseUrl + "/" + inner;
+    const full = baseUrl + "/" + q;
     if (urls.indexOf(full) < 0) urls.push(full);
   }
-  return urls.slice(0, 12);
+  return urls.slice(0, 14);
 }
 
 /* ===================== search ===================== */
@@ -206,69 +189,111 @@ async function searchResults(keyword) {
 
     const results = [];
     const seen = {};
-    const q = cleaned.toLowerCase();
 
     function push(href, title, image) {
       href = absUrl(String(href || "").split("?")[0]);
       if (!href || seen[href]) return;
-      if (!/\/anime\/[^/]+\/?$/.test(href)) return;
+      if (!/\/anime\/[^/]+\/?$/.test(href.replace(/\/$/, ""))) return;
+      href = href.replace(/\/$/, "");
       seen[href] = true;
+      let t = decodeEntities(title || "Anime")
+        .replace(/\s+izle\s*$/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
       results.push({
-        title: decodeEntities(title || "Anime").replace(/\s+/g, " ").trim(),
+        title: t,
         image: absUrl(image || ""),
-        href: href.replace(/\/?$/, "/").replace(/\/$/, "") || href,
+        href: href,
       });
     }
 
-    // 1) Full list AJAX (filter client-side)
+    // PRIMARY: official search page
+    const searchUrl =
+      baseUrl + "/arama?arama=" + encodeURIComponent(cleaned);
     let html = await getText(
-      await soraFetch(baseUrl + "/ajax/tamliste", {
+      await soraFetch(searchUrl, {
         headers: {
-          "X-Requested-With": "XMLHttpRequest",
-          Referer: baseUrl + "/",
           "User-Agent": UA,
+          Accept: "text/html,*/*",
+          "Accept-Language": "tr-TR,tr;q=0.9",
+          Referer: baseUrl + "/",
         },
       })
     );
 
-    if (html && html.length > 500) {
-      const re =
-        /href="(\/\/www\.turkanime\.tv\/anime\/[^"]+|\/anime\/[^"]+)"[^>]*title="([^"]+)"/gi;
+    if (html && html.length > 2000 && !/404 Bulunamadı/i.test(html)) {
+      // title= links
+      let re =
+        /href="((?:\/\/www\.turkanime\.tv)?\/anime\/[^"]+)"[^>]*title="([^"]+)"/gi;
       let m;
       while ((m = re.exec(html))) {
-        const title = decodeEntities(m[2]);
-        if (title.toLowerCase().indexOf(q) >= 0) {
-          push(m[1], title, "");
-        }
-        if (results.length >= 25) break;
+        push(m[1], m[2], "");
       }
-      // alternate: animeAdi span
-      if (results.length < 5) {
-        const re2 =
-          /href="([^"]*\/anime\/[^"]+)"[\s\S]{0,120}?<span class="animeAdi">([^<]+)</gi;
-        while ((m = re2.exec(html))) {
-          const title = decodeEntities(m[2]).trim();
-          if (title.toLowerCase().indexOf(q) >= 0) push(m[1], title, "");
+      // any /anime/ link near text
+      re =
+        /href="((?:\/\/www\.turkanime\.tv)?\/anime\/[^"]+)"/gi;
+      while ((m = re.exec(html))) {
+        const slug = m[1].split("/anime/")[1] || "";
+        if (!slug || seen[absUrl(m[1].replace(/\/$/, ""))]) continue;
+        const nice = slug
+          .replace(/-/g, " ")
+          .replace(/\b\w/g, function (c) {
+            return c.toUpperCase();
+          });
+        push(m[1], nice, "");
+      }
+      // posters: serilerb near link
+      for (let i = 0; i < results.length; i++) {
+        const slug = results[i].href.split("/anime/")[1];
+        if (!slug) continue;
+        const imgRe = new RegExp(
+          "anime/" +
+            slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
+            "[\\s\\S]{0,400}?serilerb/([0-9]+)\\.(jpg|png|webp)",
+          "i"
+        );
+        const im = html.match(imgRe);
+        if (im) {
+          results[i].image =
+            baseUrl + "/imajlar/serilerb/" + im[1] + "." + im[2];
+        }
+      }
+    }
+
+    // FALLBACK: tamliste (airing list) + word match
+    if (!results.length) {
+      html = await getText(
+        await soraFetch(baseUrl + "/ajax/tamliste", {
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            Referer: baseUrl + "/",
+            "User-Agent": UA,
+          },
+        })
+      );
+      if (html && html.length > 500) {
+        const q = cleaned.toLowerCase();
+        const words = q.split(/\s+/).filter(function (w) {
+          return w.length > 2;
+        });
+        const re =
+          /href="((?:\/\/www\.turkanime\.tv)?\/anime\/[^"]+)"[^>]*title="([^"]+)"/gi;
+        let m;
+        while ((m = re.exec(html))) {
+          const title = decodeEntities(m[2]).toLowerCase();
+          let ok = title.indexOf(q) >= 0;
+          if (!ok && words.length) {
+            ok = words.every(function (w) {
+              return title.indexOf(w) >= 0;
+            });
+          }
+          if (ok) push(m[1], m[2], "");
           if (results.length >= 25) break;
         }
       }
     }
 
-    // 2) Homepage fallback
-    if (!results.length) {
-      html = await getText(await soraFetch(baseUrl + "/"));
-      const re3 =
-        /href="([^"]*\/anime\/[^"]+)"[^>]*(?:title|alt)="([^"]+)"/gi;
-      let m;
-      while ((m = re3.exec(html))) {
-        const title = decodeEntities(m[2]);
-        if (title.toLowerCase().indexOf(q) >= 0) push(m[1], title, "");
-        if (results.length >= 20) break;
-      }
-    }
-
-    // attach posters where possible (serilerb/{id}.jpg pattern later)
-    return JSON.stringify(results.slice(0, 20));
+    return JSON.stringify(results.slice(0, 25));
   } catch (e) {
     return JSON.stringify([]);
   }
@@ -278,27 +303,35 @@ async function extractDetails(url) {
   try {
     const p = parseHref(url);
     let page = url;
-    if (p.type === "series" && p.slug) page = makeSeriesHref(p.slug);
-    else if (p.type === "episode" && p.slug) page = makeSeriesHref(p.slug);
+    if (p.slug) page = baseUrl + "/anime/" + p.slug;
 
     const html = await getText(await soraFetch(page));
     let description = "N/A";
     const dm =
       html.match(/name=["']description["']\s+content=["']([^"']+)/i) ||
-      html.match(/property=["']og:description["'][^>]*content=["']([^"']+)/i) ||
-      html.match(/Özet[;:]*\s*([^<]{20,400})/i);
+      html.match(
+        /property=["']og:description["'][^>]*content=["']([^"']+)/i
+      );
     if (dm) description = decodeEntities(dm[1]).slice(0, 900);
+    else {
+      const om = html.match(/Özet[;:\s]*([^<]{30,500})/i);
+      if (om) description = decodeEntities(om[1]).slice(0, 900);
+    }
 
     let aliases = "N/A";
-    const am = html.match(/İngilizce\s*:?\s*([^<\n]+)/i);
+    const am = html.match(/İngilizce\s*:?\s*([^<\n]{2,80})/i);
     if (am) aliases = decodeEntities(am[1]).trim();
 
     let airdate = "N/A";
-    const ym = html.match(/Başlama Tarihi\s*:?\s*([^<\n]+)/i);
+    const ym = html.match(/Başlama Tarihi\s*:?\s*([^<\n]{2,60})/i);
     if (ym) airdate = decodeEntities(ym[1]).trim();
 
     return JSON.stringify([
-      { description: description || "N/A", aliases: aliases, airdate: airdate },
+      {
+        description: description || "N/A",
+        aliases: aliases,
+        airdate: airdate,
+      },
     ]);
   } catch (e) {
     return JSON.stringify([
@@ -310,19 +343,15 @@ async function extractDetails(url) {
 async function extractEpisodes(url) {
   try {
     const p = parseHref(url);
-    let seriesUrl = url;
-    let animeId = "";
-
-    if (p.type === "series" && p.slug) {
-      seriesUrl = makeSeriesHref(p.slug);
-    } else if (p.type === "episode" && p.slug) {
-      seriesUrl = makeSeriesHref(p.slug);
-    }
+    const seriesUrl = p.slug
+      ? baseUrl + "/anime/" + p.slug
+      : String(url);
 
     const html = await getText(await soraFetch(seriesUrl));
+    let animeId = "";
     const idM =
-      html.match(/animeId[=:](\d+)/i) ||
       html.match(/bolumler&animeId=(\d+)/i) ||
+      html.match(/animeId[=:](\d+)/i) ||
       html.match(/imajlar\/serilerb\/(\d+)\./i);
     if (idM) animeId = idM[1];
 
@@ -340,27 +369,28 @@ async function extractEpisodes(url) {
         })
       );
       const re =
-        /href="(\/\/www\.turkanime\.tv\/video\/([^"]+)|\/video\/([^"]+))"[^>]*title="([^"]+)"/gi;
+        /href="((?:\/\/www\.turkanime\.tv)?\/video\/([^"]+))"[^>]*title="([^"]+)"/gi;
       let m;
       while ((m = re.exec(bolumHtml))) {
-        const href = absUrl(m[1]);
-        const epSlug = m[2] || m[3];
+        const epSlug = m[2];
         if (seen[epSlug]) continue;
         seen[epSlug] = true;
-        const title = decodeEntities(m[4] || epSlug);
-        const numM = title.match(/(\d+)/) || epSlug.match(/-(\d+)-bolum/i);
+        const title = decodeEntities(m[3] || epSlug);
+        const numM =
+          title.match(/(\d+)\s*\.?\s*Bölüm/i) ||
+          epSlug.match(/-(\d+)-bolum/i) ||
+          title.match(/(\d+)/);
         const num = numM ? parseInt(numM[1], 10) : eps.length + 1;
         eps.push({
-          href: href,
+          href: absUrl(m[1]),
           number: num,
-          title: title.indexOf("Bölüm") >= 0 ? title : num + ". Bölüm",
+          title: /\d/.test(title) ? title : num + ". Bölüm",
         });
       }
     }
 
-    // fallback: links on series page
     if (!eps.length) {
-      const re2 = /href="([^"]*\/video\/([^"]+))"/gi;
+      const re2 = /href="((?:\/\/www\.turkanime\.tv)?\/video\/([^"]+))"/gi;
       let m;
       while ((m = re2.exec(html))) {
         if (seen[m[2]]) continue;
@@ -380,11 +410,7 @@ async function extractEpisodes(url) {
     });
 
     if (!eps.length) {
-      eps.push({
-        href: String(url),
-        number: 1,
-        title: "1. Bölüm",
-      });
+      eps.push({ href: String(url), number: 1, title: "1. Bölüm" });
     }
 
     return JSON.stringify(eps.slice(0, 500));
@@ -399,27 +425,30 @@ async function extractStreamUrl(url) {
   try {
     const p = parseHref(url);
     let epUrl = url;
+
     if (p.type === "episode" && p.epSlug) {
-      epUrl = makeEpHref(p.epSlug);
+      epUrl = baseUrl + "/video/" + p.epSlug;
     } else if (p.type === "series" && p.slug) {
-      // first episode
       const seriesHtml = await getText(
-        await soraFetch(makeSeriesHref(p.slug))
+        await soraFetch(baseUrl + "/anime/" + p.slug)
       );
-      const idM = seriesHtml.match(/animeId[=:](\d+)/i);
-      if (idM) {
-        const bolumHtml = await getText(
-          await soraFetch(baseUrl + "/ajax/bolumler&animeId=" + idM[1], {
-            headers: {
-              "X-Requested-With": "XMLHttpRequest",
-              Referer: makeSeriesHref(p.slug),
-            },
-          })
-        );
-        const em = bolumHtml.match(/href="([^"]*\/video\/[^"]+)"/i);
-        if (em) epUrl = absUrl(em[1]);
-        else return JSON.stringify({ streams: [], subtitles: "" });
-      }
+      const idM =
+        seriesHtml.match(/bolumler&animeId=(\d+)/i) ||
+        seriesHtml.match(/animeId[=:](\d+)/i);
+      if (!idM) return JSON.stringify({ streams: [], subtitles: "" });
+      const bolumHtml = await getText(
+        await soraFetch(baseUrl + "/ajax/bolumler&animeId=" + idM[1], {
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            Referer: baseUrl + "/anime/" + p.slug,
+          },
+        })
+      );
+      const em = bolumHtml.match(
+        /href="((?:\/\/www\.turkanime\.tv)?\/video\/[^"]+)"/i
+      );
+      if (!em) return JSON.stringify({ streams: [], subtitles: "" });
+      epUrl = absUrl(em[1]);
     }
 
     const epHtml = await getText(
@@ -427,31 +456,17 @@ async function extractStreamUrl(url) {
         headers: { Referer: baseUrl + "/", "User-Agent": UA },
       })
     );
-    if (!epHtml || epHtml.length < 500) {
+    if (!epHtml || epHtml.length < 400) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
 
-    const videosecUrls = collectVideosecUrls(epHtml);
-    // always include default first panel (already in page sometimes)
     const allEmbeds = [];
-    const fansubHint = [];
-
-    // embeds already in initial HTML
     extractEmbeds(epHtml).forEach(function (u) {
       allEmbeds.push({ url: u, fansub: "" });
     });
 
-    // fansub names from buttons
-    const fsRe = /<button[^>]*>[\s\S]*?<\/span>\s*([^<]+)<\/button>/gi;
-    let fm;
-    while ((fm = fsRe.exec(epHtml))) {
-      const name = fm[1].trim();
-      if (name && name.length < 40 && !/play|fa-/i.test(name)) {
-        fansubHint.push(name);
-      }
-    }
-
-    for (let i = 0; i < videosecUrls.length && i < 10; i++) {
+    const videosecUrls = collectVideosecUrls(epHtml);
+    for (let i = 0; i < videosecUrls.length; i++) {
       try {
         const vh = await getText(
           await soraFetch(videosecUrls[i], {
@@ -463,16 +478,14 @@ async function extractStreamUrl(url) {
             },
           })
         );
-        const embeds = extractEmbeds(vh);
-        // try to detect active fansub from this panel
         let fs = "";
         const active = vh.match(
-          /btn-danger[^>]*>[\s\S]*?<\/span>\s*([^<]+)</i
+          /btn-danger[^>]*>[\s\S]{0,80}<\/span>\s*([^<]{1,40})</i
         );
         if (active) fs = active[1].trim();
-        for (let e = 0; e < embeds.length; e++) {
-          allEmbeds.push({ url: embeds[e], fansub: fs });
-        }
+        extractEmbeds(vh).forEach(function (u) {
+          allEmbeds.push({ url: u, fansub: fs });
+        });
       } catch (e2) {}
     }
 
@@ -487,17 +500,13 @@ async function extractStreamUrl(url) {
     const seen = {};
 
     for (let i = 0; i < allEmbeds.length; i++) {
-      const item = allEmbeds[i];
-      let u = forceHttps(item.url);
+      let u = forceHttps(allEmbeds[i].url);
       if (!isHttp(u) || seen[u]) continue;
-      // skip pure encrypted turkanime embed
-      if (/turkanime\.tv\/embed\/#\/url\//i.test(u)) continue;
+      if (/turkanime\.tv\/embed/i.test(u)) continue;
       seen[u] = true;
-
       const host = labelFromUrl(u);
       let title = host;
-      if (item.fansub) title = item.fansub + " · " + host;
-
+      if (allEmbeds[i].fansub) title = allEmbeds[i].fansub + " · " + host;
       streams.push({
         title: title,
         name: title,
