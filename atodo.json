@@ -1,13 +1,10 @@
 {
   "sourceName": "ATodo",
   "iconUrl": "http://atodo.fun/favicon.ico",
-  "author": {
-    "name": "plodesu",
-    "icon": ""
-  },
-  "version": "1.3.3",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.4.0",
   "language": "Russian",
-  "languageType": ["Dubbed", "Subbed"],
+  "languageType": ["Dubbed"],
   "streamType": "HLS",
   "quality": "HD",
   "baseUrl": "https://api.atodo.fun",
@@ -15,10 +12,8 @@
   "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/atodo.js",
   "type": "movies/shows",
   "asyncJS": true,
-  "softsub": true,
+  "softsub": false,
   "downloadSupport": false,
   "supportsSora": true,
-  "supportsLuna": true,
-  "supportsAnymex": true,
-  "supportsMojuru": true
+  "supportsLuna": true
 }
