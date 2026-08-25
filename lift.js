@@ -1,8 +1,9 @@
 /**
  * Lift (liftw.ws) – Sora / Luna
- * Master HLS only = video + Russian audio (no silent video-only variants)
- * Voice picker · no 480/720/1080 list · ABR highest quality
- * v1.0.2
+ * API: api.liftw.ws · embed.liftw.ws
+ * Sora: Russian-only rebuilt HLS (data URI) → has audio
+ * Luna: full CDN master → multi-audio
+ * v1.0.3
  */
 const siteUrl = "https://liftw.ws";
 const apiBase = "https://api.liftw.ws";
@@ -191,6 +192,124 @@ function parseEmbed(html) {
   }
 
   return out;
+}
+
+function b64encode(str) {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 128) bytes.push(c);
+    else if (c < 2048) {
+      bytes.push(192 | (c >> 6), 128 | (c & 63));
+    } else {
+      bytes.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+    }
+  }
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    out += chars[a >> 2];
+    out += chars[((a & 3) << 4) | (b >> 4)];
+    out +=
+      i + 1 < bytes.length ? chars[((b & 15) << 2) | (c >> 6)] : "=";
+    out += i + 2 < bytes.length ? chars[c & 63] : "=";
+  }
+  return out;
+}
+
+/**
+ * One audio track + highest video only.
+ * Fixes Sora (ignores multi-audio EXT-X-MEDIA on full masters).
+ */
+function buildSingleAudioMaster(masterText, audioIndex) {
+  if (!masterText || masterText.indexOf("#EXT") !== 0) return "";
+  const lines = masterText.split(/\r?\n/);
+
+  const audios = [];
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    if (!/^#EXT-X-MEDIA:TYPE=AUDIO/i.test(L)) continue;
+    if (/failover/i.test(L)) continue;
+    if (/GROUP-ID="failover/i.test(L)) continue;
+    audios.push(L);
+  }
+  if (!audios.length) return "";
+
+  let idx = typeof audioIndex === "number" ? audioIndex : 0;
+  if (idx < 0 || idx >= audios.length) idx = 0;
+
+  for (let i = 0; i < audios.length; i++) {
+    if (/LANGUAGE="ru"|NAME="rus/i.test(audios[i])) {
+      idx = i;
+      break;
+    }
+  }
+
+  // Prefer requested index if valid
+  if (typeof audioIndex === "number" && audioIndex >= 0 && audioIndex < audios.length) {
+    idx = audioIndex;
+  }
+
+  let audioLine = audios[idx];
+  audioLine = audioLine
+    .replace(/DEFAULT=(YES|NO)/i, "DEFAULT=YES")
+    .replace(/AUTOSELECT=(YES|NO)/i, "AUTOSELECT=YES");
+  if (!/DEFAULT=/i.test(audioLine)) audioLine += ",DEFAULT=YES";
+  if (!/AUTOSELECT=/i.test(audioLine)) audioLine += ",AUTOSELECT=YES";
+
+  const groupM = audioLine.match(/GROUP-ID="([^"]+)"/i);
+  const groupId = groupM ? groupM[1] : "audio0";
+
+  let bestH = -1;
+  let bestInf = "";
+  let bestUrl = "";
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    if (!/^#EXT-X-STREAM-INF:/i.test(L)) continue;
+    if (/failover/i.test(L)) continue;
+    if (L.indexOf('AUDIO="' + groupId + '"') < 0 && /AUDIO="/i.test(L))
+      continue;
+    const resM = L.match(/RESOLUTION=\d+x(\d+)/i);
+    const h = resM ? parseInt(resM[1], 10) : 0;
+    let url = "";
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j] && lines[j].charAt(0) !== "#") {
+        url = lines[j].trim();
+        break;
+      }
+    }
+    if (!url) continue;
+    if (h > bestH) {
+      bestH = h;
+      bestInf = L;
+      bestUrl = url;
+    }
+  }
+  if (!bestUrl) return "";
+
+  if (!/AUDIO=/i.test(bestInf)) {
+    bestInf += ',AUDIO="' + groupId + '"';
+  } else {
+    bestInf = bestInf.replace(/AUDIO="[^"]*"/i, 'AUDIO="' + groupId + '"');
+  }
+
+  const out = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    audioLine,
+    bestInf,
+    bestUrl,
+    "",
+  ].join("\n");
+
+  return (
+    "data:application/vnd.apple.mpegurl;charset=utf-8;base64," +
+    b64encode(out)
+  );
 }
 
 async function searchResults(keyword) {
@@ -398,20 +517,29 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // CRITICAL: always use master.m3u8
-    // index-v*.m3u8 = video only → silent playback
-    // master has EXT-X-MEDIA audio (rus DEFAULT=YES) + high quality video
     if (!hls || !isHttp(hls)) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
     if (/index-v\d+\.m3u8/i.test(hls)) {
       hls = hls.replace(/index-v\d+\.m3u8/i, "master.m3u8");
     }
-
     const master = forceHttps(hls);
-    if (!isHttp(master) || /index-v\d+/i.test(master)) {
+    if (!isHttp(master)) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
+
+    let masterText = "";
+    try {
+      masterText = await getText(
+        await soraFetch(master, {
+          headers: {
+            "User-Agent": UA,
+            Accept: "application/vnd.apple.mpegurl,*/*",
+            Referer: "https://embed.liftw.ws/",
+          },
+        })
+      );
+    } catch (e) {}
 
     let voices = names.filter(isRussianVoice);
     if (!voices.length) {
@@ -434,29 +562,63 @@ async function extractStreamUrl(url) {
       Accept: "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
     };
 
-    // One option per voice — same master (player uses DEFAULT Russian audio + ABR max quality)
-    // Listing voices still lets you see what tracks exist; Luna plays master with rus DEFAULT
     const streams = [];
     const seen = {};
+
     for (let v = 0; v < voices.length; v++) {
       const title = voices[v];
       if (seen[title]) continue;
       seen[title] = true;
+
+      let audioIdx = 0;
+      for (let n = 0; n < names.length; n++) {
+        if (names[n] === title) {
+          audioIdx = n;
+          break;
+        }
+      }
+
+      const rebuilt = buildSingleAudioMaster(masterText, audioIdx);
+
+      // Sora: single-audio rebuilt master (with sound)
+      if (rebuilt) {
+        streams.push({
+          title: title,
+          name: title,
+          streamUrl: rebuilt,
+          headers: headers,
+        });
+      }
+
+      // Luna: full CDN master (multi-audio works natively)
       streams.push({
-        title: title,
-        name: title,
+        title: title + " · CDN",
+        name: title + " · CDN",
         streamUrl: master,
         headers: headers,
       });
     }
 
-    // Prefer HDRezka / Dub first for auto-pick
-    streams.sort(function (a, b) {
-      return voiceRank(a.title) - voiceRank(b.title);
-    });
+    if (!streams.length) {
+      const rebuilt = buildSingleAudioMaster(masterText, 0);
+      if (rebuilt) {
+        streams.push({
+          title: "Русский",
+          name: "Русский",
+          streamUrl: rebuilt,
+          headers: headers,
+        });
+      }
+      streams.push({
+        title: "Русский · CDN",
+        name: "Русский · CDN",
+        streamUrl: master,
+        headers: headers,
+      });
+    }
 
     return JSON.stringify({
-      streams: streams.slice(0, 10),
+      streams: streams.slice(0, 12),
       subtitles: "",
     });
   } catch (e) {
