@@ -1,9 +1,6 @@
 /**
  * Anizm (anizm.net) – Sora / Luna
- * Search: /ara?s=  +  /anime-izle
- * Posters: .anizm_avatar / infoPosterImgItem / og:image
- * Streams: Çevirmenler → anizmplayer (Aincrad) / VOE / Sibnet / YourUpload / GDrive / others
- * v1.0.0
+ * v1.0.1 – fixed hang on search + stronger Cloudflare/selector resilience
  */
 const baseUrl = "https://anizm.net";
 const playerBase = "https://anizmplayer.com";
@@ -18,6 +15,7 @@ async function soraFetch(url, options) {
       "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
       Accept: "text/html,application/json,*/*",
       Referer: baseUrl + "/",
+      "Cache-Control": "no-cache",
     },
     options.headers || {}
   );
@@ -66,12 +64,8 @@ function absUrl(u) {
 }
 function decodeEntities(s) {
   return String(s || "")
-    .replace(/&#x([0-9a-f]+);/gi, function (_, h) {
-      return String.fromCharCode(parseInt(h, 16));
-    })
-    .replace(/&#(\d+);/g, function (_, n) {
-      return String.fromCharCode(parseInt(n, 10));
-    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
     .replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'")
     .replace(/&amp;/g, "&")
@@ -97,7 +91,7 @@ function parseHref(url) {
     };
   }
   m = s.match(/anizm\.net\/([^/?#]+)/i);
-  if (m && !/^(ara|anime-izle|takvim|uyeol|hakkimizda)/i.test(m[1])) {
+  if (m && !/^(ara|anime-izle|takvim|uyeol|hakkimizda|profil)/i.test(m[1])) {
     return { type: "series", slug: m[1], epSlug: "", episode: 0 };
   }
   return { type: "unknown", slug: "", epSlug: "", episode: 0 };
@@ -112,8 +106,7 @@ function hostRank(name) {
   if (/gdrive|google|drive/.test(n)) return 4;
   if (/filemoon|moon/.test(n)) return 5;
   if (/dood/.test(n)) return 6;
-  if (/streamwish|wish/.test(n)) return 7;
-  return 8;
+  return 7;
 }
 function labelFromUrl(u) {
   u = String(u || "").toLowerCase();
@@ -124,14 +117,12 @@ function labelFromUrl(u) {
   if (/drive\.google|googleapis|gdrive/.test(u)) return "GDrive";
   if (/filemoon|moon|bysesukior|kerapoxy|farordoms/.test(u)) return "Filemoon";
   if (/dood\./.test(u)) return "Doodstream";
-  if (/streamwish|swish/.test(u)) return "StreamWish";
   return "Host";
 }
 
-/* ---------- unpack / media helpers (same family as TürkAnime) ---------- */
+/* ---------- unpack helpers ---------- */
 function b64decode(str) {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   str = String(str || "").replace(/[^A-Za-z0-9+/=]/g, "");
   let out = "";
   for (let i = 0; i < str.length; i += 4) {
@@ -148,8 +139,7 @@ function b64decode(str) {
   return out;
 }
 function baseN(n, base) {
-  const chars =
-    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
   if (n === 0) return "0";
   let s = "";
   while (n > 0) {
@@ -159,9 +149,7 @@ function baseN(n, base) {
   return s;
 }
 function unpackDeanEdwards(packed) {
-  const m = packed.match(
-    /\}\('(.*)',(\d+),(\d+),'([^']*)'\.split\('\|'\)/s
-  );
+  const m = packed.match(/\}\('(.*)',(\d+),(\d+),'([^']*)'\.split\('\|'\)/s);
   if (!m) return packed;
   let p = m[1];
   const a = parseInt(m[2], 10);
@@ -172,16 +160,11 @@ function unpackDeanEdwards(packed) {
     const key = baseN(i, a);
     dict[key] = k[i] && k[i].length ? k[i] : key;
   }
-  const keys = Object.keys(dict).sort(function (x, y) {
-    return y.length - x.length;
-  });
+  const keys = Object.keys(dict).sort((x, y) => y.length - x.length);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     if (dict[key] === key) continue;
-    const re = new RegExp(
-      "\\b" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b",
-      "g"
-    );
+    const re = new RegExp("\\b" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g");
     p = p.replace(re, dict[key]);
   }
   return p;
@@ -190,13 +173,9 @@ function findMediaUrls(text) {
   const out = [];
   if (!text) return out;
   let m;
-  const re =
-    /https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mp4)[^"'\\\s<>]*/gi;
+  const re = /https?:\/\/[^"'\\\s<>]+?\.(?:m3u8|mp4)[^"'\\\s<>]*/gi;
   while ((m = re.exec(text))) {
-    let u = m[0]
-      .replace(/\\u0026/g, "&")
-      .replace(/\\\//g, "/")
-      .replace(/\\+$/g, "");
+    let u = m[0].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\+$/g, "");
     if (isHttp(u)) out.push(forceHttps(u));
   }
   return out;
@@ -207,34 +186,25 @@ function dedupeUrls(arr) {
   for (let i = 0; i < arr.length; i++) {
     const u = forceHttps(String(arr[i] || "").split("#")[0]);
     if (!isHttp(u) || seen[u]) continue;
-    if (/jquery|bootstrap|google-analytics|facebook|cdnjs|cloudflare/i.test(u))
-      continue;
+    if (/jquery|bootstrap|google-analytics|facebook|cdnjs|cloudflare/i.test(u)) continue;
     seen[u] = true;
     out.push(u);
   }
   return out;
 }
 
-/* ---------- host resolvers ---------- */
+/* ---------- resolvers ---------- */
 async function resolveAnizmPlayer(embedOrKey) {
   try {
     let key = String(embedOrKey || "");
-    // extract key from /video/KEY or packed page
     const km = key.match(/\/video\/([a-zA-Z0-9]+)/i) || key.match(/FirePlayer\(["']([a-zA-Z0-9]+)["']/);
     if (km) key = km[1];
-    if (!key || key.length < 6) return [];
+    if (!key || key.length < 5) return [];
 
-    // if we were given a full page URL, fetch & unpack
     if (isHttp(embedOrKey) && /anizmplayer/i.test(embedOrKey)) {
-      const html = await getText(
-        await soraFetch(embedOrKey, {
-          headers: { Referer: baseUrl + "/", "User-Agent": UA },
-        })
-      );
+      const html = await getText(await soraFetch(embedOrKey, { headers: { Referer: baseUrl + "/" } }));
       if (html && /eval\(function\(p,a,c,k,e/.test(html)) {
-        const pm = html.match(
-          /eval\(function\(p,a,c,k,e,d\)\{[\s\S]+?\}\('[\s\S]+?'\.split\('\|'\)\)\)/
-        );
+        const pm = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]+?\}\('[\s\S]+?'\.split\('\|'\)\)\)/);
         if (pm) {
           const unpacked = unpackDeanEdwards(pm[0]);
           const fk = unpacked.match(/FirePlayer\(["']([a-zA-Z0-9]+)["']/);
@@ -245,13 +215,8 @@ async function resolveAnizmPlayer(embedOrKey) {
       if (direct.length) return dedupeUrls(direct);
     }
 
-    const postUrl =
-      playerBase + "/player/index.php?data=" + encodeURIComponent(key) + "&do=getVideo";
-    const body =
-      "hash=" +
-      encodeURIComponent(key) +
-      "&r=" +
-      encodeURIComponent(baseUrl + "/");
+    const postUrl = playerBase + "/player/index.php?data=" + encodeURIComponent(key) + "&do=getVideo";
+    const body = "hash=" + encodeURIComponent(key) + "&r=" + encodeURIComponent(baseUrl + "/");
     const res = await soraFetch(postUrl, {
       method: "POST",
       headers: {
@@ -262,12 +227,11 @@ async function resolveAnizmPlayer(embedOrKey) {
         "X-Requested-With": "XMLHttpRequest",
         Accept: "*/*",
       },
-      body: body,
+      body,
     });
     const text = await getText(res);
     if (!text) return [];
 
-    // common response shapes
     let found = findMediaUrls(text);
     try {
       const j = JSON.parse(text);
@@ -277,7 +241,7 @@ async function resolveAnizmPlayer(embedOrKey) {
       if (j.source) found.push(j.source);
       if (j.hls) found.push(j.hls);
       if (Array.isArray(j.sources)) {
-        j.sources.forEach(function (s) {
+        j.sources.forEach((s) => {
           if (s.file) found.push(s.file);
           if (s.src) found.push(s.src);
         });
@@ -288,7 +252,6 @@ async function resolveAnizmPlayer(embedOrKey) {
       text.match(/["']hls["']\s*:\s*["'](https?:\/\/[^"']+)["']/i) ||
       text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
     if (m) found.push(m[1] || m[0]);
-
     return dedupeUrls(found);
   } catch (e) {
     return [];
@@ -297,11 +260,7 @@ async function resolveAnizmPlayer(embedOrKey) {
 
 async function resolveVoe(embedUrl) {
   try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
+    const html = await getText(await soraFetch(embedUrl, { headers: { Referer: baseUrl + "/" } }));
     if (!html || html.length < 200) return [];
     const found = findMediaUrls(html);
     let m = html.match(/["']hls["']\s*:\s*["'](https?:\/\/[^"']+)["']/i);
@@ -309,12 +268,9 @@ async function resolveVoe(embedUrl) {
     m = html.match(/["']file["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i);
     if (m) found.push(m[1]);
     const b64s = html.match(/["']([A-Za-z0-9+/]{60,}={0,2})["']/g) || [];
-    for (let i = 0; i < b64s.length && i < 8; i++) {
+    for (let i = 0; i < Math.min(b64s.length, 8); i++) {
       try {
-        const raw = b64decode(b64s[i].replace(/['"]/g, ""));
-        findMediaUrls(raw).forEach(function (u) {
-          found.push(u);
-        });
+        findMediaUrls(b64decode(b64s[i].replace(/['"]/g, ""))).forEach((u) => found.push(u));
       } catch (e) {}
     }
     return dedupeUrls(found);
@@ -325,11 +281,7 @@ async function resolveVoe(embedUrl) {
 
 async function resolveSibnet(embedUrl) {
   try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
+    const html = await getText(await soraFetch(embedUrl, { headers: { Referer: baseUrl + "/" } }));
     if (!html) return [];
     const found = findMediaUrls(html);
     const m =
@@ -348,17 +300,11 @@ async function resolveSibnet(embedUrl) {
 
 async function resolveFilemoon(embedUrl) {
   try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
+    const html = await getText(await soraFetch(embedUrl, { headers: { Referer: baseUrl + "/" } }));
     if (!html) return [];
     let text = html;
     if (/eval\(function\(p,a,c,k,e/.test(html)) {
-      const pm = html.match(
-        /eval\(function\(p,a,c,k,e,d\)\{[\s\S]+?\}\('[\s\S]+?'\.split\('\|'\)\)\)/
-      );
+      const pm = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]+?\}\('[\s\S]+?'\.split\('\|'\)\)\)/);
       if (pm) text += "\n" + unpackDeanEdwards(pm[0]);
     }
     const found = findMediaUrls(text);
@@ -372,11 +318,7 @@ async function resolveFilemoon(embedUrl) {
 
 async function resolveGeneric(embedUrl) {
   try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
+    const html = await getText(await soraFetch(embedUrl, { headers: { Referer: baseUrl + "/" } }));
     return dedupeUrls(findMediaUrls(html));
   } catch (e) {
     return [];
@@ -388,9 +330,7 @@ async function resolveEmbed(embedUrl) {
   if (/anizmplayer|aincrad/i.test(u)) return resolveAnizmPlayer(u);
   if (/voe\.sx|voe\.video/i.test(u)) return resolveVoe(u);
   if (/sibnet/i.test(u)) return resolveSibnet(u);
-  if (
-    /filemoon|bysesukior|kerapoxy|farordoms|moon\.|streamwish|swish/i.test(u)
-  )
+  if (/filemoon|bysesukior|kerapoxy|farordoms|moon\.|streamwish|swish/i.test(u))
     return resolveFilemoon(u);
   return resolveGeneric(u);
 }
@@ -406,7 +346,6 @@ function extractEmbedsFromHtml(html) {
     if (u.indexOf("//") === 0) u = "https:" + u;
     if (isHttp(u)) out.push(forceHttps(u));
   }
-  // data-src / player links
   const dataRe =
     /(?:data-src|data-url|href)=["']((?:https?:)?\/\/[^"']+(?:voe|sibnet|yourupload|anizmplayer|dood|filemoon|drive\.google)[^"']*)["']/gi;
   while ((m = dataRe.exec(html))) {
@@ -424,21 +363,20 @@ function extractEmbedsFromHtml(html) {
   return dedupeUrls(out);
 }
 
-/* ===================== search ===================== */
+/* ===================== SEARCH (fixed hang) ===================== */
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
+
     const results = [];
     const seen = {};
 
     function push(href, title, image) {
       href = absUrl(String(href || "").split("?")[0]).replace(/\/$/, "");
       if (!href || seen[href]) return;
-      // series pages are /slug (no -bolum)
-      if (/-bolum/i.test(href)) return;
-      if (!/anizm\.net\/[^/]+$/i.test(href) && !href.startsWith(baseUrl + "/"))
-        return;
+      if (/-bolum/i.test(href)) return;                 // skip episodes
+      if (!/anizm\.net\/[a-z0-9-]+$/i.test(href)) return;
       seen[href] = true;
       let img = absUrl(image || "");
       if (img.indexOf("data:") === 0) img = "";
@@ -452,62 +390,57 @@ async function searchResults(keyword) {
       });
     }
 
-    // primary search
-    const searchUrl =
-      baseUrl + "/ara?s=" + encodeURIComponent(cleaned);
+    // 1) primary search endpoint
+    const searchUrl = baseUrl + "/ara?s=" + encodeURIComponent(cleaned);
     let html = await getText(
       await soraFetch(searchUrl, {
-        headers: {
-          "User-Agent": UA,
-          Accept: "text/html,*/*",
-          Referer: baseUrl + "/",
-        },
+        headers: { "User-Agent": UA, Accept: "text/html,*/*", Referer: baseUrl + "/" },
       })
     );
 
-    if (html && html.length > 800) {
-      // classic card: a.pfull + .anizm_avatar + .anizm_textUpper
-      let re =
-        /<a[^>]+class="[^"]*pfull[^"]*"[^>]+href="([^"]+)"[\s\S]*?(?:src|data-src)="([^"]+)"[\s\S]*?class="[^"]*anizm_textUpper[^"]*"[^>]*>([^<]+)/gi;
-      let m;
-      while ((m = re.exec(html))) push(m[1], m[3], m[2]);
-
-      // alternative order
-      re =
-        /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[^"/?]+)"[^>]*>[\s\S]{0,400}?(?:src|data-src)="([^"]*(?:poster|avatar|cover|img)[^"]*)"[\s\S]{0,200}?>([^<]{3,80})</gi;
-      while ((m = re.exec(html))) {
-        if (!/-bolum/i.test(m[1])) push(m[1], m[3], m[2]);
-      }
-
-      // title + href only
-      re =
-        /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[a-z0-9-]+)"[^>]*title="([^"]+)"/gi;
-      while ((m = re.exec(html))) {
-        if (!/-bolum/i.test(m[1])) push(m[1], m[2], "");
-      }
+    // Cloudflare challenge page → empty result instead of hang
+    if (!html || html.length < 500 || /Just a moment|cf-browser-verification|challenge-platform/i.test(html)) {
+      return JSON.stringify([]);
     }
 
-    // fallback: anime-izle listing if search empty
-    if (!results.length) {
-      html = await getText(
+    // multiple selector patterns (site changes often)
+    const patterns = [
+      // classic pfull cards
+      /<a[^>]+class="[^"]*pfull[^"]*"[^>]+href="([^"]+)"[\s\S]{0,600}?(?:src|data-src)="([^"]+)"[\s\S]{0,300}?class="[^"]*anizm_textUpper[^"]*"[^>]*>([^<]+)/gi,
+      // title + href
+      /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[a-z0-9-]+)"[^>]*(?:title|data-title)="([^"]+)"/gi,
+      // any series link + nearby image
+      /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[a-z0-9-]+)"[\s\S]{0,400}?(?:src|data-src)="([^"]*(?:poster|avatar|cover|img|anizm)[^"]*)"[\s\S]{0,200}?>([^<]{3,90})</gi,
+      // simple text links
+      /<a[^>]+href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[a-z0-9-]+)"[^>]*>([^<]{3,80})<\/a>/gi,
+    ];
+
+    for (const re of patterns) {
+      let m;
+      while ((m = re.exec(html))) {
+        if (m.length >= 4) push(m[1], m[3] || m[2], m[2]);
+        else if (m.length === 3) push(m[1], m[2], "");
+      }
+      if (results.length >= 8) break;
+    }
+
+    // 2) fallback – scrape “anime-izle” list and filter by keyword
+    if (results.length < 3) {
+      const listHtml = await getText(
         await soraFetch(baseUrl + "/anime-izle?sayfa=1", {
           headers: { "User-Agent": UA, Referer: baseUrl + "/" },
         })
       );
-      if (html) {
+      if (listHtml && listHtml.length > 800 && !/Just a moment/i.test(listHtml)) {
         const re =
-          /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[^"/?]+)"[\s\S]{0,300}?(?:src|data-src)="([^"]+)"[\s\S]{0,200}?class="[^"]*title[^"]*"[^>]*>([^<]+)/gi;
+          /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[a-z0-9-]+)"[\s\S]{0,350}?(?:src|data-src)="([^"]+)"[\s\S]{0,250}?>([^<]{3,90})</gi;
         let m;
-        while ((m = re.exec(html))) {
-          if (
-            cleaned
-              .toLowerCase()
-              .split(/\s+/)
-              .some(function (w) {
-                return m[3].toLowerCase().indexOf(w) >= 0;
-              })
-          )
+        const kw = cleaned.toLowerCase().split(/\s+/);
+        while ((m = re.exec(listHtml))) {
+          const title = (m[3] || "").toLowerCase();
+          if (kw.some((w) => title.indexOf(w) >= 0)) {
             push(m[1], m[3], m[2]);
+          }
         }
       }
     }
@@ -518,11 +451,16 @@ async function searchResults(keyword) {
   }
 }
 
+/* ===================== DETAILS ===================== */
 async function extractDetails(url) {
   try {
     const p = parseHref(url);
     const page = p.slug ? baseUrl + "/" + p.slug : String(url);
     const html = await getText(await soraFetch(page));
+    if (!html || /Just a moment/i.test(html)) {
+      return JSON.stringify([{ description: "N/A", aliases: "N/A", airdate: "N/A" }]);
+    }
+
     let description = "N/A";
     const dm =
       html.match(/name=["']description["']\s+content=["']([^"']+)/i) ||
@@ -531,47 +469,40 @@ async function extractDetails(url) {
     if (dm) description = decodeEntities(dm[1]).replace(/<[^>]+>/g, "").slice(0, 900);
 
     let aliases = "N/A";
-    const am =
-      html.match(/İngilizce\s*:?\s*([^<\n]{2,120})/i) ||
-      html.match(/English\s*:?\s*([^<\n]{2,120})/i);
+    const am = html.match(/İngilizce\s*:?\s*([^<\n]{2,120})/i) || html.match(/English\s*:?\s*([^<\n]{2,120})/i);
     if (am) aliases = decodeEntities(am[1]).trim();
 
     let airdate = "N/A";
-    const ym =
-      html.match(/Başlama Tarihi\s*:?\s*([^<\n]{2,80})/i) ||
-      html.match(/Yayın Tarihi\s*:?\s*([^<\n]{2,80})/i);
+    const ym = html.match(/Başlama Tarihi\s*:?\s*([^<\n]{2,80})/i) || html.match(/Yayın Tarihi\s*:?\s*([^<\n]{2,80})/i);
     if (ym) airdate = decodeEntities(ym[1]).trim();
 
-    return JSON.stringify([
-      { description: description, aliases: aliases, airdate: airdate },
-    ]);
+    return JSON.stringify([{ description, aliases, airdate }]);
   } catch (e) {
-    return JSON.stringify([
-      { description: "N/A", aliases: "N/A", airdate: "N/A" },
-    ]);
+    return JSON.stringify([{ description: "N/A", aliases: "N/A", airdate: "N/A" }]);
   }
 }
 
+/* ===================== EPISODES ===================== */
 async function extractEpisodes(url) {
   try {
     const p = parseHref(url);
     const seriesUrl = p.slug ? baseUrl + "/" + p.slug : String(url);
     const html = await getText(await soraFetch(seriesUrl));
+    if (!html || /Just a moment/i.test(html)) {
+      return JSON.stringify([{ href: String(url), number: 1, title: "1. Bölüm" }]);
+    }
+
     const eps = [];
     const seen = {};
 
-    // episode links: /slug-N-bolum or /slug-N-bolum-izle
     const re =
       /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/([^"/]+)-(\d+)-bolum(?:-izle)?)"[^>]*(?:title="([^"]*)")?/gi;
     let m;
     while ((m = re.exec(html))) {
       const full = absUrl(m[1]);
-      const slugPart = m[2];
       const num = parseInt(m[3], 10);
       if (seen[full] || seen[num]) continue;
-      // only keep episodes that belong to this series
-      if (p.slug && slugPart.indexOf(p.slug) < 0 && p.slug.indexOf(slugPart) < 0)
-        continue;
+      if (p.slug && m[2].indexOf(p.slug) < 0 && p.slug.indexOf(m[2]) < 0) continue;
       seen[full] = true;
       seen[num] = true;
       const title = decodeEntities(m[4] || "") || num + ". Bölüm";
@@ -582,177 +513,129 @@ async function extractEpisodes(url) {
       });
     }
 
-    // vertical list / episode buttons
-    const re2 =
-      /class="[^"]*(?:episode|bolum|verticalList)[^"]*"[^>]*>[\s\S]{0,80}?href="([^"]+-(\d+)-bolum[^"]*)"/gi;
-    while ((m = re2.exec(html))) {
-      const full = absUrl(m[1]);
-      const num = parseInt(m[2], 10);
-      if (seen[full] || seen[num]) continue;
-      seen[full] = true;
-      seen[num] = true;
-      eps.push({ href: full, number: num, title: num + ". Bölüm" });
-    }
-
-    eps.sort(function (a, b) {
-      return a.number - b.number;
-    });
+    eps.sort((a, b) => a.number - b.number);
     if (!eps.length) {
       eps.push({ href: String(url), number: 1, title: "1. Bölüm" });
     }
     return JSON.stringify(eps.slice(0, 500));
   } catch (e) {
-    return JSON.stringify([
-      { href: String(url), number: 1, title: "1. Bölüm" },
-    ]);
+    return JSON.stringify([{ href: String(url), number: 1, title: "1. Bölüm" }]);
   }
 }
 
+/* ===================== STREAMS ===================== */
 async function extractStreamUrl(url) {
   try {
     const p = parseHref(url);
     let epUrl = url;
     if (p.type === "episode" && p.epSlug) {
       epUrl = baseUrl + "/" + p.epSlug;
-      // some pages use -izle suffix
       if (!/izle$/i.test(epUrl)) epUrl += "-izle";
     } else if (p.type === "series" && p.slug) {
-      // jump to first episode
-      const seriesHtml = await getText(
-        await soraFetch(baseUrl + "/" + p.slug)
-      );
-      const em = seriesHtml.match(
-        /href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[^"]+-1-bolum[^"]*)"/i
-      );
+      const seriesHtml = await getText(await soraFetch(baseUrl + "/" + p.slug));
+      const em = seriesHtml.match(/href="((?:https?:\/\/(?:www\.)?anizm\.net)?\/[^"]+-1-bolum[^"]*)"/i);
       if (!em) return JSON.stringify({ streams: [], subtitles: "" });
       epUrl = absUrl(em[1]);
     }
 
     const epHtml = await getText(
-      await soraFetch(epUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
+      await soraFetch(epUrl, { headers: { Referer: baseUrl + "/", "User-Agent": UA } })
     );
-    if (!epHtml || epHtml.length < 400) {
+    if (!epHtml || epHtml.length < 400 || /Just a moment/i.test(epHtml)) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
 
     const embedJobs = [];
 
-    // 1) direct embeds on the page
-    extractEmbedsFromHtml(epHtml).forEach(function (u) {
-      embedJobs.push({ url: u, fansub: "" });
-    });
+    // direct embeds
+    extractEmbedsFromHtml(epHtml).forEach((u) => embedJobs.push({ url: u, fansub: "" }));
 
-    // 2) Çevirmenler / fansub tabs (most important)
-    // CloudStream style: div.episodeTranslators / #fansec → AJAX translator links
+    // Çevirmenler / fansub tabs
     const transRe =
       /(?:translator|data-translator|href)=["']([^"']+)["'][^>]*>[\s\S]{0,120}?class="[^"]*title[^"]*"[^>]*>([^<]{1,40})</gi;
     let tm;
-    const translatorUrls = [];
+    const done = {};
     while ((tm = transRe.exec(epHtml))) {
-      let tUrl = absUrl(tm[1]);
+      const tUrl = absUrl(tm[1]);
       const name = decodeEntities(tm[2]).trim();
-      if (tUrl && translatorUrls.indexOf(tUrl) < 0) {
-        translatorUrls.push(tUrl);
+      if (!tUrl || done[tUrl]) continue;
+      done[tUrl] = true;
+      try {
+        const th = await getText(
+          await soraFetch(tUrl, {
+            headers: {
+              "X-Requested-With": "XMLHttpRequest",
+              Accept: "application/json, text/javascript, */*; q=0.01",
+              Referer: epUrl,
+              "User-Agent": UA,
+            },
+          })
+        );
+        let playerHtml = th;
         try {
-          const th = await getText(
-            await soraFetch(tUrl, {
-              headers: {
-                "X-Requested-With": "XMLHttpRequest",
-                Accept: "application/json, text/javascript, */*; q=0.01",
-                Referer: epUrl,
-                "User-Agent": UA,
-              },
-            })
-          );
-          // response often JSON with player HTML or iframe
-          let playerHtml = th;
-          try {
-            const j = JSON.parse(th);
-            if (j.player) playerHtml = j.player;
-            else if (j.html) playerHtml = j.html;
-            else if (j.data) playerHtml = j.data;
-          } catch (e) {}
-          extractEmbedsFromHtml(playerHtml).forEach(function (u) {
-            embedJobs.push({ url: u, fansub: name });
-          });
-          // also look for anizmplayer key directly
-          const keyM =
-            playerHtml.match(/FirePlayer\(["']([a-zA-Z0-9]+)["']/) ||
-            playerHtml.match(/\/video\/([a-zA-Z0-9]+)/);
-          if (keyM) {
-            embedJobs.push({
-              url: playerBase + "/video/" + keyM[1],
-              fansub: name,
-            });
-          }
-        } catch (e2) {}
-      }
+          const j = JSON.parse(th);
+          if (j.player) playerHtml = j.player;
+          else if (j.html) playerHtml = j.html;
+          else if (j.data) playerHtml = j.data;
+        } catch (e) {}
+        extractEmbedsFromHtml(playerHtml).forEach((u) => embedJobs.push({ url: u, fansub: name }));
+        const keyM =
+          playerHtml.match(/FirePlayer\(["']([a-zA-Z0-9]+)["']/) ||
+          playerHtml.match(/\/video\/([a-zA-Z0-9]+)/);
+        if (keyM) {
+          embedJobs.push({ url: playerBase + "/video/" + keyM[1], fansub: name || "Aincrad" });
+        }
+      } catch (e2) {}
     }
 
-    // alternative: buttons with data attributes
-    const btnRe =
-      /data-(?:src|url|embed|player)=["']([^"']+)["'][^>]*>[\s\S]{0,80}?>([^<]{0,30})</gi;
+    // data attributes
+    const btnRe = /data-(?:src|url|embed|player)=["']([^"']+)["'][^>]*>[\s\S]{0,80}?>([^<]{0,30})</gi;
     while ((tm = btnRe.exec(epHtml))) {
       const u = absUrl(tm[1]);
       if (u) embedJobs.push({ url: u, fansub: decodeEntities(tm[2] || "").trim() });
     }
 
-    // packed script on episode page itself (Aincrad)
+    // packed script on page
     if (/eval\(function\(p,a,c,k,e/.test(epHtml)) {
-      const pm = epHtml.match(
-        /eval\(function\(p,a,c,k,e,d\)\{[\s\S]+?\}\('[\s\S]+?'\.split\('\|'\)\)\)/
-      );
+      const pm = epHtml.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]+?\}\('[\s\S]+?'\.split\('\|'\)\)\)/);
       if (pm) {
         const unpacked = unpackDeanEdwards(pm[0]);
         const fk = unpacked.match(/FirePlayer\(["']([a-zA-Z0-9]+)["']/);
         if (fk) {
-          embedJobs.push({
-            url: playerBase + "/video/" + fk[1],
-            fansub: "Aincrad",
-          });
+          embedJobs.push({ url: playerBase + "/video/" + fk[1], fansub: "Aincrad" });
         }
       }
     }
 
     const streams = [];
     const seen = {};
-    for (let i = 0; i < embedJobs.length && streams.length < 12; i++) {
+    for (let i = 0; i < embedJobs.length && streams.length < 10; i++) {
       const job = embedJobs[i];
       const host = labelFromUrl(job.url);
       const resolved = await resolveEmbed(job.url);
       for (let r = 0; r < resolved.length; r++) {
         const media = forceHttps(resolved[r]);
         if (!isHttp(media) || seen[media]) continue;
-        if (!/\.(m3u8|mp4)(\?|$)/i.test(media) && media.indexOf("m3u8") < 0)
-          continue;
+        if (!/\.(m3u8|mp4)(\?|$)/i.test(media) && media.indexOf("m3u8") < 0) continue;
         seen[media] = true;
         let title = host;
         if (job.fansub) title = job.fansub + " · " + host;
-        const headers = {
-          "User-Agent": UA,
-          Referer: job.url.indexOf("anizmplayer") >= 0 ? playerBase + "/" : job.url,
-          Origin: (job.url.match(/^(https?:\/\/[^/]+)/) || [null, baseUrl])[1],
-          Accept: "*/*",
-        };
         streams.push({
-          title: title,
+          title,
           name: title,
           streamUrl: media,
-          headers: headers,
+          headers: {
+            "User-Agent": UA,
+            Referer: /anizmplayer/i.test(job.url) ? playerBase + "/" : job.url,
+            Origin: (job.url.match(/^(https?:\/\/[^/]+)/) || [null, baseUrl])[1],
+            Accept: "*/*",
+          },
         });
       }
     }
 
-    streams.sort(function (a, b) {
-      return hostRank(a.title) - hostRank(b.title);
-    });
-
-    return JSON.stringify({
-      streams: streams.slice(0, 10),
-      subtitles: "",
-    });
+    streams.sort((a, b) => hostRank(a.title) - hostRank(b.title));
+    return JSON.stringify({ streams: streams.slice(0, 10), subtitles: "" });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "" });
   }
