@@ -1,14 +1,19 @@
 /**
- * ATodo (atodo.fun) – Sora / Luna
- * Movies + Series | jator (HLS) + xinu (HLS/HTTP)
- * HDRezka tracks prioritized when available
- * Qualities: Auto / 1080p / 720p / 480p
- * v1.2.1
+ * ATodo – Sora / Luna
+ * Fast path: jator HLS masters (playable)
+ * Fallback: xinu HTTPS (HDRezka when present)
+ * v1.3.0
  */
 const apiBase = "https://api.atodo.fun";
 const tmdbImg = "https://image.tmdb.org/t/p/w500";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+
+const streamHeaders = {
+  "User-Agent": UA,
+  Referer: "http://atodo.fun/",
+  Origin: "http://atodo.fun",
+};
 
 async function soraFetch(url, options) {
   options = options || {};
@@ -16,7 +21,7 @@ async function soraFetch(url, options) {
     {
       "User-Agent": UA,
       Accept: "application/json,*/*",
-      "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
+      "Accept-Language": "ru-RU,ru;q=0.9",
       Referer: "http://atodo.fun/",
     },
     options.headers || {}
@@ -67,6 +72,11 @@ function isHttp(u) {
   return /^https?:\/\//i.test(String(u || ""));
 }
 
+function forceHttps(u) {
+  if (!u) return "";
+  return String(u).replace(/^http:\/\//i, "https://");
+}
+
 function posterUrl(path) {
   if (!path) return "";
   if (isHttp(path)) return path;
@@ -114,9 +124,7 @@ function parseHref(url) {
 
 function makeHref(type, id, season, episode) {
   let h = apiBase + "/watch/" + type + "/" + id;
-  if (type === "tv") {
-    h += "?s=" + (season || 1) + "&e=" + (episode || 1);
-  }
+  if (type === "tv") h += "?s=" + (season || 1) + "&e=" + (episode || 1);
   return h;
 }
 
@@ -142,33 +150,8 @@ function dataToParam(obj) {
   return encodeURIComponent(b64encode(JSON.stringify(obj)));
 }
 
-function heightToLabel(h) {
-  h = +h || 0;
-  if (h >= 1000) return "1080p";
-  if (h >= 700) return "720p";
-  if (h >= 460) return "480p";
-  return "";
-}
-
-function absUrl(u, base) {
-  if (!u) return "";
-  u = String(u).replace(/&amp;/g, "&").trim();
-  if (u.indexOf("//") === 0) return "https:" + u;
-  if (isHttp(u)) return u;
-  if (u.charAt(0) === "/") {
-    const m = String(base).match(/^(https?:\/\/[^/]+)/i);
-    return (m ? m[1] : "") + u;
-  }
-  return String(base).replace(/\/[^/]*$/, "/") + u.replace(/^\.\//, "");
-}
-
-const streamHeaders = {
-  "User-Agent": UA,
-  Referer: "http://atodo.fun/",
-};
-
 function isHdrezka(name) {
-  return /hd\s*rezka|hdrezka|hrezka/i.test(String(name || ""));
+  return /hd\s*rezka|hdrezka/i.test(String(name || ""));
 }
 
 function niceVoice(name) {
@@ -176,121 +159,9 @@ function niceVoice(name) {
   if (isHdrezka(n)) {
     if (/дубл/i.test(n)) return "HDRezka · Дубляж";
     if (/18\+/i.test(n)) return "HDRezka · 18+";
-    if (/sub|суб/i.test(n)) return "HDRezka · Субтитры";
-    const rest = n
-      .replace(/HDrezka\s*Studio/i, "")
-      .replace(/[()]/g, "")
-      .trim();
-    return "HDRezka · " + (rest || "Studio");
+    return "HDRezka · Studio";
   }
   return n;
-}
-
-/** Parse streams object → list of {title, streamUrl, headers} */
-async function streamsFromResponse(json, labelPrefix) {
-  const out = [];
-  if (!json || !json.streams || !json.streams.video) return out;
-  const video = json.streams.video;
-
-  // HLS master
-  if (video.hls && video.hls.master && isHttp(video.hls.master)) {
-    const master = video.hls.master;
-    out.push({
-      title: labelPrefix + " · Auto",
-      streamUrl: master,
-      headers: streamHeaders,
-    });
-    try {
-      const text = await getText(
-        await soraFetch(master, {
-          headers: Object.assign(
-            { Accept: "application/vnd.apple.mpegurl,*/*" },
-            streamHeaders
-          ),
-        })
-      );
-      if (text && text.indexOf("#EXT") === 0) {
-        const lines = text.split(/\r?\n/);
-        const byQ = {};
-        for (let i = 0; i < lines.length; i++) {
-          if (!/^#EXT-X-STREAM-INF:/i.test(lines[i])) continue;
-          const resM = lines[i].match(/RESOLUTION=\d+x(\d+)/i);
-          let next = "";
-          for (let j = i + 1; j < lines.length; j++) {
-            if (lines[j] && lines[j].charAt(0) !== "#") {
-              next = lines[j].trim();
-              break;
-            }
-          }
-          if (!next) continue;
-          const label = heightToLabel(resM ? +resM[1] : 0);
-          if (!label) continue;
-          const url = absUrl(next, master);
-          if (isHttp(url)) byQ[label] = url;
-        }
-        ["1080p", "720p", "480p"].forEach(function (q) {
-          if (!byQ[q]) return;
-          out.push({
-            title: labelPrefix + " · " + q,
-            streamUrl: byQ[q],
-            headers: streamHeaders,
-          });
-        });
-      }
-    } catch (e) {}
-  }
-
-  // Progressive HTTP (OK CDN etc.)
-  if (video.http && video.http.qualities) {
-    const qs = video.http.qualities;
-    const order = ["1080", "720", "480"];
-    for (let i = 0; i < order.length; i++) {
-      const k = order[i];
-      if (qs[k] && isHttp(qs[k])) {
-        out.push({
-          title: labelPrefix + " · " + k + "p",
-          streamUrl: qs[k],
-          headers: streamHeaders,
-        });
-      }
-    }
-  }
-
-  return out;
-}
-
-async function resolveData(balancer, dataObj) {
-  if (!dataObj) return null;
-  try {
-    const url =
-      apiBase + "/api/source/" + balancer + "?data=" + dataToParam(dataObj);
-    return await getJson(url);
-  } catch (e) {
-    return null;
-  }
-}
-
-async function fetchSource(balancer, type, id, kpId, imdbId) {
-  let url = apiBase + "/api/source/" + balancer + "?type=" + type;
-  if (kpId) {
-    url += "&kinopoisk_id=" + encodeURIComponent(kpId);
-  } else if (imdbId) {
-    url += "&imdb_id=" + encodeURIComponent(imdbId);
-  } else {
-    url += "&id=" + encodeURIComponent(id);
-  }
-  const json = await getJson(url);
-  if (!json || json.error) return null;
-  return json;
-}
-
-async function getExternalIds(type, id) {
-  const det = await getJson(apiBase + "/api/details/" + type + "/" + id);
-  if (!det) return { kpId: "", imdbId: "" };
-  return {
-    kpId: det.kinopoisk_id ? String(det.kinopoisk_id) : "",
-    imdbId: det.imdb_id ? String(det.imdb_id) : "",
-  };
 }
 
 function pickEpisodeData(tr, season, episode) {
@@ -312,36 +183,69 @@ function pickEpisodeData(tr, season, episode) {
   return null;
 }
 
+async function resolvePlayable(balancer, dataObj) {
+  if (!dataObj) return [];
+  const url =
+    apiBase + "/api/source/" + balancer + "?data=" + dataToParam(dataObj);
+  const json = await getJson(url);
+  if (!json || !json.streams || !json.streams.video) return [];
+  const video = json.streams.video;
+  const out = [];
+
+  // Prefer HLS master (best for iOS AVPlayer)
+  if (video.hls && video.hls.master && isHttp(video.hls.master)) {
+    out.push({
+      kind: "hls",
+      url: forceHttps(video.hls.master),
+    });
+  }
+
+  // HTTP progressive – only https + only 720/1080 (skip low junk)
+  if (video.http && video.http.qualities) {
+    const qs = video.http.qualities;
+    ["1080", "720"].forEach(function (k) {
+      if (qs[k] && isHttp(qs[k])) {
+        out.push({ kind: "mp4", quality: k + "p", url: forceHttps(qs[k]) });
+      }
+    });
+  }
+  return out;
+}
+
+async function fetchSource(balancer, type, id, kpId) {
+  let url = apiBase + "/api/source/" + balancer + "?type=" + type;
+  if (kpId) url += "&kinopoisk_id=" + encodeURIComponent(kpId);
+  else url += "&id=" + encodeURIComponent(id);
+  const json = await getJson(url);
+  if (!json || json.error) return null;
+  return json;
+}
+
 /* ===================== search ===================== */
 
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
-
     const json = await getJson(
       apiBase + "/api/search?query=" + encodeURIComponent(cleaned)
     );
     const list = (json && json.results) || [];
     const results = [];
     const seen = {};
-
     for (let i = 0; i < list.length; i++) {
       const r = list[i];
       if (r.media_type === "person") continue;
-
       const media =
         r.media_type === "tv" || (r.name && !r.title) ? "tv" : "movie";
       const id = r.id;
       if (!id || seen[media + ":" + id]) continue;
       seen[media + ":" + id] = true;
-
       const ru = (r.title || r.name || "").replace(/\s+/g, " ").trim();
       const en = (r.original_title || r.original_name || "")
         .replace(/\s+/g, " ")
         .trim();
       if (!ru && !en) continue;
-
       const year = yearOf(r);
       let title = ru || en;
       if (en && ru && en.toLowerCase() !== ru.toLowerCase()) {
@@ -349,16 +253,10 @@ async function searchResults(keyword) {
       }
       if (year) title += " (" + year + ")";
       if (media === "tv") title += " [сериал]";
-
       results.push({
         title: title,
         image: posterUrl(r.poster_path),
-        href: makeHref(
-          media,
-          id,
-          media === "tv" ? 1 : 0,
-          media === "tv" ? 1 : 0
-        ),
+        href: makeHref(media, id, media === "tv" ? 1 : 0, media === "tv" ? 1 : 0),
       });
     }
     return JSON.stringify(results.slice(0, 20));
@@ -378,24 +276,21 @@ async function extractDetails(url) {
     const json = await getJson(
       apiBase + "/api/details/" + p.type + "/" + p.id
     );
-    const overview =
-      (json && (json.overview || json.description)) || "N/A";
-    const air =
-      (json && (json.release_date || json.first_air_date)) || "N/A";
-    const alias =
-      (json &&
-        (json.original_title ||
-          json.original_name ||
-          json.title ||
-          json.name)) ||
-      "N/A";
-    const image = posterUrl(json && json.poster_path);
     return JSON.stringify([
       {
-        description: String(overview).slice(0, 900),
-        aliases: alias,
-        airdate: air,
-        image: image,
+        description: String(
+          (json && (json.overview || json.description)) || "N/A"
+        ).slice(0, 900),
+        aliases:
+          (json &&
+            (json.original_title ||
+              json.original_name ||
+              json.title ||
+              json.name)) ||
+          "N/A",
+        airdate:
+          (json && (json.release_date || json.first_air_date)) || "N/A",
+        image: posterUrl(json && json.poster_path),
       },
     ]);
   } catch (e) {
@@ -424,25 +319,19 @@ async function extractEpisodes(url) {
       ]);
     }
 
-    let src = await fetchSource("jator", "tv", p.id, null, null);
+    // One request only
+    let src = await fetchSource("jator", "tv", p.id, null);
     if (!src || !src.translations) {
-      const ext = await getExternalIds("tv", p.id);
-      if (ext.kpId) {
-        src = await fetchSource("xinu", "tv", p.id, ext.kpId, null);
-      }
-      if ((!src || !src.translations) && ext.imdbId) {
-        src = await fetchSource("xinu", "tv", p.id, null, ext.imdbId);
-      }
+      const det = await getJson(apiBase + "/api/details/tv/" + p.id);
+      const kp = det && det.kinopoisk_id ? String(det.kinopoisk_id) : "";
+      if (kp) src = await fetchSource("xinu", "tv", p.id, kp);
     }
 
     const eps = [];
     if (src && src.translations) {
       let tr = null;
       for (let i = 0; i < src.translations.length; i++) {
-        if (
-          src.translations[i].seasons &&
-          src.translations[i].seasons.length
-        ) {
+        if (src.translations[i].seasons && src.translations[i].seasons.length) {
           tr = src.translations[i];
           break;
         }
@@ -481,6 +370,12 @@ async function extractEpisodes(url) {
   }
 }
 
+/**
+ * FAST extractStreamUrl
+ * 1) jator with TMDB id (HLS masters – usually play)
+ * 2) if empty → details for KP + xinu (HDRezka / OK CDN https)
+ * Max ~2–4 network hops, max 8 stream rows
+ */
 async function extractStreamUrl(url) {
   try {
     const p = parseHref(url);
@@ -489,96 +384,72 @@ async function extractStreamUrl(url) {
     const streams = [];
     const seen = {};
 
-    function addAll(items) {
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (!item || !isHttp(item.streamUrl)) continue;
-        const t = String(item.title || "").trim();
-        if (!t || seen[t]) continue;
-        seen[t] = true;
-        streams.push({
-          title: t,
-          name: t,
-          streamUrl: item.streamUrl,
-          headers: item.headers || streamHeaders,
-        });
-      }
+    function push(title, streamUrl) {
+      streamUrl = forceHttps(streamUrl);
+      if (!isHttp(streamUrl)) return;
+      if (seen[title] || seen[streamUrl]) return;
+      seen[title] = true;
+      seen[streamUrl] = true;
+      streams.push({
+        title: title,
+        name: title,
+        streamUrl: streamUrl,
+        headers: streamHeaders,
+      });
     }
 
-    const ext = await getExternalIds(p.type, p.id);
-
-    const jobs = [
-      { bal: "jator", kp: null, imdb: null },
-      { bal: "jator", kp: ext.kpId, imdb: null },
-      { bal: "xinu", kp: ext.kpId, imdb: null },
-      { bal: "xinu", kp: null, imdb: ext.imdbId },
-      { bal: "jator", kp: null, imdb: ext.imdbId },
-    ];
-
-    const rezkaItems = [];
-    const otherItems = [];
-
-    for (let a = 0; a < jobs.length; a++) {
-      const at = jobs[a];
-      if (a > 0 && !at.kp && !at.imdb) continue;
-
-      const src = await fetchSource(
-        at.bal,
-        p.type,
-        p.id,
-        at.kp || null,
-        at.imdb || null
-      );
-      if (!src || !src.translations) continue;
-
-      const trs = src.translations.slice().sort(function (x, y) {
-        const rx = isHdrezka(x.translation_name) ? 0 : 1;
-        const ry = isHdrezka(y.translation_name) ? 0 : 1;
-        return rx - ry;
+    async function consume(balancer, src) {
+      if (!src || !src.translations) return;
+      // HDRezka first, then others; max 4 voices
+      const trs = src.translations.slice().sort(function (a, b) {
+        return (isHdrezka(a.translation_name) ? 0 : 1) -
+          (isHdrezka(b.translation_name) ? 0 : 1);
       });
-
-      for (let i = 0; i < trs.length; i++) {
+      const limit = Math.min(trs.length, 4);
+      for (let i = 0; i < limit; i++) {
         const tr = trs[i];
-        const voiceRaw = tr.translation_name || "Озвучка";
-        const voice = niceVoice(voiceRaw);
+        const voice = niceVoice(tr.translation_name);
         const dataObj =
           p.type === "movie"
             ? tr.data || null
             : pickEpisodeData(tr, p.season, p.episode);
         if (!dataObj) continue;
 
-        const bals =
-          at.bal === "xinu" ? ["xinu", "jator"] : ["jator", "xinu"];
-        for (let b = 0; b < bals.length; b++) {
-          const resolved = await resolveData(bals[b], dataObj);
-          if (!resolved) continue;
-          const items = await streamsFromResponse(resolved, voice);
-          if (!items.length) continue;
-          if (isHdrezka(voiceRaw)) {
-            for (let k = 0; k < items.length; k++) rezkaItems.push(items[k]);
-          } else {
-            for (let k = 0; k < items.length; k++) otherItems.push(items[k]);
+        const playable = await resolvePlayable(balancer, dataObj);
+        for (let j = 0; j < playable.length; j++) {
+          const item = playable[j];
+          if (item.kind === "hls") {
+            // Master only – AVPlayer picks quality, most reliable
+            push(voice, item.url);
+          } else if (item.kind === "mp4") {
+            push(voice + " · " + item.quality, item.url);
           }
-          break;
         }
+        if (streams.length >= 8) return;
       }
     }
 
-    addAll(rezkaItems);
-    addAll(otherItems);
+    // --- fast path: jator ---
+    const jator = await fetchSource("jator", p.type, p.id, null);
+    await consume("jator", jator);
 
-    const rank = { "1080p": 4, "720p": 3, "480p": 2, Auto: 1 };
-    streams.sort(function (a, b) {
-      const aRez = /hdrezka/i.test(a.title) ? 0 : 1;
-      const bRez = /hdrezka/i.test(b.title) ? 0 : 1;
-      if (aRez !== bRez) return aRez - bRez;
-      const qa = (a.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
-      const qb = (b.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
-      return (rank[qb] || 0) - (rank[qa] || 0);
-    });
+    // --- fallback / HDRezka: xinu with kinopoisk ---
+    if (streams.length < 2) {
+      let kp = jator && jator.kinopoisk_id ? String(jator.kinopoisk_id) : "";
+      if (!kp) {
+        const det = await getJson(
+          apiBase + "/api/details/" + p.type + "/" + p.id
+        );
+        if (det && det.kinopoisk_id) kp = String(det.kinopoisk_id);
+      }
+      if (kp) {
+        const xinu = await fetchSource("xinu", p.type, p.id, kp);
+        await consume("xinu", xinu);
+      }
+    }
 
     return JSON.stringify({
-      streams: streams.slice(0, 24),
+      streams: streams.slice(0, 8),
       subtitles: "",
     });
   } catch (e) {
