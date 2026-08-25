@@ -1,7 +1,7 @@
 /**
  * Kinogo.sh – Sora / Luna
- * Alloha streams ONLY · one row per voice
- * v1.5.0
+ * Alloha first (named dubs) → Collaps fallback if Alloha geo-blocked
+ * v1.6.0
  */
 const baseUrl = "https://kinogo.sh";
 
@@ -117,6 +117,13 @@ function parseSE(url) {
   return { season: s ? +s : null, episode: e ? +e : null };
 }
 
+function voiceRank(name) {
+  if (/дубл|lost|кубик|гоблин|кравец|hdrezka|winmedia|tvshows|dragon|проф/i.test(name))
+    return 0;
+  if (/субтитр|оригинал/i.test(name)) return 2;
+  return 1;
+}
+
 /* ---- search ---- */
 
 async function searchResults(keyword) {
@@ -220,6 +227,14 @@ function extractAllohaTokenMovie(html) {
   return m ? m[1] : "";
 }
 
+function extractKpId(html) {
+  const m =
+    (html || "").match(/kinopoisk\.ru\/(?:film|series)\/(\d+)/i) ||
+    (html || "").match(/kp[_-]?id["']?\s*[:=]\s*["']?(\d+)/i) ||
+    (html || "").match(/data-kp["']?\s*[:=]\s*["']?(\d+)/i);
+  return m ? m[1] : "";
+}
+
 async function fetchAlloha(tokenMovie) {
   if (!tokenMovie) return null;
   const url =
@@ -309,7 +324,7 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ---- Alloha embed → real stream URLs ---- */
+/* ---- extract playable URLs from player HTML ---- */
 
 function collectMediaFromHtml(html, label, referer) {
   const out = [];
@@ -322,27 +337,52 @@ function collectMediaFromHtml(html, label, referer) {
     "User-Agent": UA,
     Referer: referer || baseUrl + "/",
   };
-  const seen = {};
 
   function push(title, url) {
     if (!isHttp(url)) return;
     url = url.replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
-    if (seen[url]) return;
-    seen[url] = true;
     out.push({ title: title, streamUrl: url, headers: headers });
+  }
+
+  // Collaps makePlayer: one HLS + many voice names → one row per name
+  const mp = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
+  if (mp) {
+    const body = mp[1];
+    const hls = (body.match(/["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/) ||
+      [])[1];
+    const namesBlock =
+      (body.match(/["']?names["']?\s*:\s*\[([^\]]*)\]/) || [])[1] || "";
+    const names = [];
+    const nm = namesBlock.match(/["']([^"']+)["']/g);
+    if (nm) {
+      for (let i = 0; i < nm.length; i++) {
+        names.push(nm[i].replace(/["']/g, ""));
+      }
+    }
+    if (hls && names.length) {
+      for (let i = 0; i < names.length; i++) {
+        if (names[i].trim()) push(label + " · " + names[i].trim(), hls);
+      }
+    } else if (hls) {
+      push(label, hls);
+    }
   }
 
   const media = html.match(
     /https?:\/\/[^"'\s<>\\]+(?:\.m3u8|\.mp4)[^"'\s<>\\]*/gi
   );
   if (media) {
+    const have = {};
+    for (let i = 0; i < out.length; i++) have[out[i].streamUrl] = true;
     let n = 0;
     for (let i = 0; i < media.length; i++) {
       let u = media[i].replace(/\\u0026/g, "&").replace(/\\/g, "");
       if (/\.(jpg|png|gif|webp)/i.test(u)) continue;
       if (/preview|thumb|poster|sprite/i.test(u)) continue;
+      if (have[u]) continue;
+      have[u] = true;
       n++;
-      push(n === 1 ? label : label + " · " + n, u);
+      push(label + (n > 1 ? " · " + n : ""), u);
     }
   }
 
@@ -363,35 +403,65 @@ function collectMediaFromHtml(html, label, referer) {
     }
   }
 
-  const hls = html.match(
-    /["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/i
-  );
-  if (hls) push(label, hls[1]);
-
   return out;
 }
 
 async function resolveEmbed(embedUrl, label) {
   if (!embedUrl || !isHttp(embedUrl)) return [];
+  if (/trailer/i.test(embedUrl)) return [];
   try {
     const html = await getText(
       await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
+        headers: {
+          Referer: baseUrl + "/",
+          Origin: baseUrl,
+          Accept: "text/html,*/*",
+        },
       })
     );
-    return collectMediaFromHtml(html, label || "Alloha", embedUrl);
+    return collectMediaFromHtml(html, label || "Stream", embedUrl);
   } catch (e) {
     return [];
   }
 }
 
-function voiceRank(name) {
-  if (/дубл|lost|кубик|гоблин|кравец|hdrezka|проф|сериб/i.test(name)) return 0;
-  if (/субтитр|оригинал/i.test(name)) return 2;
-  return 1;
+async function resolveCollaps(htmlPage, season, episode) {
+  const out = [];
+  const kp = extractKpId(htmlPage);
+  const ortId = (
+    (htmlPage || "").match(/ortified\.ws\/embed\/movie\/(\d+)/i) || []
+  )[1];
+
+  const urls = [];
+  if (ortId) {
+    let u = "https://api.ortified.ws/embed/movie/" + ortId;
+    if (season) {
+      u += "?season=" + season + "&episode=" + (episode || 1);
+    }
+    urls.push(u);
+    urls.push("https://api.delivembd.ws/embed/movie/" + ortId);
+  }
+  if (kp) {
+    urls.push("https://api.delivembd.ws/embed/kp/" + kp);
+    urls.push("https://api.ortified.ws/embed/kp/" + kp);
+  }
+
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      const html = await getText(
+        await soraFetch(urls[i], {
+          headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
+        })
+      );
+      const got = collectMediaFromHtml(html, "Collaps", urls[i]);
+      for (let j = 0; j < got.length; j++) out.push(got[j]);
+      if (out.length >= 2) break;
+    } catch (e) {}
+  }
+  return out;
 }
 
-/* ---- streams: ALLOHA ONLY ---- */
+/* ---- streams ---- */
 
 async function extractStreamUrl(url) {
   try {
@@ -401,22 +471,12 @@ async function extractStreamUrl(url) {
     const html = await getText(await soraFetch(pageUrl));
     const tokenMovie = extractAllohaTokenMovie(html);
 
-    if (!tokenMovie) {
-      return JSON.stringify({ streams: [], subtitles: "" });
-    }
-
-    const j = await fetchAlloha(tokenMovie);
-    const data = j && j.data ? j.data : null;
-    if (!data) {
-      return JSON.stringify({ streams: [], subtitles: "" });
-    }
-
     const streams = [];
     const seen = {};
 
     function add(item) {
       if (!item || !isHttp(item.streamUrl)) return;
-      const title = String(item.title || "Alloha").trim();
+      const title = String(item.title || "Stream").trim();
       const key = title + "||" + item.streamUrl.slice(0, 120);
       if (seen[key]) return;
       seen[key] = true;
@@ -431,35 +491,44 @@ async function extractStreamUrl(url) {
       });
     }
 
-    async function fromMap(map) {
-      const ids = Object.keys(map);
-      ids.sort(function (a, b) {
-        const an = map[a].translation || map[a].name || "";
-        const bn = map[b].translation || map[b].name || "";
-        return voiceRank(an) - voiceRank(bn);
-      });
+    // 1) ALLOHA first – separate stream per voice
+    if (tokenMovie) {
+      const j = await fetchAlloha(tokenMovie);
+      const data = j && j.data ? j.data : null;
 
-      for (let i = 0; i < ids.length; i++) {
-        const tr = map[ids[i]];
-        const voice = tr.translation || tr.name || "Alloha";
-        const label = voice + (tr.quality ? " · " + tr.quality : "");
-        if (!tr.iframe) continue;
+      async function fromMap(map) {
+        const ids = Object.keys(map);
+        ids.sort(function (a, b) {
+          const an = map[a].translation || map[a].name || "";
+          const bn = map[b].translation || map[b].name || "";
+          return voiceRank(an) - voiceRank(bn);
+        });
+        for (let i = 0; i < ids.length; i++) {
+          const tr = map[ids[i]];
+          const voice = tr.translation || tr.name || "Alloha";
+          const label = "Alloha · " + voice + (tr.quality ? " · " + tr.quality : "");
+          if (!tr.iframe) continue;
+          const more = await resolveEmbed(tr.iframe, label);
+          for (let k = 0; k < more.length; k++) add(more[k]);
+        }
+      }
 
-        const more = await resolveEmbed(tr.iframe, label);
-        for (let k = 0; k < more.length; k++) add(more[k]);
+      if (data) {
+        if (se.season && data.seasons && data.seasons[String(se.season)]) {
+          const season = data.seasons[String(se.season)];
+          const ep =
+            season.episodes && season.episodes[String(se.episode || 1)];
+          if (ep && ep.translation) await fromMap(ep.translation);
+        } else if (data.translation_iframe) {
+          await fromMap(data.translation_iframe);
+        }
       }
     }
 
-    // Series episode
-    if (se.season && data.seasons && data.seasons[String(se.season)]) {
-      const season = data.seasons[String(se.season)];
-      const ep = season.episodes && season.episodes[String(se.episode || 1)];
-      if (ep && ep.translation) {
-        await fromMap(ep.translation);
-      }
-    } else if (data.translation_iframe) {
-      // Movie
-      await fromMap(data.translation_iframe);
+    // 2) Collaps fallback if Alloha returned nothing (geo-block)
+    if (!streams.length) {
+      const collaps = await resolveCollaps(html, se.season, se.episode);
+      for (let i = 0; i < collaps.length; i++) add(collaps[i]);
     }
 
     streams.sort(function (a, b) {
