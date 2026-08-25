@@ -1,7 +1,7 @@
 /**
- * MioAnime – Sora / Luna (Thai anime, ซับไทย)
- * https://www.mioanime.net
- * v1.0.0
+ * MioAnime – Sora / Luna
+ * Thai sub (ซับไทย) – prefer Server 4 (IOS)
+ * v1.1.0
  */
 const baseUrl = "https://www.mioanime.net";
 
@@ -13,7 +13,7 @@ async function soraFetch(url, options) {
   const headers = Object.assign(
     {
       "User-Agent": UA,
-      "Accept-Language": "th-TH,th;q=0.9,en;q=0.5",
+      "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
       Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
       Referer: baseUrl + "/",
     },
@@ -62,81 +62,90 @@ function isHttp(u) {
   return /^https?:\/\//i.test(String(u || ""));
 }
 
+function norm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0e00-\u0e7f]+/g, " ")
+    .trim();
+}
+
 /* ---- search ---- */
 
 async function searchResults(keyword) {
   try {
     const q = String(keyword || "").trim();
     if (!q) return JSON.stringify([]);
+    const qn = norm(q);
 
-    const url = baseUrl + "/?s=" + encodeURIComponent(q);
-    const html = await getText(await soraFetch(url));
-    if (!html) return JSON.stringify([]);
+    const html = await getText(
+      await soraFetch(baseUrl + "/?s=" + encodeURIComponent(q))
+    );
+    if (!html || /just a moment|cf-browser|verify you are human/i.test(html)) {
+      return JSON.stringify([]);
+    }
 
     const results = [];
     const seen = {};
 
-    // links like /11/ or /130/
-    const re =
-      /href=["']((?:https?:\/\/[^"']+)?\/(\d+)\/)["'][^>]*>/gi;
+    // series cards: /123/
+    const re = /href=["']((?:https?:\/\/[^"']+)?\/(\d+)\/)["']/gi;
     let m;
-    const candidates = [];
     while ((m = re.exec(html))) {
       const href = absUrl(m[1]);
       const id = m[2];
       if (seen[href]) continue;
-      if (id.length > 6) continue; // skip play ids sometimes embedded
+      if (id.length > 5) continue;
       seen[href] = true;
-      candidates.push({ href: href, id: id, index: m.index });
-    }
 
-    for (let i = 0; i < candidates.length && results.length < 20; i++) {
-      const c = candidates[i];
-      const slice = html.slice(Math.max(0, c.index - 100), c.index + 500);
+      const slice = html.slice(Math.max(0, m.index - 80), m.index + 600);
       let title = "";
       const tm =
-        slice.match(/>([^<]{4,120}(?:ซับไทย|พากย์ไทย|จบ)[^<]*)</i) ||
-        slice.match(/alt=["']([^"']+)["']/i) ||
-        slice.match(/title=["']([^"']+)["']/i);
+        slice.match(
+          />([^<]{3,140}?(?:ซับไทย|พากย์ไทย|จบ|Season|ตอน)[^<]*)</i
+        ) ||
+        slice.match(/alt=["']([^"']{3,120})["']/i) ||
+        slice.match(/title=["']([^"']{3,120})["']/i);
       if (tm) title = tm[1].replace(/\s+/g, " ").trim();
-      if (!title) {
-        // look ahead for text after link
-        const after = html.slice(c.index, c.index + 800);
-        const tm2 = after.match(
-          /\/\d+\/["'][^>]*>[\s\S]{0,40}?([A-Za-z0-9][^<]{5,100})/
-        );
-        if (tm2) title = tm2[1].replace(/\s+/g, " ").trim();
-      }
       if (!title || title.length < 3) continue;
-      // filter nav junk
-      if (/หน้าแรก|login|category|page\//i.test(title)) continue;
+      if (/หน้าแรก|login|category|แฟนเพจ|ดูตอน/i.test(title)) continue;
+
+      // soft relevance: skip if query has latin letters and title has zero overlap
+      const tn = norm(title);
+      const qParts = qn.split(" ").filter(function (x) {
+        return x.length > 2;
+      });
+      if (qParts.length && /[a-z]/.test(qn)) {
+        let hit = 0;
+        for (let i = 0; i < qParts.length; i++) {
+          if (tn.indexOf(qParts[i]) !== -1) hit++;
+        }
+        if (hit === 0 && qParts.length >= 2) continue;
+      }
 
       let image = "";
       const im = slice.match(
-        /(?:src|data-src)=["']([^"']+(?:upload|\.jpg|\.png|\.webp)[^"']*)["']/i
+        /(?:src|data-src)=["']([^"']*\/upload\/[^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i
       );
       if (im) image = absUrl(im[1]);
 
-      results.push({ title: title, image: image, href: c.href });
+      results.push({ title: title, image: image, href: href });
+      if (results.length >= 20) break;
     }
 
-    // stronger: block by series card
-    if (results.length < 3) {
-      const re2 =
-        /href=["']((?:https?:\/\/[^"']+)?\/\d+\/)["'][\s\S]{0,300}?>([^<]{5,150})</gi;
-      seen = {};
-      while ((m = re2.exec(html))) {
-        const href = absUrl(m[1]);
-        if (seen[href]) continue;
-        seen[href] = true;
-        const title = m[2].replace(/\s+/g, " ").trim();
-        if (title.length < 4) continue;
-        results.push({ title: title, image: "", href: href });
-        if (results.length >= 20) break;
-      }
+    // fill missing posters from series page (top 8)
+    for (let i = 0; i < Math.min(results.length, 8); i++) {
+      if (results[i].image) continue;
+      try {
+        const ph = await getText(await soraFetch(results[i].href));
+        const og =
+          ph.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ||
+          ph.match(/content=["']([^"']+)["'][^>]*property=["']og:image["']/i) ||
+          ph.match(/\/upload\/[a-f0-9]+\.(?:jpg|png|webp)/i);
+        if (og) results[i].image = absUrl(og[1] || og[0]);
+      } catch (e) {}
     }
 
-    return JSON.stringify(results.slice(0, 20));
+    return JSON.stringify(results);
   } catch (e) {
     return JSON.stringify([]);
   }
@@ -144,14 +153,15 @@ async function searchResults(keyword) {
 
 async function extractDetails(url) {
   try {
-    const pageUrl = String(url).split("?")[0];
-    const html = await getText(await soraFetch(pageUrl));
+    const html = await getText(await soraFetch(String(url).split("?")[0]));
     let description = "N/A";
     const dm =
       html.match(/property=["']og:description["'][^>]*content=["']([^"']+)/i) ||
       html.match(/name=["']description["'][^>]*content=["']([^"']+)/i);
     if (dm) {
       description = String(dm[1])
+        .replace(/&ldquo;|&rdquo;|&quot;/g, '"')
+        .replace(/&amp;/g, "&")
         .replace(/<[^>]+>/g, " ")
         .replace(/\s+/g, " ")
         .trim()
@@ -170,15 +180,14 @@ async function extractDetails(url) {
 async function extractEpisodes(url) {
   try {
     const pageUrl = String(url).split("?")[0];
-    // already a play page?
     if (/\/play\//i.test(pageUrl)) {
-      const n = (pageUrl.match(/ตอนที่-(\d+)/) || pageUrl.match(/ep[_-]?(\d+)/i) || [])[1];
+      const n = (pageUrl.match(/ตอนที่-(\d+)/) || [])[1];
       return JSON.stringify([
         {
           href: pageUrl,
           number: n ? +n : 1,
           season: 1,
-          title: n ? "ตอนที่ " + n : "Episode 1",
+          title: n ? "ตอนที่ " + n : "EP 1",
         },
       ]);
     }
@@ -186,36 +195,29 @@ async function extractEpisodes(url) {
     const html = await getText(await soraFetch(pageUrl));
     const eps = [];
     const seen = {};
-
-    // /play/2845/...ตอนที่-1-...
     const re =
-      /href=["']((?:https?:\/\/[^"']+)?\/play\/(\d+)\/[^"']*ตอนที่-(\d+)[^"']*)["']/gi;
+      /href=["']((?:https?:\/\/[^"']+)?\/play\/(\d+)\/[^"']*?ตอนที่-(\d+)[^"']*)["']/gi;
     let m;
     while ((m = re.exec(html))) {
-      const href = absUrl(m[1]);
       const en = +m[3];
       if (seen[en]) continue;
       seen[en] = true;
       eps.push({
-        href: href,
+        href: absUrl(m[1]),
         number: en,
         season: 1,
         title: "ตอนที่ " + en,
       });
     }
-
-    // fallback without Thai text
     if (!eps.length) {
-      const re2 = /href=["']((?:https?:\/\/[^"']+)?\/play\/(\d+)\/[^"']+)["']/gi;
+      const re2 = /href=["']((?:https?:\/\/[^"']+)?\/play\/\d+\/[^"']+)["']/gi;
       let n = 0;
       while ((m = re2.exec(html))) {
         n++;
         const href = absUrl(m[1]);
-        if (seen[href]) continue;
-        seen[href] = true;
-        const en =
-          +(href.match(/ตอนที่-(\d+)/) || href.match(/ep[_-]?(\d+)/i) || [])[1] ||
-          n;
+        const en = +(href.match(/ตอนที่-(\d+)/) || [])[1] || n;
+        if (seen[en]) continue;
+        seen[en] = true;
         eps.push({
           href: href,
           number: en,
@@ -224,67 +226,34 @@ async function extractEpisodes(url) {
         });
       }
     }
-
     eps.sort(function (a, b) {
       return a.number - b.number;
     });
     if (!eps.length) {
-      eps.push({
-        href: pageUrl,
-        number: 1,
-        season: 1,
-        title: "Episode 1",
-      });
+      eps.push({ href: pageUrl, number: 1, season: 1, title: "EP 1" });
     }
     return JSON.stringify(eps);
   } catch (e) {
     return JSON.stringify([
-      {
-        href: String(url).split("?")[0],
-        number: 1,
-        season: 1,
-        title: "Episode 1",
-      },
+      { href: String(url).split("?")[0], number: 1, season: 1, title: "EP 1" },
     ]);
   }
 }
 
-/* ---- streams ---- */
-
-function extractHashes(html) {
-  const hashes = [];
-  const re =
-    /(?:player_new|playerv2|player|all_in_one)\/?\?hash=([A-Za-z0-9+/=]+)/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    if (hashes.indexOf(m[1]) === -1) hashes.push(m[1]);
-  }
-  // mplayer token
-  const re2 =
-    /mplayer\.click\/[^"'?\s]+[?&]token=([A-Za-z0-9+/=]+)/gi;
-  while ((m = re2.exec(html))) {
-    if (hashes.indexOf(m[1]) === -1) hashes.push(m[1]);
-  }
-  // data-hash / hash: "
-  const re3 = /(?:data-hash|hash)\s*[=:]\s*["']([A-Za-z0-9+/=]{20,})["']/gi;
-  while ((m = re3.exec(html))) {
-    if (hashes.indexOf(m[1]) === -1) hashes.push(m[1]);
-  }
-  return hashes;
-}
+/* ---- streams: prefer Server 4 (IOS) ---- */
 
 function collectMedia(html) {
   const out = [];
-  const patterns = [
+  const regs = [
     /["']file["']\s*:\s*["'](https?:\/\/[^"']+)["']/gi,
     /["']src["']\s*:\s*["'](https?:\/\/[^"']+\.(?:m3u8|mp4)[^"']*)["']/gi,
+    /sources?\s*:\s*\[[^\]]*file\s*:\s*["'](https?:\/\/[^"']+)["']/gi,
     /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi,
     /(https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*)/gi,
-    /sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)["']/gi,
   ];
-  for (let p = 0; p < patterns.length; p++) {
+  for (let r = 0; r < regs.length; r++) {
     let m;
-    const re = patterns[p];
+    const re = regs[r];
     re.lastIndex = 0;
     while ((m = re.exec(html))) {
       let u = m[1].replace(/[),;]+$/, "");
@@ -294,13 +263,50 @@ function collectMedia(html) {
   return out;
 }
 
-async function resolvePlayer(hash, referer) {
+function extractServerEntries(html) {
+  // onclick / data for Server N and IOS
+  const list = [];
+  const re =
+    /(Server\s*4\s*\(?\s*IOS\s*\)?|Server\s*[1-4]|สำรอง|Main\s*Player)[\s\S]{0,200}?(?:hash|token|src|url|file)\s*[=:]\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    list.push({ label: m[1].replace(/\s+/g, " ").trim(), value: m[2] });
+  }
+  // generic hashes
+  const re2 =
+    /(?:player_new|playerv2|player)\/?\?hash=([A-Za-z0-9+/=]+)/gi;
+  while ((m = re2.exec(html))) {
+    list.push({ label: "hash", value: m[1] });
+  }
+  const re3 =
+    /mplayer\.click\/[^"'?\s]*[?&]token=([A-Za-z0-9+/=]+)/gi;
+  while ((m = re3.exec(html))) {
+    list.push({ label: "mplayer", value: m[1] });
+  }
+  const re4 = /(?:data-hash|hash)\s*[=:]\s*["']([A-Za-z0-9+/=]{16,})["']/gi;
+  while ((m = re4.exec(html))) {
+    list.push({ label: "data-hash", value: m[1] });
+  }
+  return list;
+}
+
+function preferIOS(entries) {
+  const ios = [];
+  const rest = [];
+  for (let i = 0; i < entries.length; i++) {
+    if (/ios|server\s*4/i.test(entries[i].label)) ios.push(entries[i]);
+    else rest.push(entries[i]);
+  }
+  return ios.concat(rest);
+}
+
+async function resolveHash(hash, referer, label) {
   const streams = [];
   const endpoints = [
-    baseUrl + "/player/?hash=" + hash,
-    baseUrl + "/player_new/?hash=" + hash,
-    baseUrl + "/playerv2/?hash=" + hash,
-    "https://www.mplayer.click/driveV4/?token=" + hash,
+    baseUrl + "/player/?hash=" + encodeURIComponent(hash),
+    baseUrl + "/player_new/?hash=" + encodeURIComponent(hash),
+    baseUrl + "/playerv2/?hash=" + encodeURIComponent(hash),
+    "https://www.mplayer.click/driveV4/?token=" + encodeURIComponent(hash),
   ];
   for (let i = 0; i < endpoints.length; i++) {
     try {
@@ -309,17 +315,19 @@ async function resolvePlayer(hash, referer) {
           headers: {
             Referer: referer || baseUrl + "/",
             Accept: "*/*",
+            Origin: baseUrl,
           },
         })
       );
-      if (!html || /Access Denied|404/i.test(html.slice(0, 200))) continue;
+      if (!html || /access denied|just a moment/i.test(html.slice(0, 300)))
+        continue;
       const media = collectMedia(html);
       for (let j = 0; j < media.length; j++) {
         streams.push({
           title:
-            (media[j].indexOf("m3u8") !== -1 ? "HLS" : "MP4") +
-            " · Player " +
-            (i + 1),
+            (label || "Server") +
+            " · " +
+            (media[j].indexOf("m3u8") !== -1 ? "HLS" : "MP4"),
           streamUrl: media[j],
           headers: {
             "User-Agent": UA,
@@ -336,13 +344,11 @@ async function resolvePlayer(hash, referer) {
 async function extractStreamUrl(url) {
   try {
     let pageUrl = String(url).split("?")[0];
-    // if series page, need first episode – caller should pass play URL
     let html = await getText(
       await soraFetch(pageUrl, { headers: { Referer: baseUrl + "/" } })
     );
     if (!html) return JSON.stringify({ streams: [], subtitles: "" });
 
-    // if series list without play, pick first play link
     if (!/\/play\//i.test(pageUrl)) {
       const em = html.match(
         /href=["']((?:https?:\/\/[^"']+)?\/play\/\d+\/[^"']+)["']/i
@@ -357,25 +363,37 @@ async function extractStreamUrl(url) {
 
     let streams = [];
 
-    // direct media on page
+    // direct
     const direct = collectMedia(html);
     for (let i = 0; i < direct.length; i++) {
       streams.push({
-        title: direct[i].indexOf("m3u8") !== -1 ? "HLS" : "MP4",
+        title: "Direct",
         streamUrl: direct[i],
         headers: { "User-Agent": UA, Referer: pageUrl },
       });
     }
 
-    // hash → player endpoints
-    const hashes = extractHashes(html);
-    for (let i = 0; i < Math.min(hashes.length, 3); i++) {
-      const more = await resolvePlayer(hashes[i], pageUrl);
+    // servers – IOS first
+    const entries = preferIOS(extractServerEntries(html));
+    const tried = {};
+    for (let i = 0; i < entries.length && streams.length < 8; i++) {
+      const e = entries[i];
+      // full URL already?
+      if (isHttp(e.value) && /\.(m3u8|mp4)/i.test(e.value)) {
+        streams.push({
+          title: e.label || "Server",
+          streamUrl: e.value,
+          headers: { "User-Agent": UA, Referer: pageUrl },
+        });
+        continue;
+      }
+      if (tried[e.value]) continue;
+      tried[e.value] = true;
+      const more = await resolveHash(e.value, pageUrl, e.label);
       for (let j = 0; j < more.length; j++) streams.push(more[j]);
-      if (streams.length) break;
     }
 
-    // iframes
+    // iframes last
     if (!streams.length) {
       const ifr = /<iframe[^>]+src=["']([^"']+)["']/gi;
       let m;
