@@ -1,8 +1,8 @@
 /**
  * Lift (liftw.ws) – Sora / Luna
  * API: api.liftw.ws · embed.liftw.ws (Collaps HLS)
- * Multi-voice picker like GidOnline
- * v1.0.0
+ * Voice picker only · master HLS = highest quality + multi-audio
+ * v1.0.1
  */
 const siteUrl = "https://liftw.ws";
 const apiBase = "https://api.liftw.ws";
@@ -82,7 +82,8 @@ function cleanQuery(keyword) {
 function parseHref(url) {
   const s = String(url || "");
   let id = "";
-  let m = s.match(/[?&#]id=(\d+)/i) || s.match(/\/(?:movie|info|watch)\/(\d+)/i);
+  const m =
+    s.match(/[?&#]id=(\d+)/i) || s.match(/\/(?:movie|info|watch)\/(\d+)/i);
   if (m) id = m[1];
   const se = s.match(/[?&#]s=(\d+)/i);
   const ee = s.match(/[?&#]e=(\d+)/i);
@@ -109,7 +110,10 @@ function isEnglish(name) {
 function isRussianVoice(name) {
   const n = String(name || "");
   if (!n.trim() || isEnglish(n)) return false;
-  if (/укр|ukr|україн|багатоголосий/i.test(n) && !/рус|дубл|hdrezka|lost/i.test(n))
+  if (
+    /укр|ukr|україн|багатоголосий/i.test(n) &&
+    !/рус|дубл|hdrezka|lost/i.test(n)
+  )
     return false;
   if (/субтитр|subtitle|^sub\b/i.test(n) && !/рус/i.test(n)) return false;
   return true;
@@ -124,26 +128,6 @@ function voiceRank(name) {
   return 4;
 }
 
-function heightToLabel(h) {
-  h = parseInt(h, 10) || 0;
-  if (h >= 1000) return "1080p";
-  if (h >= 700) return "720p";
-  if (h >= 460) return "480p";
-  return "";
-}
-
-function absFrom(u, base) {
-  if (!u) return "";
-  u = String(u).replace(/&amp;/g, "&").replace(/\\u0026/g, "&").trim();
-  if (u.indexOf("//") === 0) return "https:" + u;
-  if (isHttp(u)) return u;
-  if (u.charAt(0) === "/") {
-    const m = String(base).match(/^(https?:\/\/[^/]+)/i);
-    return (m ? m[1] : "") + u;
-  }
-  return String(base).replace(/\/[^/]*$/, "/") + u.replace(/^\.\//, "");
-}
-
 function unescapeJs(s) {
   return String(s || "")
     .replace(/\\u0026/g, "&")
@@ -156,10 +140,7 @@ function parseEmbed(html) {
   const out = { hls: "", names: [], seasons: [] };
   if (!html) return out;
 
-  // movie: source.hls + audio.names
-  let m = html.match(
-    /hls\s*:\s*["'](https?:\/\/[^"']+)["']/i
-  );
+  let m = html.match(/hls\s*:\s*["'](https?:\/\/[^"']+)["']/i);
   if (m) out.hls = unescapeJs(m[1]);
 
   m = html.match(/audio\s*:\s*\{[^}]*names\s*:\s*\[([^\]]*)\]/i);
@@ -172,7 +153,6 @@ function parseEmbed(html) {
     }
   }
 
-  // series: seasons with episode hls + audio.names
   if (/"season"\s*:/.test(html) || /seasons\s*:/.test(html)) {
     const chunks = html.split(/\{"season"\s*:/);
     for (let c = 1; c < chunks.length; c++) {
@@ -207,14 +187,19 @@ function parseEmbed(html) {
   return out;
 }
 
-async function expandHls(masterUrl) {
-  const out = [];
-  if (!isHttp(masterUrl)) return out;
-  const master = forceHttps(masterUrl);
-  out.push({ quality: "Auto", url: master });
+/**
+ * Prefer highest video quality while keeping master if multi-audio.
+ * Returns one URL: highest variant if single-audio, else master (audio safe).
+ */
+async function resolveBestHls(masterUrl, multiAudio) {
+  masterUrl = forceHttps(masterUrl);
+  if (!isHttp(masterUrl)) return "";
+  // Multi audio tracks live on the master — must keep it
+  if (multiAudio) return masterUrl;
+
   try {
     const text = await getText(
-      await soraFetch(master, {
+      await soraFetch(masterUrl, {
         headers: {
           "User-Agent": UA,
           Accept: "application/vnd.apple.mpegurl,*/*",
@@ -222,22 +207,46 @@ async function expandHls(masterUrl) {
         },
       })
     );
-    if (!text || text.indexOf("#EXT") !== 0) return out;
+    if (!text || text.indexOf("#EXT") !== 0) return masterUrl;
+
     const lines = text.split(/\r?\n/);
-    const found = {};
+    let bestH = 0;
+    let bestUrl = "";
+    let bestBw = 0;
+
     for (let i = 0; i < lines.length; i++) {
       if (!/^#EXT-X-STREAM-INF:/i.test(lines[i])) continue;
       if (/failover/i.test(lines[i])) continue;
       const resM = lines[i].match(/RESOLUTION=\d+x(\d+)/i);
-      const q = heightToLabel(resM ? resM[1] : 0);
-      if (q) found[q] = true;
+      const bwM = lines[i].match(/BANDWIDTH=(\d+)/i);
+      const h = resM ? parseInt(resM[1], 10) : 0;
+      const bw = bwM ? parseInt(bwM[1], 10) : 0;
+      let next = "";
+      for (let j = i + 1; j < lines.length; j++) {
+        if (lines[j] && lines[j].charAt(0) !== "#") {
+          next = lines[j].trim();
+          break;
+        }
+      }
+      if (!next) continue;
+      if (h > bestH || (h === bestH && bw > bestBw)) {
+        bestH = h;
+        bestBw = bw;
+        bestUrl = next;
+      }
     }
-    // Keep master URL so multi-audio tracks still work
-    ["1080p", "720p", "480p"].forEach(function (q) {
-      if (found[q]) out.push({ quality: q, url: master });
-    });
+
+    if (bestUrl) {
+      if (bestUrl.indexOf("http") === 0) return forceHttps(bestUrl);
+      const base = masterUrl.replace(/\/[^/]*$/, "/");
+      if (bestUrl.charAt(0) === "/") {
+        const host = masterUrl.match(/^(https?:\/\/[^/]+)/i);
+        return host ? host[1] + bestUrl : forceHttps(bestUrl);
+      }
+      return forceHttps(base + bestUrl.replace(/^\.\//, ""));
+    }
   } catch (e) {}
-  return out;
+  return masterUrl;
 }
 
 /* ===================== search ===================== */
@@ -268,7 +277,6 @@ async function searchResults(keyword) {
         title = ru + " / " + en;
       }
       if (it.year) title += " (" + it.year + ")";
-      // type 3 = series (and sometimes others with serial_status)
       const isSeries =
         it.type === 3 ||
         (it.serial_status && String(it.serial_status).length > 0);
@@ -342,7 +350,6 @@ async function extractEpisodes(url) {
 
     const eps = [];
     const episodes = json.episodes;
-    // episodes: { "1": ["1","2",...], "2": [...] }
     if (episodes && typeof episodes === "object") {
       const seasons = Object.keys(episodes).sort(function (a, b) {
         return parseInt(a, 10) - parseInt(b, 10);
@@ -350,7 +357,6 @@ async function extractEpisodes(url) {
       for (let s = 0; s < seasons.length; s++) {
         const sid = parseInt(seasons[s], 10) || s + 1;
         const list = episodes[seasons[s]] || [];
-        // normalize episode numbers
         const nums = list
           .map(function (x) {
             return parseInt(x, 10);
@@ -361,7 +367,6 @@ async function extractEpisodes(url) {
           .sort(function (a, b) {
             return a - b;
           });
-        // unique
         const seen = {};
         for (let e = 0; e < nums.length; e++) {
           if (seen[nums[e]]) continue;
@@ -409,7 +414,6 @@ async function extractStreamUrl(url) {
     }
 
     let embedUrl = info.iframe_uri;
-    // series: request specific episode
     if (info.episodes || info.type === 3) {
       const sep = embedUrl.indexOf("?") >= 0 ? "&" : "?";
       embedUrl +=
@@ -434,7 +438,6 @@ async function extractStreamUrl(url) {
     let hls = emb.hls;
     let names = emb.names || [];
 
-    // series: pick matching episode from seasons if present
     if (emb.seasons && emb.seasons.length) {
       const seasonNum = p.season || 1;
       const episodeNum = p.episode || 1;
@@ -450,7 +453,6 @@ async function extractStreamUrl(url) {
         }
         break;
       }
-      // fallback first episode of season
       if ((!hls || !names.length) && emb.seasons[0].episodes[0]) {
         const ep0 = emb.seasons[0].episodes[0];
         hls = hls || ep0.hls;
@@ -469,42 +471,43 @@ async function extractStreamUrl(url) {
       return voiceRank(a) - voiceRank(b);
     });
 
-    const quals = await expandHls(hls);
+    // Multi-audio → keep master so Luna can play with sound + ABR max quality
+    // Single track → resolve highest resolution variant
+    const multiAudio = voices.length > 1 || names.length > 1;
+    const playUrl = await resolveBestHls(hls, multiAudio);
+
+    if (!playUrl || !isHttp(playUrl)) {
+      return JSON.stringify({ streams: [], subtitles: "" });
+    }
+
+    const headers = {
+      "User-Agent": UA,
+      Referer: "https://embed.liftw.ws/",
+      Origin: "https://embed.liftw.ws",
+    };
+
     const streams = [];
     const seen = {};
 
     for (let v = 0; v < voices.length; v++) {
-      for (let q = 0; q < quals.length; q++) {
-        const title =
-          voices[v] +
-          (quals[q].quality !== "Auto" ? " · " + quals[q].quality : "");
-        if (seen[title]) continue;
-        seen[title] = true;
-        streams.push({
-          title: title,
-          name: title,
-          streamUrl: forceHttps(quals[q].url),
-          headers: {
-            "User-Agent": UA,
-            Referer: "https://embed.liftw.ws/",
-          },
-        });
-      }
+      const title = voices[v];
+      if (seen[title]) continue;
+      seen[title] = true;
+      streams.push({
+        title: title,
+        name: title,
+        streamUrl: playUrl,
+        headers: headers,
+      });
     }
 
+    // Prefer HDRezka / Dub first so auto-pick has Russian + high quality
     streams.sort(function (a, b) {
-      const ra = voiceRank(a.title);
-      const rb = voiceRank(b.title);
-      if (ra !== rb) return ra - rb;
-      const order = { "1080p": 0, "720p": 1, "480p": 2, Auto: 3 };
-      const qa = (a.title.match(/(1080|720|480)p|Auto/) || ["Auto"])[0];
-      const qb = (b.title.match(/(1080|720|480)p|Auto/) || ["Auto"])[0];
-      return (order[qa] != null ? order[qa] : 9) -
-        (order[qb] != null ? order[qb] : 9);
+      return voiceRank(a.title) - voiceRank(b.title);
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 20),
+      streams: streams.slice(0, 12),
       subtitles: "",
     });
   } catch (e) {
