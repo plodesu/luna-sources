@@ -1,13 +1,11 @@
 /**
  * Kinogo.sh – Sora / Luna
- * Russian audio only · expand HLS audio tracks · no Eng.Original
- * v1.8.0
+ * Fast · Russian dub names only · full video (no audio-only)
+ * v1.9.0
  */
 const baseUrl = "https://kinogo.sh";
-
 const ALLOHA_API = "https://api.apbugall.org/";
 const ALLOHA_TOKEN = "60b252fdcd2f53e8492fca2f44e8c5";
-
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
@@ -16,7 +14,7 @@ async function soraFetch(url, options) {
   const headers = Object.assign(
     {
       "User-Agent": UA,
-      "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
+      "Accept-Language": "ru-RU,ru;q=0.9",
       Accept: "text/html,application/json,*/*",
       Referer: baseUrl + "/",
     },
@@ -74,20 +72,6 @@ function absUrl(u) {
   return u;
 }
 
-function absFromBase(u, base) {
-  if (!u) return "";
-  u = String(u).replace(/&amp;/g, "&").trim();
-  if (isHttp(u)) return u;
-  if (u.indexOf("//") === 0) return "https:" + u;
-  if (u.charAt(0) === "/") {
-    const m = String(base || "").match(/^(https?:\/\/[^/]+)/i);
-    return m ? m[1] + u : u;
-  }
-  // relative to playlist directory
-  const dir = String(base || "").replace(/[^/]+$/, "");
-  return dir + u;
-}
-
 function cleanQuery(keyword) {
   return String(keyword || "")
     .replace(/\bS\d{1,2}\s*E\d{1,3}\b/gi, " ")
@@ -131,39 +115,34 @@ function parseSE(url) {
   return { season: s ? +s : null, episode: e ? +e : null };
 }
 
-function isEnglishOrOriginal(name) {
+/** Block English / original / def0 / numbered junk */
+function isBadVoice(name) {
   const n = String(name || "").toLowerCase();
-  return /eng\.?\s*original|eng\.?original|original|оригинал|english|английск|\beng\b|\ben\b|eng dub|eng sub/i.test(
+  return /eng\.?\s*original|eng\.?original|original|оригинал|english|английск|\beng\b|def\d*|rus\d+|stream\s*\d+/i.test(
     n
   );
 }
 
 function isRussianVoice(name) {
   const n = String(name || "").toLowerCase();
-  if (!n.trim()) return false;
-  if (isEnglishOrOriginal(n)) return false;
-  if (/субтитр|subtitle|subs only|только субтитр|raw\b/i.test(n)) return false;
-  if (/^украинск|українськ|ukrainian/i.test(n) && !/дубл|рус/i.test(n))
-    return false;
-
+  if (!n.trim() || isBadVoice(n)) return false;
+  if (/субтитр|subtitle|raw\b/i.test(n)) return false;
   if (
-    /дубл|русск|lost\s*film|lostfilm|кубик|гоблин|кравец|сериб|гаврилов|живов|hdrezka|winmedia|tvshows|dragon|money|студи|профессион|многоголос|закадр|плее?р|alloha|collaps/i.test(
+    /дубл|русск|lostfilm|lost\s*film|кубик|гоблин|кравец|сериб|гаврилов|живов|hdrezka|winmedia|tvshows|dragon|money|студи|профессион|многоголос|закадр/i.test(
       n
     )
   ) {
     return true;
   }
-  if (/[а-яё]/i.test(n)) return true;
-  return false;
+  return /[а-яё]/i.test(n);
 }
 
 function voiceRank(name) {
-  if (/дубл|lost|кубик|гоблин|кравец|hdrezka|winmedia|tvshows|dragon|проф/i.test(name))
-    return 0;
-  return 1;
+  if (/дубл/i.test(name)) return 0;
+  if (/hdrezka|winmedia|tvshows|dragon|lost|кубик|гоблин/i.test(name))
+    return 1;
+  return 2;
 }
-
-/* ---- search / details / episodes (unchanged structure) ---- */
 
 async function searchResults(keyword) {
   try {
@@ -175,7 +154,6 @@ async function searchResults(keyword) {
     const results = [];
     const seen = {};
     for (let v = 0; v < variants.length; v++) {
-      const q = variants[v];
       const html = await getText(
         await soraFetch(baseUrl + "/index.php?do=search", {
           method: "POST",
@@ -186,7 +164,8 @@ async function searchResults(keyword) {
             Referer: baseUrl + "/",
           },
           body:
-            "do=search&subaction=search&story=" + encodeURIComponent(q),
+            "do=search&subaction=search&story=" +
+            encodeURIComponent(variants[v]),
         })
       );
       if (!html || html.length < 500) continue;
@@ -258,24 +237,22 @@ function extractAllohaTokenMovie(html) {
   return m ? m[1] : "";
 }
 
-function extractKpId(html) {
-  const m =
-    (html || "").match(/kinopoisk\.ru\/(?:film|series)\/(\d+)/i) ||
-    (html || "").match(/kp[_-]?id["']?\s*[:=]\s*["']?(\d+)/i) ||
-    (html || "").match(/data-kp["']?\s*[:=]\s*["']?(\d+)/i);
+function extractOrtifiedId(html) {
+  const m = (html || "").match(/ortified\.ws\/embed\/movie\/(\d+)/i);
   return m ? m[1] : "";
 }
 
 async function fetchAlloha(tokenMovie) {
   if (!tokenMovie) return null;
-  const url =
-    ALLOHA_API +
-    "?token=" +
-    encodeURIComponent(ALLOHA_TOKEN) +
-    "&token_movie=" +
-    encodeURIComponent(tokenMovie);
   return await getJson(
-    await soraFetch(url, { headers: { Referer: baseUrl + "/" } })
+    await soraFetch(
+      ALLOHA_API +
+        "?token=" +
+        encodeURIComponent(ALLOHA_TOKEN) +
+        "&token_movie=" +
+        encodeURIComponent(tokenMovie),
+      { headers: { Referer: baseUrl + "/" } }
+    )
   );
 }
 
@@ -292,8 +269,7 @@ async function extractEpisodes(url) {
         const seasons = Object.keys(data.seasons);
         for (let i = 0; i < seasons.length; i++) {
           const sn = +seasons[i];
-          const season = data.seasons[seasons[i]];
-          const episodes = season.episodes || {};
+          const episodes = data.seasons[seasons[i]].episodes || {};
           const ek = Object.keys(episodes);
           for (let j = 0; j < ek.length; j++) {
             const en = +ek[j];
@@ -332,218 +308,78 @@ async function extractEpisodes(url) {
   }
 }
 
-/**
- * Fetch master/media playlist and extract Russian AUDIO tracks with URI.
- * If tracks are muxed (no URI), returns [] — cannot force RU in Luna.
- */
-async function expandRussianAudioFromHls(hlsUrl, prefix, headers) {
-  const out = [];
-  if (!isHttp(hlsUrl)) return out;
-  try {
-    const text = await getText(
-      await soraFetch(hlsUrl, {
-        headers: Object.assign(
-          {
-            "User-Agent": UA,
-            Accept: "application/vnd.apple.mpegurl,*/*",
-          },
-          headers || {}
-        ),
+/** Parse Collaps makePlayer → master HLS + voice names (no extra fetches) */
+function parseCollapsMakePlayer(html) {
+  const result = { hls: "", names: [] };
+  if (!html || /недоступен в вашем регионе/i.test(html)) return result;
+  const m = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
+  if (!m) {
+    const hls = (html.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i) ||
+      [])[0];
+    if (hls) result.hls = hls.replace(/&amp;/g, "&");
+    return result;
+  }
+  const body = m[1];
+  const hls = (body.match(/["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/) ||
+    [])[1];
+  if (hls) result.hls = hls;
+  const namesBlock =
+    (body.match(/["']?names["']?\s*:\s*\[([^\]]*)\]/) || [])[1] || "";
+  const nm = namesBlock.match(/["']([^"']+)["']/g);
+  if (nm) {
+    for (let i = 0; i < nm.length; i++) {
+      result.names.push(nm[i].replace(/["']/g, "").trim());
+    }
+  }
+  return result;
+}
+
+async function loadCollaps(htmlPage, season, episode) {
+  const ortId = extractOrtifiedId(htmlPage);
+  if (!ortId) return { hls: "", names: [] };
+
+  let url = "https://api.ortified.ws/embed/movie/" + ortId;
+  if (season) {
+    url += "?season=" + season + "&episode=" + (episode || 1);
+  }
+
+  // one request only (fast)
+  let html = await getText(
+    await soraFetch(url, {
+      headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
+    })
+  );
+  let parsed = parseCollapsMakePlayer(html);
+  if (!parsed.hls) {
+    html = await getText(
+      await soraFetch("https://api.delivembd.ws/embed/movie/" + ortId, {
+        headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
       })
     );
-    if (!text || text.indexOf("#EXT") !== 0) return out;
-
-    const lines = text.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (!/^#EXT-X-MEDIA:/i.test(line)) continue;
-      if (!/TYPE=AUDIO/i.test(line)) continue;
-
-      const nameM = line.match(/NAME="([^"]+)"/i);
-      const langM = line.match(/LANGUAGE="([^"]+)"/i);
-      const uriM = line.match(/URI="([^"]+)"/i);
-      const name = nameM ? nameM[1] : "";
-      const lang = langM ? langM[1].toLowerCase() : "";
-
-      if (isEnglishOrOriginal(name) || lang === "en" || lang === "eng") {
-        continue;
-      }
-      const isRuLang = /^(ru|rus|rusian|russian)$/i.test(lang);
-      if (!isRuLang && !isRussianVoice(name)) continue;
-      if (!uriM) continue; // muxed into video — Luna can't switch
-
-      const audioUrl = absFromBase(uriM[1], hlsUrl);
-      if (!isHttp(audioUrl)) continue;
-
-      // Prefer full media playlist if it's still a playlist pointing at video+audio;
-      // many CDNs use URI as alternate audio only — then we still need video HLS.
-      // Strategy: keep master HLS but only expose RU-labeled entries when URI exists
-      // as a complete variant is rare; if URI ends with m3u8 use it as stream when
-      // it looks like a full playlist (has EXT-X-STREAM-INF or EXTINF).
-      out.push({
-        title: (prefix ? prefix + " · " : "") + (name || "Русский"),
-        streamUrl: hlsUrl, // video master
-        // store preferred audio name in title; player may still default eng
-        // if no separate full stream — try audio URI if it contains video
-        _audioUri: audioUrl,
-        headers: headers,
-      });
-    }
-
-    // If we found RU audio URIs that are full playlists, prefer those as streamUrl
-    for (let i = 0; i < out.length; i++) {
-      const aurl = out[i]._audioUri;
-      if (!aurl) continue;
-      try {
-        const at = await getText(
-          await soraFetch(aurl, {
-            headers: Object.assign(
-              { "User-Agent": UA, Accept: "*/*" },
-              headers || {}
-            ),
-          })
-        );
-        if (at && (/#EXT-X-STREAM-INF|#EXTINF/i.test(at) && /#EXTM3U/i.test(at))) {
-          // if playlist has video segments or stream-inf, use it
-          if (
-            /#EXT-X-STREAM-INF|#EXT-X-MAP|TYPE=VIDEO|\.ts/i.test(at) ||
-            at.split("\n").length > 5
-          ) {
-            out[i].streamUrl = aurl;
-          }
-        }
-      } catch (e) {}
-      delete out[i]._audioUri;
-    }
-  } catch (e) {}
-  return out;
+    parsed = parseCollapsMakePlayer(html);
+  }
+  return parsed;
 }
 
-function collectMediaFromHtml(html, label, referer) {
+async function resolveAllohaEmbed(iframe, label) {
   const out = [];
-  if (!html) return out;
-  if (/недоступен в вашем регионе|region not available/i.test(html)) {
-    return out;
-  }
-  const headers = {
-    "User-Agent": UA,
-    Referer: referer || baseUrl + "/",
-  };
-
-  function push(title, url) {
-    if (!isHttp(url)) return;
-    if (isEnglishOrOriginal(title)) return;
-    if (!isRussianVoice(title) && !/collaps|alloha|stream|плеер/i.test(title))
-      return;
-    url = url.replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
-    out.push({ title: title, streamUrl: url, headers: headers, _expand: true });
-  }
-
-  const mp = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
-  if (mp) {
-    const body = mp[1];
-    const hls = (body.match(/["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/) ||
-      [])[1];
-    const namesBlock =
-      (body.match(/["']?names["']?\s*:\s*\[([^\]]*)\]/) || [])[1] || "";
-    const names = [];
-    const nm = namesBlock.match(/["']([^"']+)["']/g);
-    if (nm) {
-      for (let i = 0; i < nm.length; i++) {
-        names.push(nm[i].replace(/["']/g, ""));
-      }
-    }
-    if (hls) {
-      // Only Russian names — do NOT add Eng.Original
-      let added = 0;
-      for (let i = 0; i < names.length; i++) {
-        const n = names[i].trim();
-        if (!n || isEnglishOrOriginal(n) || !isRussianVoice(n)) continue;
-        push(label + " · " + n, hls);
-        added++;
-      }
-      // if no named RU tracks, still queue HLS for expandRussianAudioFromHls
-      if (!added) {
-        out.push({
-          title: label + " · Русский",
-          streamUrl: hls,
-          headers: headers,
-          _expand: true,
-        });
-      }
-    }
-  }
-
-  const media = html.match(
-    /https?:\/\/[^"'\s<>\\]+(?:\.m3u8|\.mp4)[^"'\s<>\\]*/gi
-  );
-  if (media) {
-    const have = {};
-    for (let i = 0; i < out.length; i++) have[out[i].streamUrl] = true;
-    for (let i = 0; i < media.length; i++) {
-      let u = media[i].replace(/\\u0026/g, "&").replace(/\\/g, "");
-      if (/\.(jpg|png|gif|webp)/i.test(u)) continue;
-      if (/preview|thumb|poster|sprite/i.test(u)) continue;
-      if (have[u]) continue;
-      have[u] = true;
-      if (!isRussianVoice(label) && !/collaps|alloha/i.test(label)) continue;
-      push(label, u);
-    }
-  }
-
-  return out;
-}
-
-async function resolveEmbed(embedUrl, label) {
-  if (!embedUrl || !isHttp(embedUrl)) return [];
-  if (/trailer/i.test(embedUrl)) return [];
+  if (!iframe || !isHttp(iframe)) return out;
   try {
     const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: {
-          Referer: baseUrl + "/",
-          Origin: baseUrl,
-          Accept: "text/html,*/*",
-        },
+      await soraFetch(iframe, {
+        headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
       })
     );
-    return collectMediaFromHtml(html, label || "Stream", embedUrl);
-  } catch (e) {
-    return [];
-  }
-}
-
-async function resolveCollaps(htmlPage, season, episode) {
-  const out = [];
-  const kp = extractKpId(htmlPage);
-  const ortId = (
-    (htmlPage || "").match(/ortified\.ws\/embed\/movie\/(\d+)/i) || []
-  )[1];
-  const urls = [];
-  if (ortId) {
-    let u = "https://api.ortified.ws/embed/movie/" + ortId;
-    if (season) {
-      u += "?season=" + season + "&episode=" + (episode || 1);
+    if (!html || /недоступен в вашем регионе/i.test(html)) return out;
+    const hls = (html.match(/https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/i) || [])[0];
+    if (hls) {
+      out.push({
+        title: label,
+        streamUrl: hls.replace(/&amp;/g, "&"),
+        headers: { "User-Agent": UA, Referer: iframe },
+      });
     }
-    urls.push(u);
-    urls.push("https://api.delivembd.ws/embed/movie/" + ortId);
-  }
-  if (kp) {
-    urls.push("https://api.delivembd.ws/embed/kp/" + kp);
-    urls.push("https://api.ortified.ws/embed/kp/" + kp);
-  }
-  for (let i = 0; i < urls.length; i++) {
-    try {
-      const html = await getText(
-        await soraFetch(urls[i], {
-          headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
-        })
-      );
-      const got = collectMediaFromHtml(html, "Collaps", urls[i]);
-      for (let j = 0; j < got.length; j++) out.push(got[j]);
-      if (out.length) break;
-    } catch (e) {}
-  }
+  } catch (e) {}
   return out;
 }
 
@@ -556,89 +392,84 @@ async function extractStreamUrl(url) {
     const tokenMovie = extractAllohaTokenMovie(html);
 
     const streams = [];
-    const seen = {};
+    const seenName = {};
 
-    function add(item) {
-      if (!item || !isHttp(item.streamUrl)) return;
-      const title = String(item.title || "Stream").trim();
-      if (isEnglishOrOriginal(title)) return;
-      const key = title + "||" + item.streamUrl.slice(0, 140);
-      if (seen[key]) return;
-      seen[key] = true;
+    function add(title, streamUrl, headers) {
+      if (!isHttp(streamUrl)) return;
+      if (isBadVoice(title)) return;
+      const t = String(title).trim();
+      if (seenName[t.toLowerCase()]) return;
+      seenName[t.toLowerCase()] = true;
       streams.push({
-        title: title,
-        name: title,
-        streamUrl: item.streamUrl,
-        headers: item.headers || {
+        title: t,
+        name: t,
+        streamUrl: streamUrl,
+        headers: headers || {
           "User-Agent": UA,
           Referer: baseUrl + "/",
         },
       });
     }
 
-    // 1) Alloha Russian translations only
+    // ---- 1) Alloha (separate files per voice when CDN allows) ----
     if (tokenMovie) {
       const j = await fetchAlloha(tokenMovie);
       const data = j && j.data ? j.data : null;
-
-      async function fromMap(map) {
+      let map = null;
+      if (data) {
+        if (se.season && data.seasons && data.seasons[String(se.season)]) {
+          const ep =
+            data.seasons[String(se.season)].episodes &&
+            data.seasons[String(se.season)].episodes[String(se.episode || 1)];
+          if (ep) map = ep.translation;
+        } else {
+          map = data.translation_iframe;
+        }
+      }
+      if (map) {
         const ids = Object.keys(map);
         for (let i = 0; i < ids.length; i++) {
           const tr = map[ids[i]];
           const voice = tr.translation || tr.name || "";
-          if (!isRussianVoice(voice) || isEnglishOrOriginal(voice)) continue;
-          const label =
-            "Alloha · " + voice + (tr.quality ? " · " + tr.quality : "");
+          if (!isRussianVoice(voice)) continue;
+          const label = voice + (tr.quality ? " · " + tr.quality : "");
           if (!tr.iframe) continue;
-          const more = await resolveEmbed(tr.iframe, label);
+          const more = await resolveAllohaEmbed(tr.iframe, label);
           for (let k = 0; k < more.length; k++) {
-            if (more[k]._expand) {
-              const exp = await expandRussianAudioFromHls(
-                more[k].streamUrl,
-                label,
-                more[k].headers
-              );
-              if (exp.length) {
-                for (let e = 0; e < exp.length; e++) add(exp[e]);
-              } else {
-                add(more[k]);
-              }
-            } else {
-              add(more[k]);
-            }
+            add(more[k].title, more[k].streamUrl, more[k].headers);
           }
-        }
-      }
-
-      if (data) {
-        if (se.season && data.seasons && data.seasons[String(se.season)]) {
-          const season = data.seasons[String(se.season)];
-          const ep =
-            season.episodes && season.episodes[String(se.episode || 1)];
-          if (ep && ep.translation) await fromMap(ep.translation);
-        } else if (data.translation_iframe) {
-          await fromMap(data.translation_iframe);
         }
       }
     }
 
-    // 2) Collaps fallback + HLS audio expand
+    // ---- 2) Collaps: one master HLS + clean RU names (like the site) ----
+    // Full video URL only — never audio-only tracks (fixes black screen)
     if (!streams.length) {
-      const collaps = await resolveCollaps(html, se.season, se.episode);
-      for (let i = 0; i < collaps.length; i++) {
-        const c = collaps[i];
-        if (isEnglishOrOriginal(c.title)) continue;
-        const exp = await expandRussianAudioFromHls(
-          c.streamUrl,
-          c.title.replace(/\s*·\s*stream.*$/i, ""),
-          c.headers
-        );
-        if (exp.length) {
-          for (let e = 0; e < exp.length; e++) add(exp[e]);
-        } else if (isRussianVoice(c.title)) {
-          // same URL as Eng — skip listing fake choices
-          // only add once under best RU title if we have no streams yet
-          if (!streams.length) add(c);
+      const col = await loadCollaps(html, se.season, se.episode);
+      if (col.hls) {
+        const ruNames = [];
+        for (let i = 0; i < col.names.length; i++) {
+          const n = col.names[i];
+          if (isRussianVoice(n) && !isBadVoice(n)) ruNames.push(n);
+        }
+        // Prefer (Дубл.) first
+        ruNames.sort(function (a, b) {
+          return voiceRank(a) - voiceRank(b);
+        });
+        // One row per studio name — same master HLS (video + all audio)
+        // Luna plays default track; pick HDRezka Дубл. first in list
+        for (let i = 0; i < ruNames.length; i++) {
+          add("Collaps · " + ruNames[i], col.hls, {
+            "User-Agent": UA,
+            Referer: "https://api.ortified.ws/",
+          });
+        }
+        // If names missing, still offer one RU-labeled stream
+        if (!ruNames.length) {
+          add("Collaps · Русский", col.hls, {
+            "User-Agent": UA,
+            Referer: "https://api.ortified.ws/",
+          });
         }
       }
     }
@@ -648,7 +479,7 @@ async function extractStreamUrl(url) {
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 15),
+      streams: streams.slice(0, 8),
       subtitles: "",
     });
   } catch (e) {
