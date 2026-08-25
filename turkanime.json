@@ -2,7 +2,7 @@
   "sourceName": "TürkAnime",
   "iconUrl": "https://www.turkanime.tv/imajlar/logo.png",
   "author": { "name": "plodesu", "icon": "" },
-  "version": "1.0.2",
+  "version": "1.0.3",
   "language": "Turkish",
   "languageType": ["Subbed", "Dubbed"],
   "streamType": "HLS",
