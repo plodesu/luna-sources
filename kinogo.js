@@ -1,7 +1,7 @@
 /**
  * Kinogo.sh – Sora / Luna
- * Fast · Russian dub names only · full video (no audio-only)
- * v1.9.0
+ * Russian tracks rus1+ only · no def0 · ordered · full video
+ * v2.0.0
  */
 const baseUrl = "https://kinogo.sh";
 const ALLOHA_API = "https://api.apbugall.org/";
@@ -72,6 +72,18 @@ function absUrl(u) {
   return u;
 }
 
+function absFromBase(u, base) {
+  if (!u) return "";
+  u = String(u).replace(/&amp;/g, "&").trim();
+  if (isHttp(u)) return u;
+  if (u.indexOf("//") === 0) return "https:" + u;
+  if (u.charAt(0) === "/") {
+    const m = String(base || "").match(/^(https?:\/\/[^/]+)/i);
+    return m ? m[1] + u : u;
+  }
+  return String(base || "").replace(/[^/]+$/, "") + u;
+}
+
 function cleanQuery(keyword) {
   return String(keyword || "")
     .replace(/\bS\d{1,2}\s*E\d{1,3}\b/gi, " ")
@@ -115,33 +127,45 @@ function parseSE(url) {
   return { season: s ? +s : null, episode: e ? +e : null };
 }
 
-/** Block English / original / def0 / numbered junk */
-function isBadVoice(name) {
+function isEnglishDef(name) {
   const n = String(name || "").toLowerCase();
-  return /eng\.?\s*original|eng\.?original|original|оригинал|english|английск|\beng\b|def\d*|rus\d+|stream\s*\d+/i.test(
-    n
-  );
+  return /^(def\d*|eng\.?\s*original|eng\.?original|original|english|английск|оригинал)$/i.test(
+    n.trim()
+  ) || /eng\.?\s*original|eng\.?original|\bdef0\b|английск|оригинал/i.test(n);
 }
 
-function isRussianVoice(name) {
+function isRussianTrack(name, lang) {
   const n = String(name || "").toLowerCase();
-  if (!n.trim() || isBadVoice(n)) return false;
-  if (/субтитр|subtitle|raw\b/i.test(n)) return false;
+  const l = String(lang || "").toLowerCase();
+  if (isEnglishDef(n)) return false;
+  if (/^(en|eng)$/i.test(l)) return false;
+  if (/^rus?\d+$/i.test(n.trim())) return true; // rus1, rus2, ru1…
+  if (/^(ru|rus|russian)$/i.test(l)) return true;
   if (
-    /дубл|русск|lostfilm|lost\s*film|кубик|гоблин|кравец|сериб|гаврилов|живов|hdrezka|winmedia|tvshows|dragon|money|студи|профессион|многоголос|закадр/i.test(
+    /дубл|русск|lostfilm|hdrezka|winmedia|tvshows|dragon|кубик|гоблин|кравец|студи/i.test(
       n
     )
   ) {
     return true;
   }
-  return /[а-яё]/i.test(n);
+  if (/[а-яё]/i.test(n) && !/субтитр/i.test(n)) return true;
+  return false;
 }
 
-function voiceRank(name) {
-  if (/дубл/i.test(name)) return 0;
-  if (/hdrezka|winmedia|tvshows|dragon|lost|кубик|гоблин/i.test(name))
-    return 1;
-  return 2;
+/** Sort: rus1, rus2, rus3… then other RU names (Дубл. first) */
+function trackSortKey(title) {
+  const m = String(title).match(/\brus(\d+)\b/i);
+  if (m) return { grp: 0, n: +m[1], t: title };
+  if (/дубл/i.test(title)) return { grp: 1, n: 0, t: title };
+  return { grp: 2, n: 0, t: title };
+}
+
+function compareTracks(a, b) {
+  const ka = trackSortKey(a.title);
+  const kb = trackSortKey(b.title);
+  if (ka.grp !== kb.grp) return ka.grp - kb.grp;
+  if (ka.n !== kb.n) return ka.n - kb.n;
+  return ka.t.localeCompare(kb.t);
 }
 
 async function searchResults(keyword) {
@@ -308,7 +332,6 @@ async function extractEpisodes(url) {
   }
 }
 
-/** Parse Collaps makePlayer → master HLS + voice names (no extra fetches) */
 function parseCollapsMakePlayer(html) {
   const result = { hls: "", names: [] };
   if (!html || /недоступен в вашем регионе/i.test(html)) return result;
@@ -337,13 +360,8 @@ function parseCollapsMakePlayer(html) {
 async function loadCollaps(htmlPage, season, episode) {
   const ortId = extractOrtifiedId(htmlPage);
   if (!ortId) return { hls: "", names: [] };
-
   let url = "https://api.ortified.ws/embed/movie/" + ortId;
-  if (season) {
-    url += "?season=" + season + "&episode=" + (episode || 1);
-  }
-
-  // one request only (fast)
+  if (season) url += "?season=" + season + "&episode=" + (episode || 1);
   let html = await getText(
     await soraFetch(url, {
       headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
@@ -359,6 +377,112 @@ async function loadCollaps(htmlPage, season, episode) {
     parsed = parseCollapsMakePlayer(html);
   }
   return parsed;
+}
+
+/**
+ * Read master m3u8 once → list Russian audio tracks (skip def0 / eng).
+ * streamUrl stays the MASTER playlist so video always plays.
+ */
+async function listRussianTracks(hlsUrl, studioNames, headers) {
+  const out = [];
+  if (!isHttp(hlsUrl)) return out;
+
+  let text = "";
+  try {
+    text = await getText(
+      await soraFetch(hlsUrl, {
+        headers: Object.assign(
+          {
+            "User-Agent": UA,
+            Accept: "application/vnd.apple.mpegurl,*/*",
+            Referer: "https://api.ortified.ws/",
+          },
+          headers || {}
+        ),
+      })
+    );
+  } catch (e) {
+    return out;
+  }
+  if (!text || text.indexOf("#EXT") !== 0) return out;
+
+  // Map rus index → studio name from makePlayer.names (skip eng at [0] if present)
+  const ruStudios = [];
+  for (let i = 0; i < (studioNames || []).length; i++) {
+    const n = studioNames[i];
+    if (!n || isEnglishDef(n)) continue;
+    ruStudios.push(n);
+  }
+
+  const lines = text.split(/\r?\n/);
+  const found = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!/^#EXT-X-MEDIA:/i.test(line)) continue;
+    if (!/TYPE=AUDIO/i.test(line)) continue;
+
+    const nameM = line.match(/NAME="([^"]+)"/i);
+    const langM = line.match(/LANGUAGE="([^"]+)"/i);
+    const name = nameM ? nameM[1].trim() : "";
+    const lang = langM ? langM[1] : "";
+
+    if (!isRussianTrack(name, lang)) continue;
+    if (isEnglishDef(name)) continue;
+
+    const rusM = name.match(/^rus?(\d+)$/i);
+    let order = rusM ? +rusM[1] : 1000;
+    let label = name;
+
+    // Prefer human studio name when track is rusN
+    if (rusM && ruStudios.length) {
+      const idx = +rusM[1] - 1; // rus1 → first Russian studio
+      if (idx >= 0 && idx < ruStudios.length) {
+        label = ruStudios[idx] + " · rus" + rusM[1];
+      } else {
+        label = "rus" + rusM[1];
+      }
+    } else if (rusM) {
+      label = "rus" + rusM[1];
+    }
+
+    found.push({
+      order: order,
+      title: "Collaps · " + label,
+      streamUrl: hlsUrl, // master = video + all audio (not audio-only)
+    });
+  }
+
+  // If playlist has no named rus tracks, build from studio names only
+  if (!found.length && ruStudios.length) {
+    for (let i = 0; i < ruStudios.length; i++) {
+      found.push({
+        order: i + 1,
+        title: "Collaps · " + ruStudios[i] + " · rus" + (i + 1),
+        streamUrl: hlsUrl,
+      });
+    }
+  }
+
+  found.sort(function (a, b) {
+    return a.order - b.order;
+  });
+
+  // unique by title
+  const seen = {};
+  for (let i = 0; i < found.length; i++) {
+    if (seen[found[i].title]) continue;
+    seen[found[i].title] = true;
+    out.push({
+      title: found[i].title,
+      streamUrl: found[i].streamUrl,
+      headers: {
+        "User-Agent": UA,
+        Referer: "https://api.ortified.ws/",
+      },
+    });
+  }
+  return out;
 }
 
 async function resolveAllohaEmbed(iframe, label) {
@@ -392,26 +516,27 @@ async function extractStreamUrl(url) {
     const tokenMovie = extractAllohaTokenMovie(html);
 
     const streams = [];
-    const seenName = {};
+    const seen = {};
 
-    function add(title, streamUrl, headers) {
-      if (!isHttp(streamUrl)) return;
-      if (isBadVoice(title)) return;
-      const t = String(title).trim();
-      if (seenName[t.toLowerCase()]) return;
-      seenName[t.toLowerCase()] = true;
+    function add(item) {
+      if (!item || !isHttp(item.streamUrl)) return;
+      if (isEnglishDef(item.title)) return;
+      if (/\bdef0\b/i.test(item.title)) return;
+      const key = item.title.toLowerCase();
+      if (seen[key]) return;
+      seen[key] = true;
       streams.push({
-        title: t,
-        name: t,
-        streamUrl: streamUrl,
-        headers: headers || {
+        title: item.title,
+        name: item.title,
+        streamUrl: item.streamUrl,
+        headers: item.headers || {
           "User-Agent": UA,
           Referer: baseUrl + "/",
         },
       });
     }
 
-    // ---- 1) Alloha (separate files per voice when CDN allows) ----
+    // 1) Alloha Russian translations
     if (tokenMovie) {
       const j = await fetchAlloha(tokenMovie);
       const data = j && j.data ? j.data : null;
@@ -431,55 +556,48 @@ async function extractStreamUrl(url) {
         for (let i = 0; i < ids.length; i++) {
           const tr = map[ids[i]];
           const voice = tr.translation || tr.name || "";
-          if (!isRussianVoice(voice)) continue;
+          if (isEnglishDef(voice)) continue;
+          if (!isRussianTrack(voice, "ru")) continue;
           const label = voice + (tr.quality ? " · " + tr.quality : "");
           if (!tr.iframe) continue;
           const more = await resolveAllohaEmbed(tr.iframe, label);
-          for (let k = 0; k < more.length; k++) {
-            add(more[k].title, more[k].streamUrl, more[k].headers);
-          }
+          for (let k = 0; k < more.length; k++) add(more[k]);
         }
       }
     }
 
-    // ---- 2) Collaps: one master HLS + clean RU names (like the site) ----
-    // Full video URL only — never audio-only tracks (fixes black screen)
-    if (!streams.length) {
-      const col = await loadCollaps(html, se.season, se.episode);
-      if (col.hls) {
-        const ruNames = [];
+    // 2) Collaps: rus1…rusN ordered, no def0
+    const col = await loadCollaps(html, se.season, se.episode);
+    if (col.hls) {
+      const tracks = await listRussianTracks(col.hls, col.names, {
+        Referer: "https://api.ortified.ws/",
+      });
+      for (let i = 0; i < tracks.length; i++) add(tracks[i]);
+
+      // Fallback if m3u8 had no tags: studio names as rus1…
+      if (!tracks.length && col.names && col.names.length) {
+        let r = 0;
         for (let i = 0; i < col.names.length; i++) {
           const n = col.names[i];
-          if (isRussianVoice(n) && !isBadVoice(n)) ruNames.push(n);
-        }
-        // Prefer (Дубл.) first
-        ruNames.sort(function (a, b) {
-          return voiceRank(a) - voiceRank(b);
-        });
-        // One row per studio name — same master HLS (video + all audio)
-        // Luna plays default track; pick HDRezka Дубл. first in list
-        for (let i = 0; i < ruNames.length; i++) {
-          add("Collaps · " + ruNames[i], col.hls, {
-            "User-Agent": UA,
-            Referer: "https://api.ortified.ws/",
-          });
-        }
-        // If names missing, still offer one RU-labeled stream
-        if (!ruNames.length) {
-          add("Collaps · Русский", col.hls, {
-            "User-Agent": UA,
-            Referer: "https://api.ortified.ws/",
+          if (!n || isEnglishDef(n)) continue;
+          if (!isRussianTrack(n, "ru")) continue;
+          r++;
+          add({
+            title: "Collaps · " + n + " · rus" + r,
+            streamUrl: col.hls,
+            headers: {
+              "User-Agent": UA,
+              Referer: "https://api.ortified.ws/",
+            },
           });
         }
       }
     }
 
-    streams.sort(function (a, b) {
-      return voiceRank(a.title) - voiceRank(b.title);
-    });
+    streams.sort(compareTracks);
 
     return JSON.stringify({
-      streams: streams.slice(0, 8),
+      streams: streams.slice(0, 12),
       subtitles: "",
     });
   } catch (e) {
