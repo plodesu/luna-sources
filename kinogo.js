@@ -1,7 +1,7 @@
 /**
  * Kinogo.sh – Sora / Luna
- * GidOnline-style Select Server: one row per voice
- * v1.4.0
+ * Alloha streams ONLY · one row per voice
+ * v1.5.0
  */
 const baseUrl = "https://kinogo.sh";
 
@@ -215,30 +215,8 @@ async function extractDetails(url) {
   }
 }
 
-function parsePlayers(html) {
-  const list = [];
-  const re = /data-player=["']([^"']+)["'][^>]*>([^<]*)/gi;
-  let m;
-  while ((m = re.exec(html || ""))) {
-    const src = absUrl(m[1]);
-    const name = (m[2] || "").replace(/\s+/g, " ").trim() || "Плеер";
-    if (/трейлер|trailer/i.test(name) || /trailer/i.test(src)) continue;
-    list.push({ name: name, url: src });
-  }
-  return list;
-}
-
 function extractAllohaTokenMovie(html) {
   const m = (html || "").match(/token_movie=([a-f0-9]{20,})/i);
-  return m ? m[1] : "";
-}
-
-function extractKpId(html) {
-  const m =
-    (html || "").match(/kinopoisk\.ru\/(?:film|series)\/(\d+)/i) ||
-    (html || "").match(/kp[_-]?id["']?\s*[:=]\s*["']?(\d+)/i) ||
-    (html || "").match(/data-kp["']?\s*[:=]\s*["']?(\d+)/i) ||
-    (html || "").match(/[?&]kp=(\d+)/i);
   return m ? m[1] : "";
 }
 
@@ -331,7 +309,7 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ---- media from embed HTML ---- */
+/* ---- Alloha embed → real stream URLs ---- */
 
 function collectMediaFromHtml(html, label, referer) {
   const out = [];
@@ -344,67 +322,27 @@ function collectMediaFromHtml(html, label, referer) {
     "User-Agent": UA,
     Referer: referer || baseUrl + "/",
   };
+  const seen = {};
 
   function push(title, url) {
     if (!isHttp(url)) return;
     url = url.replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
+    if (seen[url]) return;
+    seen[url] = true;
     out.push({ title: title, streamUrl: url, headers: headers });
   }
 
-  // makePlayer → ONE hls + MANY audio names → one row per voice (GidOnline style)
-  const mp = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
-  if (mp) {
-    const body = mp[1];
-    const hls = (body.match(/["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/) ||
-      [])[1];
-    const namesBlock =
-      (body.match(/["']?names["']?\s*:\s*\[([^\]]*)\]/) || [])[1] || "";
-    const names = [];
-    const nm = namesBlock.match(/["']([^"']+)["']/g);
-    if (nm) {
-      for (let i = 0; i < nm.length; i++) {
-        names.push(nm[i].replace(/["']/g, ""));
-      }
-    }
-
-    if (hls && names.length > 0) {
-      // Prefer Russian / studio dubs first in list order (keep API order, filter junk later)
-      for (let i = 0; i < names.length; i++) {
-        const n = names[i].trim();
-        if (!n) continue;
-        // GidOnline-like label
-        push(label + " · " + n, hls);
-      }
-    } else if (hls) {
-      push(label, hls);
-    }
-
-    // quality variants (different URLs)
-    const qRe =
-      /["'](\d{3,4})["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/g;
-    let qm;
-    while ((qm = qRe.exec(body))) {
-      if (hls && qm[2] === hls) continue;
-      push(label + " · " + qm[1] + "p", qm[2]);
-    }
-  }
-
-  // extra unique m3u8/mp4 not already covered
   const media = html.match(
     /https?:\/\/[^"'\s<>\\]+(?:\.m3u8|\.mp4)[^"'\s<>\\]*/gi
   );
   if (media) {
-    const have = {};
-    for (let i = 0; i < out.length; i++) have[out[i].streamUrl] = true;
     let n = 0;
     for (let i = 0; i < media.length; i++) {
       let u = media[i].replace(/\\u0026/g, "&").replace(/\\/g, "");
       if (/\.(jpg|png|gif|webp)/i.test(u)) continue;
       if (/preview|thumb|poster|sprite/i.test(u)) continue;
-      if (have[u]) continue;
-      have[u] = true;
       n++;
-      push(label + " · stream " + n, u);
+      push(n === 1 ? label : label + " · " + n, u);
     }
   }
 
@@ -425,65 +363,35 @@ function collectMediaFromHtml(html, label, referer) {
     }
   }
 
+  const hls = html.match(
+    /["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/i
+  );
+  if (hls) push(label, hls[1]);
+
   return out;
 }
 
 async function resolveEmbed(embedUrl, label) {
   if (!embedUrl || !isHttp(embedUrl)) return [];
-  if (/trailer/i.test(embedUrl)) return [];
   try {
     const html = await getText(
       await soraFetch(embedUrl, {
         headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
       })
     );
-    return collectMediaFromHtml(html, label || "Stream", embedUrl);
+    return collectMediaFromHtml(html, label || "Alloha", embedUrl);
   } catch (e) {
     return [];
   }
 }
 
-async function resolveCollaps(htmlPage, season, episode) {
-  const out = [];
-  const kp = extractKpId(htmlPage);
-  const ortId = (
-    (htmlPage || "").match(/ortified\.ws\/embed\/movie\/(\d+)/i) || []
-  )[1];
-
-  const urls = [];
-  if (ortId) {
-    let u = "https://api.ortified.ws/embed/movie/" + ortId;
-    if (season) {
-      u += "?season=" + season + "&episode=" + (episode || 1);
-    }
-    urls.push(u);
-    urls.push("https://api.delivembd.ws/embed/movie/" + ortId);
-  }
-  if (kp) {
-    urls.push("https://api.delivembd.ws/embed/kp/" + kp);
-    urls.push("https://api.ortified.ws/embed/kp/" + kp);
-  }
-
-  for (let i = 0; i < urls.length; i++) {
-    try {
-      const html = await getText(
-        await soraFetch(urls[i], {
-          headers: {
-            Referer: baseUrl + "/",
-            Accept: "text/html,*/*",
-          },
-        })
-      );
-      const got = collectMediaFromHtml(html, "Collaps", urls[i]);
-      for (let j = 0; j < got.length; j++) out.push(got[j]);
-      // stop once we have named voices
-      if (out.length >= 2) break;
-    } catch (e) {}
-  }
-  return out;
+function voiceRank(name) {
+  if (/дубл|lost|кубик|гоблин|кравец|hdrezka|проф|сериб/i.test(name)) return 0;
+  if (/субтитр|оригинал/i.test(name)) return 2;
+  return 1;
 }
 
-/* ---- streams ---- */
+/* ---- streams: ALLOHA ONLY ---- */
 
 async function extractStreamUrl(url) {
   try {
@@ -491,16 +399,24 @@ async function extractStreamUrl(url) {
     const pageUrl = raw.split("?")[0].split("#")[0];
     const se = parseSE(raw);
     const html = await getText(await soraFetch(pageUrl));
-    const players = parsePlayers(html);
     const tokenMovie = extractAllohaTokenMovie(html);
 
+    if (!tokenMovie) {
+      return JSON.stringify({ streams: [], subtitles: "" });
+    }
+
+    const j = await fetchAlloha(tokenMovie);
+    const data = j && j.data ? j.data : null;
+    if (!data) {
+      return JSON.stringify({ streams: [], subtitles: "" });
+    }
+
     const streams = [];
-    // Dedupe by TITLE+URL so same HLS can appear once per voice name
     const seen = {};
 
     function add(item) {
       if (!item || !isHttp(item.streamUrl)) return;
-      const title = String(item.title || "Stream").trim();
+      const title = String(item.title || "Alloha").trim();
       const key = title + "||" + item.streamUrl.slice(0, 120);
       if (seen[key]) return;
       seen[key] = true;
@@ -515,77 +431,39 @@ async function extractStreamUrl(url) {
       });
     }
 
-    // 1) Alloha – one row per translation (real separate streams when available)
-    if (tokenMovie) {
-      const j = await fetchAlloha(tokenMovie);
-      const data = j && j.data ? j.data : null;
+    async function fromMap(map) {
+      const ids = Object.keys(map);
+      ids.sort(function (a, b) {
+        const an = map[a].translation || map[a].name || "";
+        const bn = map[b].translation || map[b].name || "";
+        return voiceRank(an) - voiceRank(bn);
+      });
 
-      async function fromMap(map) {
-        const ids = Object.keys(map);
-        ids.sort(function (a, b) {
-          const an = map[a].translation || map[a].name || "";
-          const bn = map[b].translation || map[b].name || "";
-          const sc = function (n) {
-            if (/дубл|lost|кубик|гоблин|кравец|hdrezka|проф/i.test(n))
-              return 0;
-            if (/субтитр|оригинал/i.test(n)) return 2;
-            return 1;
-          };
-          return sc(an) - sc(bn);
-        });
-        for (let i = 0; i < ids.length && streams.length < 14; i++) {
-          const tr = map[ids[i]];
-          const voice = tr.translation || tr.name || "Alloha";
-          const label = voice + (tr.quality ? " · " + tr.quality : "");
-          if (!tr.iframe) continue;
-          const more = await resolveEmbed(tr.iframe, label);
-          for (let k = 0; k < more.length; k++) add(more[k]);
-        }
-      }
+      for (let i = 0; i < ids.length; i++) {
+        const tr = map[ids[i]];
+        const voice = tr.translation || tr.name || "Alloha";
+        const label = voice + (tr.quality ? " · " + tr.quality : "");
+        if (!tr.iframe) continue;
 
-      if (data) {
-        if (se.season && data.seasons && data.seasons[String(se.season)]) {
-          const season = data.seasons[String(se.season)];
-          const ep =
-            season.episodes && season.episodes[String(se.episode || 1)];
-          if (ep && ep.translation) await fromMap(ep.translation);
-        } else if (data.translation_iframe) {
-          await fromMap(data.translation_iframe);
-        }
+        const more = await resolveEmbed(tr.iframe, label);
+        for (let k = 0; k < more.length; k++) add(more[k]);
       }
     }
 
-    // 2) Collaps – one Select Server row per voice name
-    const collaps = await resolveCollaps(html, se.season, se.episode);
-    for (let i = 0; i < collaps.length; i++) add(collaps[i]);
-
-    // 3) Page players
-    for (let i = 0; i < players.length; i++) {
-      let u = players[i].url;
-      if (se.season && /ortified|delivembd/i.test(u)) {
-        u +=
-          (u.indexOf("?") >= 0 ? "&" : "?") +
-          "season=" +
-          se.season +
-          "&episode=" +
-          (se.episode || 1);
+    // Series episode
+    if (se.season && data.seasons && data.seasons[String(se.season)]) {
+      const season = data.seasons[String(se.season)];
+      const ep = season.episodes && season.episodes[String(se.episode || 1)];
+      if (ep && ep.translation) {
+        await fromMap(ep.translation);
       }
-      const more = await resolveEmbed(
-        u,
-        players[i].name || "Плеер"
-      );
-      for (let k = 0; k < more.length; k++) add(more[k]);
+    } else if (data.translation_iframe) {
+      // Movie
+      await fromMap(data.translation_iframe);
     }
 
-    // Sort: dubs first
     streams.sort(function (a, b) {
-      const rank = function (t) {
-        if (/дубл|hdrezka|winmedia|tvshows|dragon|lost|кубик|гоблин/i.test(t))
-          return 0;
-        if (/субтитр|оригинал/i.test(t)) return 2;
-        return 1;
-      };
-      return rank(a.title) - rank(b.title);
+      return voiceRank(a.title) - voiceRank(b.title);
     });
 
     return JSON.stringify({
