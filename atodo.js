@@ -1,19 +1,13 @@
 /**
  * ATodo – Sora / Luna
- * GidOnline-style multi-stream picker
- * All voices (HDRezka first) + 1080p / 720p / 480p
- * v1.3.1
+ * Prefer on-device fetch (correct CDN IP) so streams actually play
+ * Multi-stream picker + 1080/720/480
+ * v1.3.2
  */
 const apiBase = "https://api.atodo.fun";
 const tmdbImg = "https://image.tmdb.org/t/p/w500";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
-
-const streamHeaders = {
-  "User-Agent": UA,
-  Referer: "http://atodo.fun/",
-  Origin: "http://atodo.fun",
-};
 
 async function soraFetch(url, options) {
   options = options || {};
@@ -28,17 +22,21 @@ async function soraFetch(url, options) {
   );
   const method = options.method || "GET";
   const body = options.body || null;
+
+  // IMPORTANT: use on-device fetch FIRST so CDN tokens bind to your IP
+  try {
+    const r = await fetch(url, { method: method, headers: headers, body: body });
+    if (r) return r;
+  } catch (e) {}
+
   try {
     if (typeof fetchv2 === "function") {
       const r = await fetchv2(url, headers, method, body);
       if (r) return r;
     }
-  } catch (e) {}
-  try {
-    return await fetch(url, { method: method, headers: headers, body: body });
-  } catch (e2) {
-    return null;
-  }
+  } catch (e2) {}
+
+  return null;
 }
 
 async function getText(res) {
@@ -213,9 +211,7 @@ async function fetchSource(balancer, type, id, kpId) {
 }
 
 /**
- * Resolve dataHash → list of {titleSuffix, url}
- * HLS: 1080p / 720p / 480p (absolute) + Auto master
- * MP4: 1080p / 720p / 480p https
+ * Resolve → quality list. No stream headers (AVPlayer plays more reliably).
  */
 async function resolveQualities(balancer, dataObj, voiceLabel) {
   const out = [];
@@ -227,18 +223,18 @@ async function resolveQualities(balancer, dataObj, voiceLabel) {
   if (!json || !json.streams || !json.streams.video) return out;
   const video = json.streams.video;
 
-  // --- HLS ---
   if (video.hls && video.hls.master && isHttp(video.hls.master)) {
     const master = forceHttps(video.hls.master);
+    // Auto = master (ABR)
     out.push({ title: voiceLabel + " · Auto", streamUrl: master });
 
     try {
       const text = await getText(
         await soraFetch(master, {
-          headers: Object.assign(
-            { Accept: "application/vnd.apple.mpegurl,*/*" },
-            streamHeaders
-          ),
+          headers: {
+            "User-Agent": UA,
+            Accept: "application/vnd.apple.mpegurl,*/*",
+          },
         })
       );
       if (text && text.indexOf("#EXT") === 0) {
@@ -260,6 +256,7 @@ async function resolveQualities(balancer, dataObj, voiceLabel) {
           const abs = forceHttps(absUrl(next, master));
           if (isHttp(abs)) byQ[q] = abs;
         }
+        // Prefer high quality first in list order later
         ["1080p", "720p", "480p"].forEach(function (q) {
           if (byQ[q]) {
             out.push({ title: voiceLabel + " · " + q, streamUrl: byQ[q] });
@@ -269,7 +266,6 @@ async function resolveQualities(balancer, dataObj, voiceLabel) {
     } catch (e) {}
   }
 
-  // --- progressive MP4 ---
   if (video.http && video.http.qualities) {
     const qs = video.http.qualities;
     ["1080", "720", "480"].forEach(function (k) {
@@ -456,11 +452,11 @@ async function extractStreamUrl(url) {
       if (!t || seen[t] || seen[u]) return;
       seen[t] = true;
       seen[u] = true;
+      // NO headers on purpose – Luna/AVPlayer often fails with custom headers
       streams.push({
         title: t,
         name: t,
         streamUrl: u,
-        headers: streamHeaders,
       });
     }
 
@@ -472,7 +468,6 @@ async function extractStreamUrl(url) {
           (isHdrezka(b.translation_name) ? 0 : 1)
         );
       });
-      // all voices (cap 6 to keep it usable)
       const limit = Math.min(trs.length, 6);
       for (let i = 0; i < limit; i++) {
         const tr = trs[i];
@@ -487,11 +482,9 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // 1) jator (HLS, usually best quality ladder)
     const jator = await fetchSource("jator", p.type, p.id, null);
     await consume("jator", jator);
 
-    // 2) xinu (HDRezka + other studios)
     let kp = jator && jator.kinopoisk_id ? String(jator.kinopoisk_id) : "";
     if (!kp) {
       const det = await getJson(
@@ -504,7 +497,6 @@ async function extractStreamUrl(url) {
       await consume("xinu", xinu);
     }
 
-    // Sort: HDRezka first, then 1080 → 720 → 480 → Auto
     const qRank = { "1080p": 4, "720p": 3, "480p": 2, Auto: 1 };
     streams.sort(function (a, b) {
       const aRez = /hdrezka/i.test(a.title) ? 0 : 1;
@@ -512,10 +504,7 @@ async function extractStreamUrl(url) {
       if (aRez !== bRez) return aRez - bRez;
       const qa = (a.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
       const qb = (b.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
-      if ((qRank[qb] || 0) !== (qRank[qa] || 0)) {
-        return (qRank[qb] || 0) - (qRank[qa] || 0);
-      }
-      return a.title.localeCompare(b.title);
+      return (qRank[qb] || 0) - (qRank[qa] || 0);
     });
 
     return JSON.stringify({
