@@ -1,24 +1,21 @@
 /**
- * ATodo / MSX (atodo.fun) – Sora / Luna
- * API: http://api.atodo.fun
- * Russian dubs via balancers (jator / xinu / krud)
+ * ATodo (atodo.fun / MSX) – Sora / Luna
+ * Movies + Series, Russian dubs (jator / xinu)
  * Qualities: 1080p / 720p / 480p
- * v1.0.0
+ * v1.1.0
  */
-const apiBase = "http://api.atodo.fun";
-const imageBase = "http://image.atodo.fun";
+const apiBase = "https://api.atodo.fun";
+const imageBase = "https://image.atodo.fun";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
-
-const BALANCERS = ["jator", "xinu", "krud"];
 
 async function soraFetch(url, options) {
   options = options || {};
   const headers = Object.assign(
     {
       "User-Agent": UA,
-      Accept: "application/json,text/html,*/*",
-      "Accept-Language": "ru-RU,ru;q=0.9",
+      Accept: "application/json,*/*",
+      "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
       Referer: "http://atodo.fun/",
     },
     options.headers || {}
@@ -56,7 +53,7 @@ async function getText(res) {
 async function getJson(url) {
   try {
     const t = await getText(await soraFetch(url));
-    if (!t) return null;
+    if (!t || t.charAt(0) !== "{" && t.charAt(0) !== "[") return null;
     return JSON.parse(t);
   } catch (e) {
     return null;
@@ -70,6 +67,7 @@ function isHttp(u) {
 function posterUrl(path) {
   if (!path) return "";
   if (isHttp(path)) return path;
+  // TMDB-style path → ATodo image proxy
   return imageBase + "/small" + path;
 }
 
@@ -81,40 +79,58 @@ function cleanQuery(keyword) {
     .trim();
 }
 
+/**
+ * href format: https://api.atodo.fun/watch/movie/1315772
+ *              https://api.atodo.fun/watch/tv/108978?s=1&e=1
+ */
 function parseHref(url) {
-  // atodo://movie/1315772  or  atodo://tv/1396?s=1&e=1
-  const m = String(url).match(/atodo:\/\/(movie|tv)\/(\d+)/i);
-  const se = String(url).match(/[?&#]s=(\d+)/i);
-  const ee = String(url).match(/[?&#]e=(\d+)/i);
+  const s = String(url || "");
+  let type = "movie";
+  let id = "";
+  let m = s.match(/\/watch\/(movie|tv)\/(\d+)/i);
+  if (m) {
+    type = m[1].toLowerCase();
+    id = m[2];
+  } else {
+    m = s.match(/atodo:\/\/(movie|tv)\/(\d+)/i);
+    if (m) {
+      type = m[1].toLowerCase();
+      id = m[2];
+    } else {
+      m = s.match(/\/(movie|tv)\/(\d+)/i);
+      if (m) {
+        type = m[1].toLowerCase();
+        id = m[2];
+      }
+    }
+  }
+  const se = s.match(/[?&#]s=(\d+)/i);
+  const ee = s.match(/[?&#]e=(\d+)/i);
   return {
-    type: m ? m[1].toLowerCase() : "movie",
-    id: m ? m[2] : "",
+    type: type,
+    id: id,
     season: se ? +se[1] : 1,
     episode: ee ? +ee[1] : 1,
   };
 }
 
-function b64utf8(obj) {
-  const json = JSON.stringify(obj);
-  try {
-    if (typeof btoa === "function") {
-      return btoa(unescape(encodeURIComponent(json)));
-    }
-  } catch (e) {}
-  // fallback
-  const bytes = [];
-  for (let i = 0; i < json.length; i++) {
-    const c = json.charCodeAt(i);
-    if (c < 128) bytes.push(c);
-    else if (c < 2048) {
-      bytes.push(192 | (c >> 6), 128 | (c & 63));
-    } else {
-      bytes.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
-    }
+function makeHref(type, id, season, episode) {
+  let h = apiBase + "/watch/" + type + "/" + id;
+  if (type === "tv" && season && episode) {
+    h += "?s=" + season + "&e=" + episode;
   }
+  return h;
+}
+
+/** Pure base64 (ASCII JSON) – no btoa dependency */
+function b64encode(str) {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   let out = "";
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) {
+    bytes.push(str.charCodeAt(i) & 0xff);
+  }
   for (let i = 0; i < bytes.length; i += 3) {
     const a = bytes[i];
     const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
@@ -125,6 +141,10 @@ function b64utf8(obj) {
     out += i + 2 < bytes.length ? chars[c & 63] : "=";
   }
   return out;
+}
+
+function dataToParam(obj) {
+  return encodeURIComponent(b64encode(JSON.stringify(obj)));
 }
 
 function heightToLabel(h) {
@@ -144,34 +164,35 @@ function absUrl(u, base) {
     const m = String(base).match(/^(https?:\/\/[^/]+)/i);
     return (m ? m[1] : "") + u;
   }
-  return String(base).replace(/[^/]+$/, "") + u;
+  // ./720/index.m3u8 relative to master folder
+  const dir = String(base).replace(/\/[^/]*$/, "/");
+  return dir + u.replace(/^\.\//, "");
 }
 
-async function expandHls(masterUrl, labelPrefix, headers) {
+async function expandHls(masterUrl, labelPrefix) {
   const out = [];
   if (!isHttp(masterUrl)) return out;
-  const hdr = Object.assign(
-    {
-      "User-Agent": UA,
-      Accept: "application/vnd.apple.mpegurl,*/*",
-      Referer: "http://atodo.fun/",
-    },
-    headers || {}
-  );
+  const hdr = {
+    "User-Agent": UA,
+    Accept: "application/vnd.apple.mpegurl,*/*",
+    Referer: "http://atodo.fun/",
+  };
+
+  // Always offer Auto (master) first – most reliable audio/video
+  out.push({
+    title: labelPrefix + " · Auto",
+    streamUrl: masterUrl,
+    headers: hdr,
+  });
+
   let text = "";
   try {
     text = await getText(await soraFetch(masterUrl, { headers: hdr }));
   } catch (e) {
     return out;
   }
-  if (!text || text.indexOf("#EXT") !== 0) {
-    out.push({
-      title: labelPrefix + " · Auto",
-      streamUrl: masterUrl,
-      headers: hdr,
-    });
-    return out;
-  }
+  if (!text || text.indexOf("#EXT") !== 0) return out;
+
   const lines = text.split(/\r?\n/);
   const byQ = {};
   for (let i = 0; i < lines.length; i++) {
@@ -199,74 +220,103 @@ async function expandHls(masterUrl, labelPrefix, headers) {
       headers: hdr,
     });
   });
-  if (!out.length) {
-    out.push({
-      title: labelPrefix + " · Auto",
-      streamUrl: masterUrl,
-      headers: hdr,
-    });
-  }
   return out;
 }
 
-async function resolveStream(balancer, dataObj) {
+async function resolveData(balancer, dataObj) {
+  if (!dataObj) return "";
   try {
-    const data = b64utf8(dataObj);
-    const json = await getJson(
-      apiBase + "/api/source/" + balancer + "?data=" + encodeURIComponent(data)
-    );
+    const url =
+      apiBase + "/api/source/" + balancer + "?data=" + dataToParam(dataObj);
+    const json = await getJson(url);
     const master =
       json &&
       json.streams &&
       json.streams.video &&
       json.streams.video.hls &&
       json.streams.video.hls.master;
-    return master || "";
+    return isHttp(master) ? master : "";
   } catch (e) {
     return "";
   }
 }
 
-async function fetchSource(type, id, balancer) {
-  // type: movie | tv  (API returns type "show" for series content)
-  const apiType = type === "tv" ? "tv" : "movie";
-  const json = await getJson(
-    apiBase +
-      "/api/source/" +
-      balancer +
-      "?id=" +
-      encodeURIComponent(id) +
-      "&type=" +
-      apiType
-  );
+async function fetchSource(balancer, type, id, kpId) {
+  // jator prefers tmdb id; xinu prefers kinopoisk id
+  let url = apiBase + "/api/source/" + balancer + "?type=" + type;
+  if (balancer === "xinu" && kpId) {
+    url += "&kinopoisk_id=" + encodeURIComponent(kpId);
+  } else {
+    url += "&id=" + encodeURIComponent(id);
+  }
+  const json = await getJson(url);
+  if (!json || json.error) return null;
   return json;
 }
 
-/* ---------------- search ---------------- */
+function pickEpisodeData(tr, season, episode) {
+  if (!tr) return null;
+  // movie-style flat data
+  if (tr.data) return tr.data;
+  const seasons = tr.seasons || [];
+  for (let i = 0; i < seasons.length; i++) {
+    const s = seasons[i];
+    const sid = +(s.season_id != null ? s.season_id : i + 1);
+    if (sid !== season) continue;
+    const eps = s.episodes || [];
+    for (let j = 0; j < eps.length; j++) {
+      const e = eps[j];
+      const eid = +(e.episode_id != null ? e.episode_id : j + 1);
+      if (eid !== episode) continue;
+      return e.data || null;
+    }
+  }
+  return null;
+}
+
+/* ===================== search ===================== */
 
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
+
     const json = await getJson(
       apiBase + "/api/search?query=" + encodeURIComponent(cleaned)
     );
-    const results = [];
     const list = (json && json.results) || [];
+    const results = [];
+    const seen = {};
+
     for (let i = 0; i < list.length; i++) {
       const r = list[i];
+      // skip people
+      if (r.media_type === "person") continue;
+      if (!r.media_type && !r.title && !r.name) continue;
+
       const media =
-        r.media_type === "tv" || r.name
-          ? "tv"
-          : "movie";
+        r.media_type === "tv" || (r.name && !r.title) ? "tv" : "movie";
       const id = r.id;
-      if (!id) continue;
-      const title = (r.title || r.name || "").replace(/\s+/g, " ").trim();
-      if (!title) continue;
+      if (!id || seen[media + id]) continue;
+      seen[media + id] = true;
+
+      const ru = (r.title || r.name || "").replace(/\s+/g, " ").trim();
+      const en = (r.original_title || r.original_name || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!ru && !en) continue;
+
+      // Prefer Russian title; append original for matching
+      let title = ru || en;
+      if (en && ru && en.toLowerCase() !== ru.toLowerCase()) {
+        title = ru + " / " + en;
+      }
+      if (media === "tv") title += " (сериал)";
+
       results.push({
-        title: title + (media === "tv" ? " (сериал)" : ""),
+        title: title,
         image: posterUrl(r.poster_path),
-        href: "atodo://" + media + "/" + id,
+        href: makeHref(media, id),
       });
     }
     return JSON.stringify(results.slice(0, 20));
@@ -290,10 +340,13 @@ async function extractDetails(url) {
       (json && (json.overview || json.description)) || "N/A";
     const air =
       (json && (json.release_date || json.first_air_date)) || "N/A";
+    const alias =
+      (json && (json.original_title || json.original_name || json.title || json.name)) ||
+      "N/A";
     return JSON.stringify([
       {
         description: String(overview).slice(0, 900),
-        aliases: (json && (json.original_title || json.original_name)) || "N/A",
+        aliases: alias,
         airdate: air,
       },
     ]);
@@ -315,7 +368,7 @@ async function extractEpisodes(url) {
     if (p.type === "movie") {
       return JSON.stringify([
         {
-          href: "atodo://movie/" + p.id,
+          href: makeHref("movie", p.id),
           number: 1,
           season: 1,
           title: "Смотреть",
@@ -323,49 +376,52 @@ async function extractEpisodes(url) {
       ]);
     }
 
-    // series – load first working balancer for season list
-    let src = null;
-    for (let i = 0; i < BALANCERS.length; i++) {
-      src = await fetchSource("tv", p.id, BALANCERS[i]);
-      if (src && src.translations && src.translations.length) break;
-    }
-    const eps = [];
-    if (src && src.translations) {
-      // use first translation that has seasons
-      let tr = null;
-      for (let i = 0; i < src.translations.length; i++) {
-        if (src.translations[i].seasons && src.translations[i].seasons.length) {
-          tr = src.translations[i];
-          break;
-        }
+    // series: get season list from jator
+    let src = await fetchSource("jator", "tv", p.id, null);
+    if (!src || !src.translations || !src.translations.length) {
+      // try xinu if we can get kp from details
+      const det = await getJson(apiBase + "/api/details/tv/" + p.id);
+      // fallback empty → single episode
+      if (!src || !src.translations) {
+        return JSON.stringify([
+          {
+            href: makeHref("tv", p.id, 1, 1),
+            number: 1,
+            season: 1,
+            title: "S1E1",
+          },
+        ]);
       }
-      if (tr) {
-        for (let s = 0; s < tr.seasons.length; s++) {
-          const season = tr.seasons[s];
-          const sid = season.season_id || s + 1;
-          const episodes = season.episodes || [];
-          for (let e = 0; e < episodes.length; e++) {
-            const ep = episodes[e];
-            const eid = ep.episode_id || e + 1;
-            eps.push({
-              href:
-                "atodo://tv/" +
-                p.id +
-                "?s=" +
-                sid +
-                "&e=" +
-                eid,
-              number: +eid,
-              season: +sid,
-              title: "S" + sid + "E" + eid,
-            });
-          }
+    }
+
+    const eps = [];
+    let tr = null;
+    for (let i = 0; i < src.translations.length; i++) {
+      if (src.translations[i].seasons && src.translations[i].seasons.length) {
+        tr = src.translations[i];
+        break;
+      }
+    }
+    if (tr) {
+      for (let s = 0; s < tr.seasons.length; s++) {
+        const season = tr.seasons[s];
+        const sid = +(season.season_id != null ? season.season_id : s + 1);
+        const episodes = season.episodes || [];
+        for (let e = 0; e < episodes.length; e++) {
+          const ep = episodes[e];
+          const eid = +(ep.episode_id != null ? ep.episode_id : e + 1);
+          eps.push({
+            href: makeHref("tv", p.id, sid, eid),
+            number: eid,
+            season: sid,
+            title: "S" + sid + "E" + eid,
+          });
         }
       }
     }
     if (!eps.length) {
       eps.push({
-        href: "atodo://tv/" + p.id + "?s=1&e=1",
+        href: makeHref("tv", p.id, 1, 1),
         number: 1,
         season: 1,
         title: "S1E1",
@@ -374,7 +430,12 @@ async function extractEpisodes(url) {
     return JSON.stringify(eps);
   } catch (e) {
     return JSON.stringify([
-      { href: String(url), number: 1, season: 1, title: "Смотреть" },
+      {
+        href: String(url),
+        number: 1,
+        season: 1,
+        title: "Смотреть",
+      },
     ]);
   }
 }
@@ -389,8 +450,8 @@ async function extractStreamUrl(url) {
 
     function add(item) {
       if (!item || !isHttp(item.streamUrl)) return;
-      const t = item.title;
-      if (seen[t]) return;
+      const t = String(item.title || "").trim();
+      if (!t || seen[t]) return;
       seen[t] = true;
       streams.push({
         title: t,
@@ -403,49 +464,40 @@ async function extractStreamUrl(url) {
       });
     }
 
-    for (let b = 0; b < BALANCERS.length; b++) {
-      const bal = BALANCERS[b];
-      const src = await fetchSource(p.type, p.id, bal);
-      if (!src || !src.translations || !src.translations.length) continue;
+    // 1) jator with TMDB id
+    let src = await fetchSource("jator", p.type, p.id, null);
+    const kpId = src && src.kinopoisk_id ? String(src.kinopoisk_id) : "";
 
-      for (let t = 0; t < src.translations.length; t++) {
-        const tr = src.translations[t];
-        const voice = tr.translation_name || "Озвучка";
-        let dataObj = null;
-
-        if (p.type === "movie") {
-          dataObj = tr.data || null;
-        } else if (tr.seasons) {
-          for (let s = 0; s < tr.seasons.length; s++) {
-            const season = tr.seasons[s];
-            if (+(season.season_id || s + 1) !== p.season) continue;
-            const episodes = season.episodes || [];
-            for (let e = 0; e < episodes.length; e++) {
-              const ep = episodes[e];
-              if (+(ep.episode_id || e + 1) !== p.episode) continue;
-              dataObj = ep.data || null;
-              break;
-            }
-          }
-        }
-
+    async function consume(balancer, source) {
+      if (!source || !source.translations) return;
+      for (let i = 0; i < source.translations.length; i++) {
+        const tr = source.translations[i];
+        const voice = (tr.translation_name || "Озвучка").replace(/\s+/g, " ");
+        const dataObj =
+          p.type === "movie"
+            ? tr.data || null
+            : pickEpisodeData(tr, p.season, p.episode);
         if (!dataObj) continue;
-        const master = await resolveStream(bal, dataObj);
+
+        const master = await resolveData(balancer, dataObj);
         if (!master) continue;
 
-        const label = bal + " · " + voice;
-        const quals = await expandHls(master, label, {
-          "User-Agent": UA,
-          Referer: "http://atodo.fun/",
-        });
+        const label = balancer + " · " + voice;
+        const quals = await expandHls(master, label);
         for (let q = 0; q < quals.length; q++) add(quals[q]);
       }
-
-      if (streams.length >= 3) break; // enough qualities
     }
 
-    // 1080 → 720 → 480
-    const rank = { "1080p": 3, "720p": 2, "480p": 1, Auto: 0 };
+    await consume("jator", src);
+
+    // 2) xinu with kinopoisk id (more voices)
+    if (kpId) {
+      const src2 = await fetchSource("xinu", p.type, p.id, kpId);
+      await consume("xinu", src2);
+    }
+
+    // sort Auto last, then 1080→720→480
+    const rank = { "1080p": 4, "720p": 3, "480p": 2, Auto: 1 };
     streams.sort(function (a, b) {
       const qa = (a.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
       const qb = (b.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
@@ -453,7 +505,7 @@ async function extractStreamUrl(url) {
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 12),
+      streams: streams.slice(0, 16),
       subtitles: "",
     });
   } catch (e) {
