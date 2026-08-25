@@ -1,7 +1,7 @@
 /**
  * Kinogo.sh – Sora / Luna
- * Single host · posters · named multi-streams (Select Server)
- * v1.2.1
+ * Multi-stream Select Server · named voices when possible
+ * v1.3.0
  */
 const baseUrl = "https://kinogo.sh";
 
@@ -146,7 +146,6 @@ async function searchResults(keyword) {
             "do=search&subaction=search&story=" + encodeURIComponent(q),
         })
       );
-
       if (!html || html.length < 500) continue;
 
       const arts = html.split(/<article class="short"/i);
@@ -332,22 +331,37 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ---- Collaps ---- */
+/* ---- collect EVERY playable URL from an embed page ---- */
 
-function parseCollapsPlayer(html, season, episode) {
+function collectMediaFromHtml(html, label, referer) {
   const out = [];
   if (!html) return out;
+  if (/недоступен в вашем регионе|region not available/i.test(html)) {
+    return out;
+  }
 
-  const m = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
-  if (!m) return out;
-  const body = m[1];
+  const headers = {
+    "User-Agent": UA,
+    Referer: referer || baseUrl + "/",
+  };
+  const seen = {};
 
-  function grabHlsBlock(block) {
-    const hls =
-      (block.match(/["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/) ||
-        [])[1] || "";
+  function push(title, url) {
+    if (!isHttp(url)) return;
+    url = url.replace(/&amp;/g, "&").replace(/\\u0026/g, "&");
+    if (seen[url]) return;
+    seen[url] = true;
+    out.push({ title: title, streamUrl: url, headers: headers });
+  }
+
+  // makePlayer primary + audio names
+  const mp = html.match(/makePlayer\(\{([\s\S]*?)\}\)\s*;/);
+  if (mp) {
+    const body = mp[1];
+    const hls = (body.match(/["']?hls["']?\s*:\s*["'](https?:\/\/[^"']+)["']/) ||
+      [])[1];
     const namesBlock =
-      (block.match(/["']?names["']?\s*:\s*\[([^\]]*)\]/) || [])[1] || "";
+      (body.match(/["']?names["']?\s*:\s*\[([^\]]*)\]/) || [])[1] || "";
     const names = [];
     const nm = namesBlock.match(/["']([^"']+)["']/g);
     if (nm) {
@@ -355,81 +369,72 @@ function parseCollapsPlayer(html, season, episode) {
         names.push(nm[i].replace(/["']/g, ""));
       }
     }
-    return { hls: hls, names: names };
+    if (hls) {
+      const t =
+        names.length > 0
+          ? label + " · " + names.slice(0, 4).join(", ")
+          : label;
+      push(t, hls);
+    }
+    // quality map
+    const qRe =
+      /["'](\d{3,4})["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/g;
+    let qm;
+    while ((qm = qRe.exec(body))) {
+      push(label + " · " + qm[1] + "p", qm[2]);
+    }
   }
 
-  if (/["']?playlist["']?\s*:/.test(body) && season) {
-    const seasonRe =
-      /["']?season["']?\s*:\s*(\d+)([\s\S]*?)(?=["']?season["']?\s*:\s*\d+|$)/g;
-    let sm;
-    while ((sm = seasonRe.exec(body))) {
-      if (+sm[1] !== +season) continue;
-      const chunk = sm[2];
-      const epRe =
-        /["']?episode["']?\s*:\s*(\d+)([\s\S]*?)(?=["']?episode["']?\s*:\s*\d+|$)/g;
-      let em;
-      while ((em = epRe.exec(chunk))) {
-        if (+em[1] !== +(episode || 1)) continue;
-        const got = grabHlsBlock(em[2]);
-        if (got.hls && isHttp(got.hls)) {
-          const label =
-            got.names.length > 0
-              ? "Collaps · " + got.names.slice(0, 4).join(", ")
-              : "Collaps · S" + season + "E" + (episode || 1);
-          out.push({
-            title: label,
-            streamUrl: got.hls,
-            headers: {
-              "User-Agent": UA,
-              Referer: "https://api.delivembd.ws/",
-            },
-          });
-        }
+  // ALL m3u8 / mp4 in page (this is what previously showed Select Server)
+  const media = html.match(
+    /https?:\/\/[^"'\s<>\\]+(?:\.m3u8|\.mp4)[^"'\s<>\\]*/gi
+  );
+  if (media) {
+    let n = 0;
+    for (let i = 0; i < media.length; i++) {
+      let u = media[i].replace(/\\u0026/g, "&").replace(/\\/g, "");
+      // skip thumbnails / tiny junk
+      if (/\.(jpg|png|gif|webp)/i.test(u)) continue;
+      if (/preview|thumb|poster|sprite/i.test(u)) continue;
+      n++;
+      push(label + " · " + n, u);
+    }
+  }
+
+  // JW file: "[1080]url or [720]url"
+  const fileM =
+    html.match(/["']file["']\s*:\s*["']([^"']+)["']/i) ||
+    html.match(/file:\s*["']([^"']+)["']/i);
+  if (fileM) {
+    const f = fileM[1];
+    if (f.indexOf("[") >= 0) {
+      const re = /\[(\d{3,4}[^\]]*)\]([^,\[]+)/g;
+      let m;
+      while ((m = re.exec(f))) {
+        const u = m[2].trim().split(/\s+or\s+/i)[0].trim();
+        if (isHttp(u)) push(label + " · " + m[1], u);
       }
+    } else if (isHttp(f)) {
+      push(label, f);
     }
-  }
-
-  if (!out.length) {
-    const got = grabHlsBlock(body);
-    if (got.hls && isHttp(got.hls)) {
-      const label =
-        got.names.length > 0
-          ? "Collaps · " + got.names.slice(0, 5).join(", ")
-          : "Collaps";
-      out.push({
-        title: label,
-        streamUrl: got.hls,
-        headers: {
-          "User-Agent": UA,
-          Referer: "https://api.delivembd.ws/",
-        },
-      });
-    }
-  }
-
-  const qRe =
-    /["'](\d{3,4})["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/g;
-  let qm;
-  const seenQ = {};
-  while ((qm = qRe.exec(body))) {
-    if (seenQ[qm[2]]) continue;
-    seenQ[qm[2]] = true;
-    let exists = false;
-    for (let i = 0; i < out.length; i++) {
-      if (out[i].streamUrl === qm[2]) exists = true;
-    }
-    if (exists) continue;
-    out.push({
-      title: "Collaps · " + qm[1] + "p",
-      streamUrl: qm[2],
-      headers: {
-        "User-Agent": UA,
-        Referer: "https://api.delivembd.ws/",
-      },
-    });
   }
 
   return out;
+}
+
+async function resolveEmbed(embedUrl, label) {
+  if (!embedUrl || !isHttp(embedUrl)) return [];
+  if (/trailer/i.test(embedUrl)) return [];
+  try {
+    const html = await getText(
+      await soraFetch(embedUrl, {
+        headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
+      })
+    );
+    return collectMediaFromHtml(html, label || "Stream", embedUrl);
+  } catch (e) {
+    return [];
+  }
 }
 
 async function resolveCollaps(htmlPage, season, episode) {
@@ -440,10 +445,6 @@ async function resolveCollaps(htmlPage, season, episode) {
   )[1];
 
   const urls = [];
-  if (kp) {
-    urls.push("https://api.delivembd.ws/embed/kp/" + kp);
-    urls.push("https://api.ortified.ws/embed/kp/" + kp);
-  }
   if (ortId) {
     let u = "https://api.ortified.ws/embed/movie/" + ortId;
     if (season) {
@@ -451,6 +452,10 @@ async function resolveCollaps(htmlPage, season, episode) {
     }
     urls.push(u);
     urls.push("https://api.delivembd.ws/embed/movie/" + ortId);
+  }
+  if (kp) {
+    urls.push("https://api.delivembd.ws/embed/kp/" + kp);
+    urls.push("https://api.ortified.ws/embed/kp/" + kp);
   }
 
   for (let i = 0; i < urls.length; i++) {
@@ -463,93 +468,15 @@ async function resolveCollaps(htmlPage, season, episode) {
           },
         })
       );
-      if (!html || /недоступен в вашем регионе/i.test(html)) continue;
-      const parsed = parseCollapsPlayer(html, season, episode);
-      for (let j = 0; j < parsed.length; j++) out.push(parsed[j]);
-      if (out.length) break;
+      const got = collectMediaFromHtml(html, "Collaps", urls[i]);
+      for (let j = 0; j < got.length; j++) out.push(got[j]);
+      if (out.length >= 2) break;
     } catch (e) {}
   }
   return out;
 }
 
-async function resolveEmbed(embedUrl, label) {
-  const out = [];
-  if (!embedUrl || !isHttp(embedUrl)) return out;
-  if (/trailer/i.test(embedUrl)) return out;
-  try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
-      })
-    );
-    if (!html) return out;
-    if (/недоступен в вашем регионе|region not available/i.test(html)) {
-      return out;
-    }
-
-    if (/makePlayer\s*\(/.test(html)) {
-      const parsed = parseCollapsPlayer(html, null, null);
-      if (parsed.length) {
-        for (let i = 0; i < parsed.length; i++) {
-          if (parsed[i].title === "Collaps" && label) {
-            parsed[i].title = label;
-          }
-          out.push(parsed[i]);
-        }
-        return out;
-      }
-    }
-
-    const media = html.match(
-      /https?:\/\/[^"'\s<>]+(?:\.m3u8|\.mp4)[^"'\s<>]*/gi
-    );
-    if (media) {
-      const seen = {};
-      let n = 0;
-      for (let i = 0; i < media.length; i++) {
-        const u = media[i].replace(/&amp;/g, "&");
-        if (seen[u]) continue;
-        seen[u] = true;
-        n++;
-        out.push({
-          title: (label || "Stream") + (media.length > 1 ? " · " + n : ""),
-          streamUrl: u,
-          headers: { "User-Agent": UA, Referer: embedUrl },
-        });
-      }
-    }
-
-    const fileM =
-      html.match(/["']file["']\s*:\s*["']([^"']+)["']/i) ||
-      html.match(/file:\s*["']([^"']+)["']/i);
-    if (fileM) {
-      const f = fileM[1];
-      if (f.indexOf("[") >= 0) {
-        const re = /\[(\d{3,4})\]([^,\[]+)/g;
-        let m;
-        while ((m = re.exec(f))) {
-          const u = m[2].trim().split(/\s+or\s+/i)[0];
-          if (isHttp(u)) {
-            out.push({
-              title: (label || "Stream") + " · " + m[1] + "p",
-              streamUrl: u,
-              headers: { "User-Agent": UA, Referer: embedUrl },
-            });
-          }
-        }
-      } else if (isHttp(f)) {
-        out.push({
-          title: label || "Stream",
-          streamUrl: f,
-          headers: { "User-Agent": UA, Referer: embedUrl },
-        });
-      }
-    }
-  } catch (e) {}
-  return out;
-}
-
-/* ---- streams (multi → Select Server) ---- */
+/* ---- extractStreamUrl – ALWAYS multi if possible ---- */
 
 async function extractStreamUrl(url) {
   try {
@@ -559,61 +486,51 @@ async function extractStreamUrl(url) {
     const html = await getText(await soraFetch(pageUrl));
     const players = parsePlayers(html);
     const tokenMovie = extractAllohaTokenMovie(html);
+
     const streams = [];
     const seen = {};
 
-    function addStream(title, streamUrl, headers) {
-      if (!isHttp(streamUrl)) return;
-      const key = streamUrl.slice(0, 140);
+    function add(item) {
+      if (!item || !isHttp(item.streamUrl)) return;
+      const key = item.streamUrl.slice(0, 160);
       if (seen[key]) return;
       seen[key] = true;
       streams.push({
-        title: title,
-        name: title,
-        streamUrl: streamUrl,
-        headers: headers || {
+        title: item.title,
+        name: item.title,
+        streamUrl: item.streamUrl,
+        headers: item.headers || {
           "User-Agent": UA,
           Referer: baseUrl + "/",
         },
       });
     }
 
-    // 1) Alloha – one row per voice
+    // 1) Alloha – separate stream per voice
     if (tokenMovie) {
       const j = await fetchAlloha(tokenMovie);
       const data = j && j.data ? j.data : null;
 
-      async function pushAllohaTranslations(map) {
+      async function fromMap(map) {
         const ids = Object.keys(map);
         ids.sort(function (a, b) {
           const an = map[a].translation || map[a].name || "";
           const bn = map[b].translation || map[b].name || "";
-          const score = function (n) {
+          const sc = function (n) {
             if (/дубл|lost|кубик|гоблин|кравец|hdrezka|проф/i.test(n))
               return 0;
             if (/субтитр|оригинал/i.test(n)) return 2;
             return 1;
           };
-          return score(an) - score(bn);
+          return sc(an) - sc(bn);
         });
-
-        for (let i = 0; i < ids.length && streams.length < 12; i++) {
+        for (let i = 0; i < ids.length && streams.length < 14; i++) {
           const tr = map[ids[i]];
           const voice = tr.translation || tr.name || "Alloha";
-          const qual = tr.quality ? " · " + tr.quality : "";
-          const label = voice + qual;
+          const label = voice + (tr.quality ? " · " + tr.quality : "");
           if (!tr.iframe) continue;
-
           const more = await resolveEmbed(tr.iframe, label);
-          if (more.length) {
-            for (let k = 0; k < more.length; k++) {
-              addStream(
-                more[k].title || label,
-                more[k].streamUrl,
-                more[k].headers
-              );
-            }
-          }
+          for (let k = 0; k < more.length; k++) add(more[k]);
         }
       }
 
@@ -622,22 +539,18 @@ async function extractStreamUrl(url) {
           const season = data.seasons[String(se.season)];
           const ep =
             season.episodes && season.episodes[String(se.episode || 1)];
-          if (ep && ep.translation) {
-            await pushAllohaTranslations(ep.translation);
-          }
+          if (ep && ep.translation) await fromMap(ep.translation);
         } else if (data.translation_iframe) {
-          await pushAllohaTranslations(data.translation_iframe);
+          await fromMap(data.translation_iframe);
         }
       }
     }
 
-    // 2) Collaps
+    // 2) Collaps – collect ALL m3u8 variants (forces Select Server)
     const collaps = await resolveCollaps(html, se.season, se.episode);
-    for (let i = 0; i < collaps.length; i++) {
-      addStream(collaps[i].title, collaps[i].streamUrl, collaps[i].headers);
-    }
+    for (let i = 0; i < collaps.length; i++) add(collaps[i]);
 
-    // 3) Page players
+    // 3) Every page player tab
     for (let i = 0; i < players.length; i++) {
       let u = players[i].url;
       if (se.season && /ortified|delivembd/i.test(u)) {
@@ -648,15 +561,8 @@ async function extractStreamUrl(url) {
           "&episode=" +
           (se.episode || 1);
       }
-      const label = players[i].name || "Плеер " + (i + 1);
-      const more = await resolveEmbed(u, label);
-      for (let k = 0; k < more.length; k++) {
-        addStream(
-          more[k].title || label,
-          more[k].streamUrl,
-          more[k].headers
-        );
-      }
+      const more = await resolveEmbed(u, players[i].name || "Плеер");
+      for (let k = 0; k < more.length; k++) add(more[k]);
     }
 
     streams.sort(function (a, b) {
@@ -668,7 +574,7 @@ async function extractStreamUrl(url) {
       return rank(a.title) - rank(b.title);
     });
 
-    // Always multi-stream object → Luna "Select Server"
+    // NEVER return a bare URL string — always the multi object
     return JSON.stringify({
       streams: streams.slice(0, 15),
       subtitles: "",
