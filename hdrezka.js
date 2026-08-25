@@ -1,7 +1,7 @@
 /**
  * HDRezka – Sora / Luna
- * Multi-mirror + POST ajax search
- * v1.1.0
+ * Multi-mirror · posters · RU translators · CDN streams
+ * v1.2.0
  */
 const MIRRORS = [
   "https://i.hdrezka.info",
@@ -88,11 +88,12 @@ function parseSE(url) {
 function randomFavs() {
   let s = "";
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 8; i++) s += chars.charAt(Math.floor(Math.random() * chars.length));
+  for (let i = 0; i < 8; i++) {
+    s += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
   return s;
 }
 
-/* ---- clearTrash ---- */
 function b64encodeUtf8(str) {
   try {
     return btoa(unescape(encodeURIComponent(str)));
@@ -136,7 +137,9 @@ function clearTrash(data) {
       return decoded;
     }
   } catch (e2) {
-    if (trashString.indexOf("http") !== -1 || trashString.charAt(0) === "[") return trashString;
+    if (trashString.indexOf("http") !== -1 || trashString.charAt(0) === "[") {
+      return trashString;
+    }
     return "";
   }
 }
@@ -144,7 +147,7 @@ function clearTrash(data) {
 function parseQualityList(urlField) {
   const streams = [];
   if (!urlField) return streams;
-  let decoded = urlField;
+  let decoded = String(urlField);
   if (
     decoded.indexOf("#h") !== -1 ||
     decoded.indexOf("//_//") !== -1 ||
@@ -152,7 +155,7 @@ function parseQualityList(urlField) {
   ) {
     decoded = clearTrash(decoded) || decoded;
   }
-  const parts = String(decoded).split(",");
+  const parts = decoded.split(",");
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i].trim();
     if (!p || p.indexOf("null") !== -1) continue;
@@ -174,19 +177,23 @@ function isRussianVoice(name) {
   const n = String(name || "").toLowerCase();
   if (!n) return true;
   if (
-    /дубляж|русский|рус\b|lostfilm|tvshows|newstudio|kubik|многоголосый|ширжай/.test(n)
-  )
+    /дубляж|русский|рус\b|lostfilm|tvshows|newstudio|kubik|многоголосый|ширжак/.test(
+      n
+    )
+  ) {
     return true;
-  if (/оригинал|english|\beng\b|укр|ukr/.test(n) && !/рус/.test(n)) return false;
+  }
+  if (/оригинал|english|\beng\b|укр|ukr/.test(n) && !/рус/.test(n)) {
+    return false;
+  }
   return true;
 }
 
-/* ---- SEARCH (fixed) ---- */
+/* ---------- search ---------- */
 
 function parseAjaxSearchHtml(html, mirror) {
   const out = [];
   const seen = {};
-  // .b-search__section_list li > a > span.enty
   const re =
     /<li[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>\s*<span[^>]*class=["'][^"']*enty[^"']*["'][^>]*>([^<]+)<\/span>\s*(?:\(([^)]*)\))?/gi;
   let m;
@@ -202,7 +209,6 @@ function parseAjaxSearchHtml(html, mirror) {
       href: href,
     });
   }
-  // fallback simpler
   if (!out.length) {
     const re2 =
       /href=["']([^"']+\/\d+-[^"']+\.html)["'][^>]*>[\s\S]*?class=["']enty["'][^>]*>([^<]+)/gi;
@@ -219,42 +225,53 @@ function parseAjaxSearchHtml(html, mirror) {
 function parseFullSearchHtml(html, mirror) {
   const out = [];
   const seen = {};
-  // b-content__inline_item blocks
-  const blocks = html.split(/b-content__inline_item/i);
+  const blocks = html.split(/class=["'][^"']*b-content__inline_item[^"']*["']/i);
+
   for (let i = 1; i < blocks.length; i++) {
     const b = blocks[i];
-    const hm =
-      b.match(/href=["']([^"']+\/\d+-[^"']+\.html)["']/i) ||
-      b.match(/href=["']([^"']+\.html)["']/i);
+    const hm = b.match(
+      /href=["']((?:https?:\/\/[^"']+)?\/(?:films|series|cartoons|animation)\/[^"']+\/\d+-[^"']+\.html)["']/i
+    );
     if (!hm) continue;
     const href = absUrl(hm[1], mirror);
     if (seen[href]) continue;
-    if (!/\/(films|series|cartoons|animation)\//i.test(href)) continue;
     seen[href] = true;
+
     let title = "";
     const tm =
-      b.match(/b-content__inline_item-link[^>]*>[\s\S]*?<a[^>]*>([^<]+)/i) ||
-      b.match(/<a[^>]+href=["'][^"']+["'][^>]*>([^<]{2,120})</i);
-    if (tm) title = tm[1].trim();
-    if (!title) continue;
+      b.match(
+        /b-content__inline_item-link[\s\S]*?<a[^>]*href=["'][^"']+["'][^>]*>([^<]+)/i
+      ) ||
+      b.match(/<a[^>]+href=["'][^"']+\.html["'][^>]*>([^<]{2,100})</i);
+    if (tm) title = tm[1].replace(/\s+/g, " ").trim();
+    if (!title || title.length < 2) continue;
+
     let image = "";
-    const im = b.match(/(?:src|data-src)=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i);
+    const im =
+      b.match(
+        /b-content__inline_item-cover[\s\S]*?<img[^>]+src=["']([^"']+)["']/i
+      ) ||
+      b.match(
+        /<img[^>]+src=["']([^"']+(?:jpg|jpeg|png|webp)[^"']*)["'][^>]*(?:alt|class)/i
+      ) ||
+      b.match(/(?:src|data-src)=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i);
     if (im) image = absUrl(im[1], mirror);
+
     out.push({ title: title, image: image, href: href });
     if (out.length >= 20) break;
   }
   return out;
 }
 
-async function searchOnMirror(mirror, q) {
-  // 1) POST ajax search (correct method)
+async function searchOnMirrorAjax(mirror, q) {
   try {
     const body = "q=" + encodeURIComponent(q);
     const html = await getText(
       await soraFetch(mirror + "/engine/ajax/search.php", {
         method: "POST",
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "Content-Type":
+            "application/x-www-form-urlencoded; charset=UTF-8",
           "X-Requested-With": "XMLHttpRequest",
           Referer: mirror + "/",
           Origin: mirror,
@@ -263,29 +280,10 @@ async function searchOnMirror(mirror, q) {
         body: body,
       })
     );
-    if (html && html.length > 50 && html.indexOf("403") === -1) {
-      const items = parseAjaxSearchHtml(html, mirror);
-      if (items.length) return items;
+    if (html && html.length > 50) {
+      return parseAjaxSearchHtml(html, mirror);
     }
   } catch (e) {}
-
-  // 2) full search page GET
-  try {
-    const url =
-      mirror +
-      "/search/?do=search&subaction=search&q=" +
-      encodeURIComponent(q);
-    const html = await getText(
-      await soraFetch(url, {
-        headers: { Referer: mirror + "/", Accept: "text/html" },
-      })
-    );
-    if (html && html.length > 500) {
-      const items = parseFullSearchHtml(html, mirror);
-      if (items.length) return items;
-    }
-  } catch (e) {}
-
   return [];
 }
 
@@ -296,11 +294,59 @@ async function searchResults(keyword) {
 
     for (let i = 0; i < MIRRORS.length; i++) {
       const mirror = MIRRORS[i];
-      const items = await searchOnMirror(mirror, q);
-      if (items.length) {
-        baseUrl = mirror; // lock working mirror for streams
-        return JSON.stringify(items.slice(0, 20));
-      }
+
+      // full search page → posters
+      try {
+        const url =
+          mirror +
+          "/search/?do=search&subaction=search&q=" +
+          encodeURIComponent(q);
+        const html = await getText(
+          await soraFetch(url, {
+            headers: {
+              Referer: mirror + "/",
+              Accept: "text/html,application/xhtml+xml",
+            },
+          })
+        );
+        if (html && html.length > 800) {
+          const items = parseFullSearchHtml(html, mirror);
+          if (items.length) {
+            baseUrl = mirror;
+            return JSON.stringify(items.slice(0, 20));
+          }
+        }
+      } catch (e) {}
+
+      // ajax fallback
+      try {
+        const items = await searchOnMirrorAjax(mirror, q);
+        if (items.length) {
+          baseUrl = mirror;
+          for (let j = 0; j < Math.min(items.length, 8); j++) {
+            if (items[j].image) continue;
+            try {
+              const ph = await getText(
+                await soraFetch(items[j].href, {
+                  headers: { Referer: mirror + "/" },
+                })
+              );
+              const og =
+                ph.match(
+                  /property=["']og:image["']\s+content=["']([^"']+)["']/i
+                ) ||
+                ph.match(
+                  /content=["']([^"']+)["']\s+property=["']og:image["']/i
+                ) ||
+                ph.match(
+                  /class=["'][^"']*b-sidecover[^"']*["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i
+                );
+              if (og) items[j].image = absUrl(og[1], mirror);
+            } catch (e2) {}
+          }
+          return JSON.stringify(items.slice(0, 20));
+        }
+      } catch (e) {}
     }
     return JSON.stringify([]);
   } catch (e) {
@@ -311,9 +357,8 @@ async function searchResults(keyword) {
 async function extractDetails(url) {
   try {
     const pageUrl = String(url).split("?")[0];
-    // detect mirror from url
     for (let i = 0; i < MIRRORS.length; i++) {
-      if (pageUrl.indexOf(MIRRORS[i].replace("https://", "")) !== -1) {
+      if (pageUrl.indexOf(MIRRORS[i].replace(/^https?:\/\//, "")) !== -1) {
         baseUrl = MIRRORS[i];
         break;
       }
@@ -321,9 +366,11 @@ async function extractDetails(url) {
     const html = await getText(await soraFetch(pageUrl));
     let description = "N/A";
     const dm =
-      html.match(/class="[^"]*b-post__description_text[^"]*"[^>]*>([\s\S]*?)<\//i) ||
-      html.match(/itemprop="description"[^>]*content="([^"]+)"/i) ||
-      html.match(/name="description"\s+content="([^"]+)"/i);
+      html.match(
+        /class=["'][^"']*b-post__description_text[^"']*["'][^>]*>([\s\S]*?)<\//i
+      ) ||
+      html.match(/itemprop=["']description["'][^>]*content=["']([^"']+)["']/i) ||
+      html.match(/name=["']description["']\s+content=["']([^"']+)["']/i);
     if (dm) {
       description = String(dm[1])
         .replace(/<[^>]+>/g, " ")
@@ -393,52 +440,82 @@ async function extractEpisodes(url) {
   }
 }
 
-function extractVideoId(html, pageUrl) {
+/* ---------- streams ---------- */
+
+function extractFavs(html) {
   const m =
-    html.match(/sof\.tv\.initCDN(?:Movies|Series)Events\((\d+)\s*,\s*(\d+)/i) ||
-    html.match(/data-id=["'](\d+)["']/i) ||
-    pageUrl.match(/\/(\d+)-[^/]+\.html/);
-  return m ? m[1] : null;
+    html.match(/name=["']favs["']\s+value=["']([^"']+)["']/i) ||
+    html.match(/favs\s*[:=]\s*["']([a-z0-9]+)["']/i) ||
+    html.match(/["']favs["']\s*:\s*["']([^"']+)["']/i);
+  return m ? m[1] : randomFavs();
+}
+
+function extractVideoId(html, pageUrl) {
+  let m = html.match(
+    /sof\.tv\.initCDN(?:Movies|Series)Events\s*\(\s*(\d+)\s*,\s*(\d+)/i
+  );
+  if (m) return { id: m[1], translator: m[2] };
+  m = html.match(/data-id=["'](\d+)["']/i);
+  if (m) return { id: m[1], translator: null };
+  m = pageUrl.match(/\/(\d+)-[^/]+\.html/);
+  if (m) return { id: m[1], translator: null };
+  return null;
 }
 
 function extractTranslators(html) {
   const list = [];
+  const seen = {};
   const re =
-    /data-translator_id=["'](\d+)["'][^>]*>([\s\S]*?)<\/(?:li|div|a|span)>/gi;
+    /data-translator_id=["'](\d+)["']([^>]*)>([\s\S]*?)<\/(?:li|div|a|span|button)>/gi;
   let m;
   while ((m = re.exec(html))) {
-    const name = String(m[2])
+    const id = m[1];
+    if (seen[id]) continue;
+    seen[id] = true;
+    const attrs = m[2] || "";
+    const name = String(m[3])
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-    list.push({ id: m[1], name: name || "Tr " + m[1] });
+    const camrip = /data-camrip=["']1["']/i.test(attrs + m[0]) ? "1" : "0";
+    const ads = /data-ads=["']1["']/i.test(attrs) ? "1" : "0";
+    const director = /data-director=["']1["']/i.test(attrs) ? "1" : "0";
+    list.push({
+      id: id,
+      name: name || "Озвучка " + id,
+      camrip: camrip,
+      ads: ads,
+      director: director,
+    });
   }
-  const init = html.match(
-    /sof\.tv\.initCDN(?:Movies|Series)Events\(\d+\s*,\s*(\d+)/i
-  );
-  if (init && !list.length) list.push({ id: init[1], name: "Default" });
   return list;
 }
 
-async function fetchCdn(videoId, translatorId, season, episode, isSeries) {
+async function fetchCdn(opts) {
   const params = new URLSearchParams();
-  params.append("id", String(videoId));
-  params.append("translator_id", String(translatorId));
-  params.append("favs", randomFavs());
-  if (isSeries) {
-    params.append("season", String(season || 1));
-    params.append("episode", String(episode || 1));
+  params.append("id", String(opts.id));
+  params.append("translator_id", String(opts.translatorId));
+  params.append("favs", opts.favs || randomFavs());
+  if (opts.isSeries) {
+    params.append("season", String(opts.season || 1));
+    params.append("episode", String(opts.episode || 1));
     params.append("action", "get_stream");
   } else {
+    params.append("is_camrip", opts.camrip || "0");
+    params.append("is_ads", opts.ads || "0");
+    params.append("is_director", opts.director || "0");
     params.append("action", "get_movie");
   }
-  const res = await soraFetch(baseUrl + "/ajax/get_cdn_series/", {
+
+  const url = baseUrl + "/ajax/get_cdn_series/?t=" + String(Date.now());
+  const res = await soraFetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       "X-Requested-With": "XMLHttpRequest",
-      Referer: baseUrl + "/",
+      Referer: opts.referer || baseUrl + "/",
       Origin: baseUrl,
+      Accept: "application/json, text/javascript, */*; q=0.01",
     },
     body: params.toString(),
   });
@@ -460,40 +537,75 @@ async function extractStreamUrl(url) {
     const episode = se.episode || 1;
 
     const html = await getText(
-      await soraFetch(pageUrl, { headers: { Referer: baseUrl + "/" } })
+      await soraFetch(pageUrl, {
+        headers: { Referer: baseUrl + "/", Accept: "text/html" },
+      })
     );
-    if (!html || html.length < 200) {
+    if (!html || html.length < 300) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
 
-    const videoId = extractVideoId(html, pageUrl);
-    if (!videoId) return JSON.stringify({ streams: [], subtitles: "" });
+    const vid = extractVideoId(html, pageUrl);
+    if (!vid || !vid.id) {
+      return JSON.stringify({ streams: [], subtitles: "" });
+    }
 
+    const favs = extractFavs(html);
     let translators = extractTranslators(html);
+    if (!translators.length && vid.translator) {
+      translators = [
+        {
+          id: vid.translator,
+          name: "Default",
+          camrip: "0",
+          ads: "0",
+          director: "0",
+        },
+      ];
+    }
+
     const ru = translators.filter(function (t) {
       return isRussianVoice(t.name);
     });
-    const ordered = (ru.length ? ru : translators).slice(0, 6);
-    if (!ordered.length) ordered.push({ id: "1", name: "Default" });
+    let ordered = (ru.length ? ru : translators).slice(0, 8);
+    if (!ordered.length) {
+      ordered = [
+        {
+          id: vid.translator || "56",
+          name: "Default",
+          camrip: "0",
+          ads: "0",
+          director: "0",
+        },
+      ];
+    }
 
     const streams = [];
     for (let i = 0; i < ordered.length; i++) {
       const tr = ordered[i];
       try {
-        const data = await fetchCdn(
-          videoId,
-          tr.id,
-          season,
-          episode,
-          isSeries
-        );
+        const data = await fetchCdn({
+          id: vid.id,
+          translatorId: tr.id,
+          favs: favs,
+          isSeries: isSeries,
+          season: season,
+          episode: episode,
+          camrip: tr.camrip,
+          ads: tr.ads,
+          director: tr.director,
+          referer: pageUrl,
+        });
         if (!data || !data.url) continue;
         const quals = parseQualityList(data.url);
         for (let j = 0; j < quals.length; j++) {
           streams.push({
             title: quals[j].quality + " · " + tr.name,
             streamUrl: quals[j].url,
-            headers: { "User-Agent": UA, Referer: baseUrl + "/" },
+            headers: {
+              "User-Agent": UA,
+              Referer: baseUrl + "/",
+            },
           });
         }
       } catch (e) {}
@@ -508,6 +620,7 @@ async function extractStreamUrl(url) {
       seen[k] = true;
       uniq.push(streams[i]);
     }
+
     return JSON.stringify({ streams: uniq.slice(0, 15), subtitles: "" });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "" });
