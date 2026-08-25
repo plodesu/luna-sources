@@ -1,8 +1,8 @@
 /**
  * ATodo – Sora / Luna
- * Fast path: jator HLS masters (playable)
- * Fallback: xinu HTTPS (HDRezka when present)
- * v1.3.0
+ * GidOnline-style multi-stream picker
+ * All voices (HDRezka first) + 1080p / 720p / 480p
+ * v1.3.1
  */
 const apiBase = "https://api.atodo.fun";
 const tmdbImg = "https://image.tmdb.org/t/p/w500";
@@ -73,8 +73,7 @@ function isHttp(u) {
 }
 
 function forceHttps(u) {
-  if (!u) return "";
-  return String(u).replace(/^http:\/\//i, "https://");
+  return u ? String(u).replace(/^http:\/\//i, "https://") : "";
 }
 
 function posterUrl(path) {
@@ -159,9 +158,30 @@ function niceVoice(name) {
   if (isHdrezka(n)) {
     if (/дубл/i.test(n)) return "HDRezka · Дубляж";
     if (/18\+/i.test(n)) return "HDRezka · 18+";
+    if (/суб|sub/i.test(n)) return "HDRezka · Субтитры";
     return "HDRezka · Studio";
   }
   return n;
+}
+
+function heightToLabel(h) {
+  h = +h || 0;
+  if (h >= 1000) return "1080p";
+  if (h >= 700) return "720p";
+  if (h >= 460) return "480p";
+  return "";
+}
+
+function absUrl(u, base) {
+  if (!u) return "";
+  u = String(u).replace(/&amp;/g, "&").trim();
+  if (u.indexOf("//") === 0) return "https:" + u;
+  if (isHttp(u)) return u;
+  if (u.charAt(0) === "/") {
+    const m = String(base).match(/^(https?:\/\/[^/]+)/i);
+    return (m ? m[1] : "") + u;
+  }
+  return String(base).replace(/\/[^/]*$/, "/") + u.replace(/^\.\//, "");
 }
 
 function pickEpisodeData(tr, season, episode) {
@@ -183,35 +203,6 @@ function pickEpisodeData(tr, season, episode) {
   return null;
 }
 
-async function resolvePlayable(balancer, dataObj) {
-  if (!dataObj) return [];
-  const url =
-    apiBase + "/api/source/" + balancer + "?data=" + dataToParam(dataObj);
-  const json = await getJson(url);
-  if (!json || !json.streams || !json.streams.video) return [];
-  const video = json.streams.video;
-  const out = [];
-
-  // Prefer HLS master (best for iOS AVPlayer)
-  if (video.hls && video.hls.master && isHttp(video.hls.master)) {
-    out.push({
-      kind: "hls",
-      url: forceHttps(video.hls.master),
-    });
-  }
-
-  // HTTP progressive – only https + only 720/1080 (skip low junk)
-  if (video.http && video.http.qualities) {
-    const qs = video.http.qualities;
-    ["1080", "720"].forEach(function (k) {
-      if (qs[k] && isHttp(qs[k])) {
-        out.push({ kind: "mp4", quality: k + "p", url: forceHttps(qs[k]) });
-      }
-    });
-  }
-  return out;
-}
-
 async function fetchSource(balancer, type, id, kpId) {
   let url = apiBase + "/api/source/" + balancer + "?type=" + type;
   if (kpId) url += "&kinopoisk_id=" + encodeURIComponent(kpId);
@@ -219,6 +210,79 @@ async function fetchSource(balancer, type, id, kpId) {
   const json = await getJson(url);
   if (!json || json.error) return null;
   return json;
+}
+
+/**
+ * Resolve dataHash → list of {titleSuffix, url}
+ * HLS: 1080p / 720p / 480p (absolute) + Auto master
+ * MP4: 1080p / 720p / 480p https
+ */
+async function resolveQualities(balancer, dataObj, voiceLabel) {
+  const out = [];
+  if (!dataObj) return out;
+
+  const json = await getJson(
+    apiBase + "/api/source/" + balancer + "?data=" + dataToParam(dataObj)
+  );
+  if (!json || !json.streams || !json.streams.video) return out;
+  const video = json.streams.video;
+
+  // --- HLS ---
+  if (video.hls && video.hls.master && isHttp(video.hls.master)) {
+    const master = forceHttps(video.hls.master);
+    out.push({ title: voiceLabel + " · Auto", streamUrl: master });
+
+    try {
+      const text = await getText(
+        await soraFetch(master, {
+          headers: Object.assign(
+            { Accept: "application/vnd.apple.mpegurl,*/*" },
+            streamHeaders
+          ),
+        })
+      );
+      if (text && text.indexOf("#EXT") === 0) {
+        const lines = text.split(/\r?\n/);
+        const byQ = {};
+        for (let i = 0; i < lines.length; i++) {
+          if (!/^#EXT-X-STREAM-INF:/i.test(lines[i])) continue;
+          const resM = lines[i].match(/RESOLUTION=\d+x(\d+)/i);
+          let next = "";
+          for (let j = i + 1; j < lines.length; j++) {
+            if (lines[j] && lines[j].charAt(0) !== "#") {
+              next = lines[j].trim();
+              break;
+            }
+          }
+          if (!next) continue;
+          const q = heightToLabel(resM ? +resM[1] : 0);
+          if (!q) continue;
+          const abs = forceHttps(absUrl(next, master));
+          if (isHttp(abs)) byQ[q] = abs;
+        }
+        ["1080p", "720p", "480p"].forEach(function (q) {
+          if (byQ[q]) {
+            out.push({ title: voiceLabel + " · " + q, streamUrl: byQ[q] });
+          }
+        });
+      }
+    } catch (e) {}
+  }
+
+  // --- progressive MP4 ---
+  if (video.http && video.http.qualities) {
+    const qs = video.http.qualities;
+    ["1080", "720", "480"].forEach(function (k) {
+      if (qs[k] && isHttp(qs[k])) {
+        out.push({
+          title: voiceLabel + " · " + k + "p",
+          streamUrl: forceHttps(qs[k]),
+        });
+      }
+    });
+  }
+
+  return out;
 }
 
 /* ===================== search ===================== */
@@ -256,7 +320,12 @@ async function searchResults(keyword) {
       results.push({
         title: title,
         image: posterUrl(r.poster_path),
-        href: makeHref(media, id, media === "tv" ? 1 : 0, media === "tv" ? 1 : 0),
+        href: makeHref(
+          media,
+          id,
+          media === "tv" ? 1 : 0,
+          media === "tv" ? 1 : 0
+        ),
       });
     }
     return JSON.stringify(results.slice(0, 20));
@@ -319,7 +388,6 @@ async function extractEpisodes(url) {
       ]);
     }
 
-    // One request only
     let src = await fetchSource("jator", "tv", p.id, null);
     if (!src || !src.translations) {
       const det = await getJson(apiBase + "/api/details/tv/" + p.id);
@@ -331,7 +399,10 @@ async function extractEpisodes(url) {
     if (src && src.translations) {
       let tr = null;
       for (let i = 0; i < src.translations.length; i++) {
-        if (src.translations[i].seasons && src.translations[i].seasons.length) {
+        if (
+          src.translations[i].seasons &&
+          src.translations[i].seasons.length
+        ) {
           tr = src.translations[i];
           break;
         }
@@ -370,12 +441,6 @@ async function extractEpisodes(url) {
   }
 }
 
-/**
- * FAST extractStreamUrl
- * 1) jator with TMDB id (HLS masters – usually play)
- * 2) if empty → details for KP + xinu (HDRezka / OK CDN https)
- * Max ~2–4 network hops, max 8 stream rows
- */
 async function extractStreamUrl(url) {
   try {
     const p = parseHref(url);
@@ -384,28 +449,31 @@ async function extractStreamUrl(url) {
     const streams = [];
     const seen = {};
 
-    function push(title, streamUrl) {
-      streamUrl = forceHttps(streamUrl);
-      if (!isHttp(streamUrl)) return;
-      if (seen[title] || seen[streamUrl]) return;
-      seen[title] = true;
-      seen[streamUrl] = true;
+    function add(item) {
+      if (!item || !isHttp(item.streamUrl)) return;
+      const t = String(item.title || "").trim();
+      const u = forceHttps(item.streamUrl);
+      if (!t || seen[t] || seen[u]) return;
+      seen[t] = true;
+      seen[u] = true;
       streams.push({
-        title: title,
-        name: title,
-        streamUrl: streamUrl,
+        title: t,
+        name: t,
+        streamUrl: u,
         headers: streamHeaders,
       });
     }
 
     async function consume(balancer, src) {
       if (!src || !src.translations) return;
-      // HDRezka first, then others; max 4 voices
       const trs = src.translations.slice().sort(function (a, b) {
-        return (isHdrezka(a.translation_name) ? 0 : 1) -
-          (isHdrezka(b.translation_name) ? 0 : 1);
+        return (
+          (isHdrezka(a.translation_name) ? 0 : 1) -
+          (isHdrezka(b.translation_name) ? 0 : 1)
+        );
       });
-      const limit = Math.min(trs.length, 4);
+      // all voices (cap 6 to keep it usable)
+      const limit = Math.min(trs.length, 6);
       for (let i = 0; i < limit; i++) {
         const tr = trs[i];
         const voice = niceVoice(tr.translation_name);
@@ -414,42 +482,44 @@ async function extractStreamUrl(url) {
             ? tr.data || null
             : pickEpisodeData(tr, p.season, p.episode);
         if (!dataObj) continue;
-
-        const playable = await resolvePlayable(balancer, dataObj);
-        for (let j = 0; j < playable.length; j++) {
-          const item = playable[j];
-          if (item.kind === "hls") {
-            // Master only – AVPlayer picks quality, most reliable
-            push(voice, item.url);
-          } else if (item.kind === "mp4") {
-            push(voice + " · " + item.quality, item.url);
-          }
-        }
-        if (streams.length >= 8) return;
+        const items = await resolveQualities(balancer, dataObj, voice);
+        for (let j = 0; j < items.length; j++) add(items[j]);
       }
     }
 
-    // --- fast path: jator ---
+    // 1) jator (HLS, usually best quality ladder)
     const jator = await fetchSource("jator", p.type, p.id, null);
     await consume("jator", jator);
 
-    // --- fallback / HDRezka: xinu with kinopoisk ---
-    if (streams.length < 2) {
-      let kp = jator && jator.kinopoisk_id ? String(jator.kinopoisk_id) : "";
-      if (!kp) {
-        const det = await getJson(
-          apiBase + "/api/details/" + p.type + "/" + p.id
-        );
-        if (det && det.kinopoisk_id) kp = String(det.kinopoisk_id);
-      }
-      if (kp) {
-        const xinu = await fetchSource("xinu", p.type, p.id, kp);
-        await consume("xinu", xinu);
-      }
+    // 2) xinu (HDRezka + other studios)
+    let kp = jator && jator.kinopoisk_id ? String(jator.kinopoisk_id) : "";
+    if (!kp) {
+      const det = await getJson(
+        apiBase + "/api/details/" + p.type + "/" + p.id
+      );
+      if (det && det.kinopoisk_id) kp = String(det.kinopoisk_id);
+    }
+    if (kp) {
+      const xinu = await fetchSource("xinu", p.type, p.id, kp);
+      await consume("xinu", xinu);
     }
 
+    // Sort: HDRezka first, then 1080 → 720 → 480 → Auto
+    const qRank = { "1080p": 4, "720p": 3, "480p": 2, Auto: 1 };
+    streams.sort(function (a, b) {
+      const aRez = /hdrezka/i.test(a.title) ? 0 : 1;
+      const bRez = /hdrezka/i.test(b.title) ? 0 : 1;
+      if (aRez !== bRez) return aRez - bRez;
+      const qa = (a.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
+      const qb = (b.title.match(/(1080|720|480)p|Auto/) || [])[0] || "";
+      if ((qRank[qb] || 0) !== (qRank[qa] || 0)) {
+        return (qRank[qb] || 0) - (qRank[qa] || 0);
+      }
+      return a.title.localeCompare(b.title);
+    });
+
     return JSON.stringify({
-      streams: streams.slice(0, 8),
+      streams: streams.slice(0, 30),
       subtitles: "",
     });
   } catch (e) {
