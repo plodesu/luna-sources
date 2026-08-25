@@ -1,0 +1,24 @@
+{
+  "sourceName": "1Films",
+  "iconUrl": "https://ru.1films.xyz/favicon.ico",
+  "author": {
+    "name": "plodesu",
+    "icon": ""
+  },
+  "version": "1.0.0",
+  "language": "Russian",
+  "languageType": ["Dubbed", "Subbed"],
+  "streamType": "MP4",
+  "quality": "HD",
+  "baseUrl": "https://ru.1films.xyz",
+  "searchBaseUrl": "https://ru.1films.xyz",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/1films.js",
+  "type": "movies/shows",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
