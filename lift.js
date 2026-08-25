@@ -1,8 +1,8 @@
 /**
  * Lift (liftw.ws) – Sora / Luna
- * API: api.liftw.ws · embed.liftw.ws (Collaps HLS)
- * Voice picker only · master HLS = highest quality + multi-audio
- * v1.0.1
+ * Master HLS only = video + Russian audio (no silent video-only variants)
+ * Voice picker · no 480/720/1080 list · ABR highest quality
+ * v1.0.2
  */
 const siteUrl = "https://liftw.ws";
 const apiBase = "https://api.liftw.ws";
@@ -14,10 +14,9 @@ async function soraFetch(url, options) {
   const headers = Object.assign(
     {
       "User-Agent": UA,
-      "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
+      "Accept-Language": "ru-RU,ru;q=0.9",
       Accept: "application/json,text/html,*/*",
       Referer: siteUrl + "/",
-      Origin: siteUrl,
     },
     options.headers || {}
   );
@@ -95,10 +94,17 @@ function parseHref(url) {
 }
 
 function makeHref(id, season, episode) {
-  let h = apiBase + "/watch?id=" + id;
+  let h = siteUrl + "/watch?id=" + id;
   if (season) h += "&s=" + season;
   if (episode) h += "&e=" + episode;
   return h;
+}
+
+function isSeriesItem(it) {
+  if (!it) return false;
+  if (it.type === 3 || it.type === 7 || it.type >= 3) return true;
+  if (it.serial_status && String(it.serial_status).length > 0) return true;
+  return false;
 }
 
 function isEnglish(name) {
@@ -124,7 +130,8 @@ function voiceRank(name) {
   if (/rezka|hdrezka/i.test(n) && /дубл/i.test(n)) return 0;
   if (/rezka|hdrezka/i.test(n)) return 1;
   if (/дубл/i.test(n)) return 2;
-  if (/lostfilm|coldfilm|baibako|tvshows|winmedia|dragon/i.test(n)) return 3;
+  if (/lostfilm|coldfilm|baibako|tvshows|winmedia|dragon|рус/i.test(n))
+    return 3;
   return 4;
 }
 
@@ -135,7 +142,6 @@ function unescapeJs(s) {
     .replace(/\\"/g, '"');
 }
 
-/** Parse Collaps-style makePlayer from embed HTML */
 function parseEmbed(html) {
   const out = { hls: "", names: [], seasons: [] };
   if (!html) return out;
@@ -187,70 +193,6 @@ function parseEmbed(html) {
   return out;
 }
 
-/**
- * Prefer highest video quality while keeping master if multi-audio.
- * Returns one URL: highest variant if single-audio, else master (audio safe).
- */
-async function resolveBestHls(masterUrl, multiAudio) {
-  masterUrl = forceHttps(masterUrl);
-  if (!isHttp(masterUrl)) return "";
-  // Multi audio tracks live on the master — must keep it
-  if (multiAudio) return masterUrl;
-
-  try {
-    const text = await getText(
-      await soraFetch(masterUrl, {
-        headers: {
-          "User-Agent": UA,
-          Accept: "application/vnd.apple.mpegurl,*/*",
-          Referer: "https://embed.liftw.ws/",
-        },
-      })
-    );
-    if (!text || text.indexOf("#EXT") !== 0) return masterUrl;
-
-    const lines = text.split(/\r?\n/);
-    let bestH = 0;
-    let bestUrl = "";
-    let bestBw = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      if (!/^#EXT-X-STREAM-INF:/i.test(lines[i])) continue;
-      if (/failover/i.test(lines[i])) continue;
-      const resM = lines[i].match(/RESOLUTION=\d+x(\d+)/i);
-      const bwM = lines[i].match(/BANDWIDTH=(\d+)/i);
-      const h = resM ? parseInt(resM[1], 10) : 0;
-      const bw = bwM ? parseInt(bwM[1], 10) : 0;
-      let next = "";
-      for (let j = i + 1; j < lines.length; j++) {
-        if (lines[j] && lines[j].charAt(0) !== "#") {
-          next = lines[j].trim();
-          break;
-        }
-      }
-      if (!next) continue;
-      if (h > bestH || (h === bestH && bw > bestBw)) {
-        bestH = h;
-        bestBw = bw;
-        bestUrl = next;
-      }
-    }
-
-    if (bestUrl) {
-      if (bestUrl.indexOf("http") === 0) return forceHttps(bestUrl);
-      const base = masterUrl.replace(/\/[^/]*$/, "/");
-      if (bestUrl.charAt(0) === "/") {
-        const host = masterUrl.match(/^(https?:\/\/[^/]+)/i);
-        return host ? host[1] + bestUrl : forceHttps(bestUrl);
-      }
-      return forceHttps(base + bestUrl.replace(/^\.\//, ""));
-    }
-  } catch (e) {}
-  return masterUrl;
-}
-
-/* ===================== search ===================== */
-
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
@@ -263,7 +205,7 @@ async function searchResults(keyword) {
     const results = [];
     const seen = {};
 
-    for (let i = 0; i < items.length && results.length < 20; i++) {
+    for (let i = 0; i < items.length && results.length < 15; i++) {
       const it = items[i];
       if (!it || !it.id) continue;
       const id = String(it.id);
@@ -277,15 +219,13 @@ async function searchResults(keyword) {
         title = ru + " / " + en;
       }
       if (it.year) title += " (" + it.year + ")";
-      const isSeries =
-        it.type === 3 ||
-        (it.serial_status && String(it.serial_status).length > 0);
-      if (isSeries) title += " [сериал]";
+      const isSer = isSeriesItem(it);
+      if (isSer) title += " [сериал]";
 
       results.push({
         title: title,
         image: it.poster || "",
-        href: makeHref(id, isSeries ? 1 : 0, isSeries ? 1 : 0),
+        href: makeHref(id, isSer ? 1 : 0, isSer ? 1 : 0),
       });
     }
 
@@ -305,20 +245,18 @@ async function extractDetails(url) {
     }
     const json = await getJson(apiBase + "/info/" + encodeURIComponent(p.id));
     const info = (json && json.info) || {};
-    const description = String(
-      info.description || info.slogan || "N/A"
-    ).slice(0, 900);
-    const aliases = String(
-      info.name_eng || (json && json.origin_name) || "N/A"
-    );
-    const airdate = String(
-      info.premier || info.premier_rus || (json && json.year) || "N/A"
-    );
     return JSON.stringify([
       {
-        description: description,
-        aliases: aliases,
-        airdate: airdate,
+        description: String(info.description || info.slogan || "N/A").slice(
+          0,
+          900
+        ),
+        aliases: String(
+          info.name_eng || (json && json.origin_name) || "N/A"
+        ),
+        airdate: String(
+          info.premier || info.premier_rus || (json && json.year) || "N/A"
+        ),
       },
     ]);
   } catch (e) {
@@ -390,7 +328,7 @@ async function extractEpisodes(url) {
       });
     }
 
-    return JSON.stringify(eps.slice(0, 500));
+    return JSON.stringify(eps.slice(0, 400));
   } catch (e) {
     return JSON.stringify([
       {
@@ -414,7 +352,7 @@ async function extractStreamUrl(url) {
     }
 
     let embedUrl = info.iframe_uri;
-    if (info.episodes || info.type === 3) {
+    if (info.episodes || isSeriesItem(info)) {
       const sep = embedUrl.indexOf("?") >= 0 ? "&" : "?";
       embedUrl +=
         sep +
@@ -443,11 +381,11 @@ async function extractStreamUrl(url) {
       const episodeNum = p.episode || 1;
       for (let s = 0; s < emb.seasons.length; s++) {
         if (emb.seasons[s].season !== seasonNum) continue;
-        const eps = emb.seasons[s].episodes || [];
-        for (let e = 0; e < eps.length; e++) {
-          if (eps[e].episode === episodeNum) {
-            hls = eps[e].hls || hls;
-            names = eps[e].names || names;
+        const list = emb.seasons[s].episodes || [];
+        for (let e = 0; e < list.length; e++) {
+          if (list[e].episode === episodeNum) {
+            hls = list[e].hls || hls;
+            names = list[e].names || names;
             break;
           }
         }
@@ -460,35 +398,46 @@ async function extractStreamUrl(url) {
       }
     }
 
+    // CRITICAL: always use master.m3u8
+    // index-v*.m3u8 = video only → silent playback
+    // master has EXT-X-MEDIA audio (rus DEFAULT=YES) + high quality video
     if (!hls || !isHttp(hls)) {
+      return JSON.stringify({ streams: [], subtitles: "" });
+    }
+    if (/index-v\d+\.m3u8/i.test(hls)) {
+      hls = hls.replace(/index-v\d+\.m3u8/i, "master.m3u8");
+    }
+
+    const master = forceHttps(hls);
+    if (!isHttp(master) || /index-v\d+/i.test(master)) {
       return JSON.stringify({ streams: [], subtitles: "" });
     }
 
     let voices = names.filter(isRussianVoice);
-    if (!voices.length) voices = names.length ? names.slice() : ["Русский"];
+    if (!voices.length) {
+      voices = names.length
+        ? names.filter(function (n) {
+            return !isEnglish(n);
+          })
+        : ["Русский"];
+    }
+    if (!voices.length) voices = ["Русский"];
 
     voices.sort(function (a, b) {
       return voiceRank(a) - voiceRank(b);
     });
 
-    // Multi-audio → keep master so Luna can play with sound + ABR max quality
-    // Single track → resolve highest resolution variant
-    const multiAudio = voices.length > 1 || names.length > 1;
-    const playUrl = await resolveBestHls(hls, multiAudio);
-
-    if (!playUrl || !isHttp(playUrl)) {
-      return JSON.stringify({ streams: [], subtitles: "" });
-    }
-
     const headers = {
       "User-Agent": UA,
       Referer: "https://embed.liftw.ws/",
       Origin: "https://embed.liftw.ws",
+      Accept: "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
     };
 
+    // One option per voice — same master (player uses DEFAULT Russian audio + ABR max quality)
+    // Listing voices still lets you see what tracks exist; Luna plays master with rus DEFAULT
     const streams = [];
     const seen = {};
-
     for (let v = 0; v < voices.length; v++) {
       const title = voices[v];
       if (seen[title]) continue;
@@ -496,18 +445,18 @@ async function extractStreamUrl(url) {
       streams.push({
         title: title,
         name: title,
-        streamUrl: playUrl,
+        streamUrl: master,
         headers: headers,
       });
     }
 
-    // Prefer HDRezka / Dub first so auto-pick has Russian + high quality
+    // Prefer HDRezka / Dub first for auto-pick
     streams.sort(function (a, b) {
       return voiceRank(a.title) - voiceRank(b.title);
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 12),
+      streams: streams.slice(0, 10),
       subtitles: "",
     });
   } catch (e) {
