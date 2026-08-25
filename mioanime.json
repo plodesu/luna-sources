@@ -1,10 +1,16 @@
 {
   "sourceName": "MioAnime",
- "iconUrl": "https://www.mioanime.net/icon/favicon.png"
-  "author": { "name": "plodesu", "icon": "" },
+  "iconUrl": "https://www.mioanime.net/icon/favicon.png",
+  "author": {
+    "name": "plodesu",
+    "icon": ""
+  },
   "version": "1.0.2",
   "language": "Thai",
-  "languageType": ["Subbed", "Dubbed"],
+  "languageType": [
+    "Subbed",
+    "Dubbed"
+  ],
   "streamType": "HLS",
   "quality": "HD",
   "baseUrl": "https://www.mioanime.net",
