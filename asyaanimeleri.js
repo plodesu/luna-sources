@@ -1,10 +1,6 @@
 /**
  * Asya Animeleri (asyaanimeleri.top) – Sora / Luna
- * Search: /?s=
- * Series: /series/{slug}/
- * Episodes: /{slug}-{n}-bolum/
- * Players: mirror select (base64 iframe) → Sibnet / GD / Abyss / Rumble
- * v1.0.0
+ * v1.0.1 – fixed stream extraction (mirrors + Sibnet/OK)
  */
 const baseUrl = "https://asyaanimeleri.top";
 const UA =
@@ -81,42 +77,50 @@ function cleanQuery(keyword) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
 function parseHref(url) {
   const s = String(url || "");
-  let m = s.match(/\/([^/?#]+)-(\d+)-bolum(?:-[a-z0-9]+)?\/?/i);
+  // /slug-12-bolum/ or /slug-12-bolum-turkce-altyazili/ or /slug-12-bolum-4k/
+  let m = s.match(
+    /\/([^/?#]+?)-(\d+)-bolum(?:-[a-z0-9-]+)?\/?(?:[?#]|$)/i
+  );
   if (m) {
     return {
       type: "episode",
       slug: m[1],
       epSlug: m[1] + "-" + m[2] + "-bolum",
       episode: parseInt(m[2], 10),
+      fullPath: s.replace(/^https?:\/\/[^/]+/i, "").split("?")[0],
     };
   }
   m = s.match(/\/series\/([^/?#]+)/i);
-  if (m) return { type: "series", slug: m[1], epSlug: "", episode: 0 };
-  return { type: "unknown", slug: "", epSlug: "", episode: 0 };
+  if (m) return { type: "series", slug: m[1], epSlug: "", episode: 0, fullPath: "" };
+  return { type: "unknown", slug: "", epSlug: "", episode: 0, fullPath: "" };
 }
 
 function hostRank(name) {
   const n = String(name || "").toLowerCase();
   if (/sibnet/.test(n)) return 0;
-  if (/gdrive|google|gd\b/.test(n)) return 1;
-  if (/abyss|stream|iamcdn/.test(n)) return 2;
-  if (/rumble/.test(n)) return 5;
-  return 4;
+  if (/ok\.ru|okru|odnoklassniki/.test(n)) return 1;
+  if (/dailymotion|daily/.test(n)) return 2;
+  if (/gdrive|google|gd\b/.test(n)) return 3;
+  if (/abyss|stream|iamcdn/.test(n)) return 4;
+  if (/fembed|femax|vanfem/.test(n)) return 5;
+  if (/rumble/.test(n)) return 9;
+  return 6;
 }
 function labelFromUrl(u) {
   u = String(u || "").toLowerCase();
   if (/sibnet/.test(u)) return "Sibnet";
-  if (/drive\.google|googleapis/.test(u)) return "GDrive";
-  if (/abyss|iamcdn|player\.abyss/.test(u)) return "Abyss";
+  if (/ok\.ru|odnoklassniki/.test(u)) return "OK.ru";
+  if (/dailymotion/.test(u)) return "Dailymotion";
+  if (/drive\.google/.test(u)) return "GDrive";
+  if (/abyss|iamcdn/.test(u)) return "Abyss";
+  if (/fembed|femax|vanfem/.test(u)) return "Fembed";
   if (/rumble/.test(u)) return "Rumble";
-  if (/voe/.test(u)) return "VOE";
-  if (/dood/.test(u)) return "Doodstream";
   return "Host";
 }
 
-/* ---------- base64 + media helpers ---------- */
 function b64decode(str) {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -147,15 +151,21 @@ function findMediaUrls(text) {
       .replace(/\\+$/g, "");
     if (isHttp(u)) out.push(forceHttps(u));
   }
+  // sibnet relative paths
+  const rel = /["'](\/v\/[^"']+\.mp4[^"']*)["']/gi;
+  while ((m = rel.exec(text))) {
+    out.push("https://video.sibnet.ru" + m[1]);
+  }
   return out;
 }
 function dedupeUrls(arr) {
   const seen = {};
   const out = [];
   for (let i = 0; i < arr.length; i++) {
-    const u = forceHttps(String(arr[i] || "").split("#")[0]);
+    let u = forceHttps(String(arr[i] || "").split("#")[0]);
+    if (u.indexOf("//") === 0) u = "https:" + u;
     if (!isHttp(u) || seen[u]) continue;
-    if (/jquery|bootstrap|google-analytics|facebook|cdnjs|adsbygoogle/i.test(u))
+    if (/jquery|bootstrap|google-analytics|facebook|cdnjs|adsbygoogle|yandex/i.test(u))
       continue;
     seen[u] = true;
     out.push(u);
@@ -165,48 +175,130 @@ function dedupeUrls(arr) {
 
 /* ---------- resolvers ---------- */
 async function resolveSibnet(embedUrl) {
+  const found = [];
   try {
-    const html = await getText(
+    const idM = String(embedUrl).match(/videoid=(\d+)/i);
+    const vid = idM ? idM[1] : "";
+
+    // 1) normal GET
+    let html = await getText(
       await soraFetch(embedUrl, {
         headers: {
           Referer: baseUrl + "/",
+          Origin: "https://video.sibnet.ru",
           "User-Agent": UA,
           Accept: "text/html,*/*",
         },
       })
     );
+
+    // 2) POST buffer_method=full (some regions)
+    if ((!html || html.length < 200 || /400 Bad/i.test(html)) && vid) {
+      html = await getText(
+        await soraFetch(
+          "https://video.sibnet.ru/shell.php?videoid=" + vid,
+          {
+            method: "POST",
+            headers: {
+              Referer: "https://video.sibnet.ru/shell.php?videoid=" + vid,
+              Origin: "https://video.sibnet.ru",
+              "Content-Type": "application/x-www-form-urlencoded",
+              "User-Agent": UA,
+            },
+            body: "buffer_method=full",
+          }
+        )
+      );
+    }
+
+    if (html && html.length > 100) {
+      findMediaUrls(html).forEach((u) => found.push(u));
+      const m =
+        html.match(/player\.src\s*\(\s*\[?\s*\{?\s*src\s*:\s*["']([^"']+)["']/i) ||
+        html.match(/src\s*:\s*["']([^"']+\.mp4[^"']*)["']/i) ||
+        html.match(/["']src["']\s*:\s*["']([^"']+)["']/i);
+      if (m) {
+        let u = m[1].replace(/\\/g, "");
+        if (u.indexOf("//") === 0) u = "https:" + u;
+        if (u.charAt(0) === "/") u = "https://video.sibnet.ru" + u;
+        if (isHttp(u)) found.push(u);
+      }
+    }
+  } catch (e) {}
+  return dedupeUrls(found);
+}
+
+async function resolveOkRu(embedUrl) {
+  try {
+    let u = forceHttps(embedUrl);
+    if (u.indexOf("//") === 0) u = "https:" + u;
+    // normalize
+    u = u.replace("://ok.ru/", "://m.ok.ru/");
+    const html = await getText(
+      await soraFetch(u, {
+        headers: { Referer: baseUrl + "/", "User-Agent": UA },
+      })
+    );
     if (!html) return [];
     const found = findMediaUrls(html);
-    const m =
-      html.match(/src:\s*["']([^"']+\.mp4[^"']*)["']/i) ||
-      html.match(/player\.src\(["']([^"']+)["']/i) ||
-      html.match(/(https?:\/\/[^"' ]*sibnet[^"' ]+\.(?:mp4|m3u8)[^"' ]*)/i);
-    if (m) {
-      let u = m[1].replace(/['"]/g, "");
-      if (u.indexOf("//") === 0) u = "https:" + u;
-      if (isHttp(u)) found.push(u);
+    // data-options / flashvars style
+    const opt =
+      html.match(/data-options="([^"]+)"/i) ||
+      html.match(/data-movie-id="([^"]+)"/i);
+    if (opt) {
+      const raw = decodeEntities(opt[1])
+        .replace(/&quot;/g, '"')
+        .replace(/\\\//g, "/");
+      findMediaUrls(raw).forEach((x) => found.push(x));
+      const hm = raw.match(
+        /(?:hlsMasterPlaylistUrl|videoSrc|ondemandSrc|movieSrc)["']?\s*:\s*["'](https?:[^"']+)/i
+      );
+      if (hm) found.push(hm[1].replace(/\\\//g, "/"));
     }
+    // okcdn
+    const cdn = html.match(
+      /(https?:\/\/(?:vd|videocdn)[^"'\\\s]+\.(?:mp4|m3u8)[^"'\\\s]*)/gi
+    );
+    if (cdn) cdn.forEach((x) => found.push(x));
     return dedupeUrls(found);
   } catch (e) {
     return [];
   }
 }
 
-async function resolveAbyss(embedUrl) {
+async function resolveDailymotion(embedUrl) {
   try {
-    const html = await getText(
-      await soraFetch(embedUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
+    const idM = String(embedUrl).match(
+      /dailymotion\.com\/(?:embed\/)?video\/([a-zA-Z0-9]+)/i
     );
-    if (!html) return [];
-    let found = findMediaUrls(html);
-    // jwplayer / file patterns
-    const fm =
-      html.match(/["']file["']\s*:\s*["'](https?:\/\/[^"']+)["']/i) ||
-      html.match(/["']sources?["']\s*:\s*\[\s*\{[^}]*["']file["']\s*:\s*["'](https?:\/\/[^"']+)["']/i) ||
-      html.match(/(https?:\/\/[^"'\s]+iamcdn[^"'\s]+\.(?:m3u8|mp4)[^"'\s]*)/i);
-    if (fm) found.push(fm[1] || fm[0]);
+    if (!idM) return [];
+    const id = idM[1];
+    const meta = await getText(
+      await soraFetch(
+        "https://www.dailymotion.com/player/metadata/video/" + id,
+        {
+          headers: {
+            Referer: "https://www.dailymotion.com/",
+            "User-Agent": UA,
+            Accept: "application/json",
+          },
+        }
+      )
+    );
+    const found = [];
+    try {
+      const j = JSON.parse(meta);
+      const q = j.qualities || {};
+      Object.keys(q).forEach((k) => {
+        const arr = q[k];
+        if (Array.isArray(arr)) {
+          arr.forEach((it) => {
+            if (it && it.url) found.push(it.url);
+          });
+        }
+      });
+    } catch (e) {}
+    findMediaUrls(meta).forEach((u) => found.push(u));
     return dedupeUrls(found);
   } catch (e) {
     return [];
@@ -215,13 +307,12 @@ async function resolveAbyss(embedUrl) {
 
 async function resolveGDrive(embedUrl) {
   try {
-    // keep preview as last resort; many apps can open drive preview
     const idM = embedUrl.match(/\/d\/([a-zA-Z0-9_-]+)/);
     if (idM) {
-      // uc?export=download sometimes works, otherwise leave preview
-      const direct =
-        "https://drive.google.com/uc?export=download&id=" + idM[1];
-      return [direct, forceHttps(embedUrl)];
+      return [
+        "https://drive.google.com/uc?export=download&id=" + idM[1],
+        forceHttps(embedUrl),
+      ];
     }
     return [forceHttps(embedUrl)];
   } catch (e) {
@@ -243,41 +334,62 @@ async function resolveGeneric(embedUrl) {
 }
 
 async function resolveEmbed(embedUrl) {
-  const u = forceHttps(embedUrl);
+  let u = forceHttps(embedUrl);
+  if (u.indexOf("//") === 0) u = "https:" + u;
   if (/sibnet/i.test(u)) return resolveSibnet(u);
+  if (/ok\.ru|odnoklassniki/i.test(u)) return resolveOkRu(u);
+  if (/dailymotion/i.test(u)) return resolveDailymotion(u);
   if (/drive\.google/i.test(u)) return resolveGDrive(u);
-  if (/abyss|iamcdn|player\.abyss/i.test(u)) return resolveAbyss(u);
-  if (/rumble/i.test(u)) return []; // skip rumble for app players
+  if (/rumble/i.test(u)) return []; // skip
+  if (/fembed|femax|vanfem|membed/i.test(u)) return resolveGeneric(u);
+  if (/abyss|iamcdn/i.test(u)) return resolveGeneric(u);
   return resolveGeneric(u);
 }
 
-/** Extract mirror iframes from episode HTML (base64 options) */
 function extractMirrors(html) {
   const jobs = [];
+  const seen = {};
   if (!html) return jobs;
-  // <option value="BASE64" ...>Label</option>
+
+  // base64 option values
   const re =
-    /<option[^>]+value=["']([A-Za-z0-9+/=]{40,})["'][^>]*>\s*([^<]*?)\s*<\/option>/gi;
+    /<option[^>]*value=["']([A-Za-z0-9+/=]{30,})["'][^>]*>\s*([^<]*?)\s*<\/option>/gi;
   let m;
   while ((m = re.exec(html))) {
     try {
       const decoded = b64decode(m[1]);
       const srcM = decoded.match(/src=["']([^"']+)["']/i);
-      if (srcM) {
-        const label = decodeEntities(m[2] || "").trim() || labelFromUrl(srcM[1]);
-        jobs.push({ url: forceHttps(srcM[1]), fansub: label });
-      }
+      if (!srcM) continue;
+      let src = srcM[1].trim();
+      if (src.indexOf("//") === 0) src = "https:" + src;
+      src = forceHttps(src);
+      if (!isHttp(src) || seen[src]) continue;
+      seen[src] = true;
+      const label = decodeEntities(m[2] || "").trim() || labelFromUrl(src);
+      jobs.push({ url: src, fansub: label });
     } catch (e) {}
   }
-  // also plain iframes on page
+
+  // plain iframes
   const iframeRe = /<iframe[^>]+src=["']([^"']+)["']/gi;
   while ((m = iframeRe.exec(html))) {
-    const u = forceHttps(absUrl(m[1]));
-    if (isHttp(u) && !/google\.com\/forms|adsbygoogle/i.test(u)) {
-      jobs.push({ url: u, fansub: labelFromUrl(u) });
-    }
+    let src = m[1].trim();
+    if (src.indexOf("//") === 0) src = "https:" + src;
+    src = forceHttps(absUrl(src));
+    if (!isHttp(src) || seen[src]) continue;
+    if (/google\.com\/forms|adsbygoogle|facebook/i.test(src)) continue;
+    seen[src] = true;
+    jobs.push({ url: src, fansub: labelFromUrl(src) });
   }
   return jobs;
+}
+
+function isPlayableUrl(media) {
+  if (!isHttp(media)) return false;
+  if (/\.(m3u8|mp4)(\?|$)/i.test(media)) return true;
+  if (/m3u8|\/v\/.+\.mp4|uc\?export=download|okcdn|sibnet\.ru\/v\//i.test(media))
+    return true;
+  return false;
 }
 
 /* ===================== SEARCH ===================== */
@@ -285,7 +397,6 @@ async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
-
     const results = [];
     const seen = {};
 
@@ -297,45 +408,32 @@ async function searchResults(keyword) {
       let img = absUrl(image || "");
       if (img.indexOf("data:") === 0) img = "";
       results.push({
-        title: decodeEntities(title || "Anime")
-          .replace(/\s+/g, " ")
-          .trim(),
+        title: decodeEntities(title || "Anime").replace(/\s+/g, " ").trim(),
         image: img,
         href: href,
       });
     }
 
-    const searchUrl = baseUrl + "/?s=" + encodeURIComponent(cleaned);
     const html = await getText(
-      await soraFetch(searchUrl, {
+      await soraFetch(baseUrl + "/?s=" + encodeURIComponent(cleaned), {
         headers: { "User-Agent": UA, Accept: "text/html,*/*", Referer: baseUrl + "/" },
       })
     );
     if (!html || html.length < 500) return JSON.stringify([]);
 
-    // theme cards: .bs / .bsx
     let re =
       /<div class="bs[^"]*"[\s\S]{0,1500}?href="((?:https?:\/\/[^"]+)?\/series\/[^"]+)"[\s\S]{0,400}?(?:src|data-src)="([^"]+)"[\s\S]{0,300}?title="([^"]+)"/gi;
     let m;
     while ((m = re.exec(html))) push(m[1], m[3], m[2]);
 
-    // alternate order (title before img)
     re =
       /href="((?:https?:\/\/[^"]+)?\/series\/[^"]+)"[^>]*title="([^"]+)"[\s\S]{0,500}?(?:src|data-src)="([^"]+)"/gi;
     while ((m = re.exec(html))) push(m[1], m[2], m[3]);
 
-    // simple fallback
     re = /href="((?:https?:\/\/[^"]+)?\/series\/([^"]+))"[^>]*title="([^"]+)"/gi;
     while ((m = re.exec(html))) {
       if (results.length >= 25) break;
       push(m[1], m[3], "");
-    }
-
-    // fill missing images from nearby uploads
-    if (results.some((r) => !r.image)) {
-      const imgs = [];
-      const ire = /(?:src|data-src)="(https?:\/\/[^"]*\/uploads\/[^"]+\.(?:jpg|jpeg|png|webp))"/gi;
-      while ((m = ire.exec(html))) imgs.push(m[1]);
     }
 
     return JSON.stringify(results.slice(0, 25));
@@ -348,38 +446,25 @@ async function searchResults(keyword) {
 async function extractDetails(url) {
   try {
     const p = parseHref(url);
-    const page = p.slug
-      ? p.type === "series"
+    const seriesPage =
+      p.type === "series" && p.slug
         ? baseUrl + "/series/" + p.slug + "/"
-        : baseUrl + "/series/" + p.slug + "/"
-      : String(url);
-    const seriesPage = /\/series\//i.test(page)
-      ? page
-      : baseUrl + "/series/" + (p.slug || "") + "/";
+        : p.slug
+        ? baseUrl + "/series/" + p.slug + "/"
+        : String(url);
     const html = await getText(await soraFetch(seriesPage));
-
     let description = "N/A";
     const dm =
       html.match(/property=["']og:description["'][^>]*content=["']([^"']+)/i) ||
-      html.match(/name=["']description["']\s+content=["']([^"']+)/i) ||
-      html.match(/class="[^"]*entry-content[^"]*"[^>]*>([\s\S]*?)<\//i);
+      html.match(/name=["']description["']\s+content=["']([^"']+)/i);
     if (dm) description = decodeEntities(dm[1]).replace(/<[^>]+>/g, "").slice(0, 900);
-
-    let aliases = "N/A";
-    const am =
-      html.match(/Alternatif\s*:?\s*([^<\n]{2,120})/i) ||
-      html.match(/English\s*:?\s*([^<\n]{2,120})/i);
-    if (am) aliases = decodeEntities(am[1]).trim();
-
-    let airdate = "N/A";
-    const ym =
-      html.match(/Yayın\s*:?\s*([^<\n]{2,80})/i) ||
-      html.match(/Başlangıç\s*:?\s*([^<\n]{2,80})/i);
-    if (ym) airdate = decodeEntities(ym[1]).trim();
-
-    return JSON.stringify([{ description, aliases, airdate }]);
+    return JSON.stringify([
+      { description, aliases: "N/A", airdate: "N/A" },
+    ]);
   } catch (e) {
-    return JSON.stringify([{ description: "N/A", aliases: "N/A", airdate: "N/A" }]);
+    return JSON.stringify([
+      { description: "N/A", aliases: "N/A", airdate: "N/A" },
+    ]);
   }
 }
 
@@ -394,21 +479,19 @@ async function extractEpisodes(url) {
     const eps = [];
     const seen = {};
 
+    // matches -N-bolum and -N-bolum-anything
     const re =
-      /href="((?:https?:\/\/[^"]+)?\/([^"/]+)-(\d+)-bolum(?:-[a-z0-9]+)?\/?)"/gi;
+      /href="((?:https?:\/\/[^"]+)?\/([^"/]+)-(\d+)-bolum(?:-[a-z0-9-]+)?\/?)"/gi;
     let m;
     while ((m = re.exec(html))) {
-      const full = absUrl(m[1]).replace(/\/$/, "") + "/";
+      let full = absUrl(m[1]);
+      if (!/\/$/.test(full)) full += "/";
       const num = parseInt(m[3], 10);
       if (seen[num]) continue;
-      // belong to series
-      if (p.slug && m[2].indexOf(p.slug) < 0 && p.slug.indexOf(m[2]) < 0) continue;
+      if (p.slug && m[2].indexOf(p.slug) < 0 && p.slug.indexOf(m[2]) < 0)
+        continue;
       seen[num] = true;
-      eps.push({
-        href: full,
-        number: num,
-        title: num + ". Bölüm",
-      });
+      eps.push({ href: full, number: num, title: num + ". Bölüm" });
     }
 
     eps.sort((a, b) => a.number - b.number);
@@ -417,7 +500,9 @@ async function extractEpisodes(url) {
     }
     return JSON.stringify(eps.slice(0, 500));
   } catch (e) {
-    return JSON.stringify([{ href: String(url), number: 1, title: "1. Bölüm" }]);
+    return JSON.stringify([
+      { href: String(url), number: 1, title: "1. Bölüm" },
+    ]);
   }
 }
 
@@ -425,9 +510,16 @@ async function extractEpisodes(url) {
 async function extractStreamUrl(url) {
   try {
     const p = parseHref(url);
-    let epUrl = url;
-    if (p.type === "episode" && p.epSlug) {
-      epUrl = baseUrl + "/" + p.epSlug + "/";
+    let epUrl = String(url);
+
+    // prefer the exact episode URL the app passed in
+    if (p.type === "episode") {
+      if (p.fullPath) {
+        epUrl = baseUrl + p.fullPath;
+        if (!/\/$/.test(epUrl)) epUrl += "/";
+      } else if (p.epSlug) {
+        epUrl = baseUrl + "/" + p.epSlug + "/";
+      }
     } else if (p.type === "series" && p.slug) {
       const seriesHtml = await getText(
         await soraFetch(baseUrl + "/series/" + p.slug + "/")
@@ -437,6 +529,7 @@ async function extractStreamUrl(url) {
       );
       if (!em) return JSON.stringify({ streams: [], subtitles: "" });
       epUrl = absUrl(em[1]);
+      if (!/\/$/.test(epUrl)) epUrl += "/";
     }
 
     const epHtml = await getText(
@@ -452,31 +545,52 @@ async function extractStreamUrl(url) {
     const streams = [];
     const seen = {};
 
-    for (let i = 0; i < embedJobs.length && streams.length < 10; i++) {
+    for (let i = 0; i < embedJobs.length && streams.length < 12; i++) {
       const job = embedJobs[i];
       const host = job.fansub || labelFromUrl(job.url);
-      const resolved = await resolveEmbed(job.url);
+      let resolved = await resolveEmbed(job.url);
+
+      // if resolver empty, still try raw media patterns on a second fetch
+      if (!resolved.length) {
+        const html2 = await getText(
+          await soraFetch(job.url, {
+            headers: {
+              Referer: baseUrl + "/",
+              "User-Agent": UA,
+              Accept: "*/*",
+            },
+          })
+        );
+        resolved = dedupeUrls(findMediaUrls(html2));
+      }
+
       for (let r = 0; r < resolved.length; r++) {
-        const media = forceHttps(resolved[r]);
-        if (!isHttp(media) || seen[media]) continue;
-        // accept m3u8/mp4 or known host direct links
-        if (
-          !/\.(m3u8|mp4)(\?|$)/i.test(media) &&
-          media.indexOf("m3u8") < 0 &&
-          !/drive\.google\.com\/uc/i.test(media)
-        )
-          continue;
+        let media = forceHttps(resolved[r]);
+        if (media.indexOf("//") === 0) media = "https:" + media;
+        if (media.charAt(0) === "/") {
+          if (/sibnet/i.test(job.url)) media = "https://video.sibnet.ru" + media;
+          else continue;
+        }
+        if (!isPlayableUrl(media) || seen[media]) continue;
         seen[media] = true;
+
+        const headers = {
+          "User-Agent": UA,
+          Accept: "*/*",
+          Referer: job.url,
+          Origin: (job.url.match(/^(https?:\/\/[^/]+)/) || [null, baseUrl])[1],
+        };
+        // Sibnet CDN often requires this referer
+        if (/sibnet/i.test(media) || /sibnet/i.test(job.url)) {
+          headers.Referer = job.url;
+          headers.Origin = "https://video.sibnet.ru";
+        }
+
         streams.push({
           title: host,
           name: host,
           streamUrl: media,
-          headers: {
-            "User-Agent": UA,
-            Referer: job.url,
-            Origin: (job.url.match(/^(https?:\/\/[^/]+)/) || [null, baseUrl])[1],
-            Accept: "*/*",
-          },
+          headers: headers,
         });
       }
     }
