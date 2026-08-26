@@ -4,7 +4,7 @@
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
  * Player: videoplay.vip → HLS (+ softsubs when present)
- * v1.0.3
+ * v1.0.4
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -141,17 +141,16 @@ function parseHref(url) {
 function extractPlayerEmbed(html, epUrl) {
   if (!html) return "";
 
-  // 1) Live iframe (page may already have real-player filled)
   let m = html.match(
     /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
   );
   if (m) return m[1];
 
-  // 2) Bare URL in HTML
-  m = html.match(/(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s<>]*)/i);
+  m = html.match(
+    /(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s<>]*)/i
+  );
   if (m) return m[1];
 
-  // 3) base64 encodedContent
   m =
     html.match(/encodedContent\s*=\s*['"]([A-Za-z0-9+/=]+)['"]/) ||
     html.match(/const encodedContent\s*=\s*['"]([A-Za-z0-9+/=]+)['"]/);
@@ -169,7 +168,6 @@ function extractPlayerEmbed(html, epUrl) {
     } catch (e) {}
   }
 
-  // 4) progressKey = "312949_1_1"
   m = html.match(/progressKey\s*=\s*['"](\d+)_(\d+)_(\d+)['"]/);
   if (m)
     return (
@@ -183,7 +181,6 @@ function extractPlayerEmbed(html, epUrl) {
       "?sid=diziwatch8.com"
     );
 
-  // 5) poster / backdrop id + season/ep from URL
   const p = parseHref(epUrl || "");
   const idMatch = html.match(
     /(?:dizi_poster|bolum_|dizi_backdrop)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
@@ -208,7 +205,6 @@ function parsePlayerPage(html) {
   const result = { hls: [], subs: [] };
   if (!html) return result;
 
-  // Masters with token
   const masters = html.match(
     /\/play\.m3u8\?id=\d+&t=m&token=[A-Za-z0-9_-]+&expires=\d+/g
   );
@@ -223,7 +219,6 @@ function parsePlayerPage(html) {
     });
   }
 
-  // Fallback: const src = '...'
   if (!result.hls.length) {
     const sm = html.match(
       /const\s+src\s*=\s*['"](\/play\.m3u8\?id=\d+[^'"]+)['"]/
@@ -360,7 +355,7 @@ async function extractDetails(url) {
 
 /* ===================== EPISODES ===================== */
 /**
- * number = season*1000 + episode  → S3E1 = 3001 (TMDB multi-season safe)
+ * number = season*1000 + episode → S3E1 = 3001 (TMDB multi-season safe)
  * title  = S03E01 · …
  */
 async function extractEpisodes(url) {
@@ -431,14 +426,14 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ===================== STREAMS ===================== */
+/* ===================== STREAMS (Luna-safe) ===================== */
 async function extractStreamUrl(url) {
   try {
     let epUrl = String(url).split("?")[0];
     if (!/^https?:\/\//i.test(epUrl))
       epUrl = baseUrl + (epUrl.charAt(0) === "/" ? epUrl : "/" + epUrl);
 
-    // Series page → lowest season/ep
+    // Series page → first episode
     if (/\/dizi\//i.test(epUrl) && !/\/bolum\//i.test(epUrl)) {
       const seriesHtml = await getText(await soraFetch(epUrl));
       const all = [];
@@ -455,7 +450,7 @@ async function extractStreamUrl(url) {
       all.sort(function (a, b) {
         return a.s - b.s || a.e - b.e;
       });
-      if (!all.length) return JSON.stringify({ streams: [] });
+      if (!all.length) return JSON.stringify({ streams: [], subtitles: "" });
       epUrl = all[0].href;
     }
 
@@ -465,11 +460,11 @@ async function extractStreamUrl(url) {
       })
     );
     if (!epHtml || epHtml.length < 200)
-      return JSON.stringify({ streams: [] });
+      return JSON.stringify({ streams: [], subtitles: "" });
 
     const embed = extractPlayerEmbed(epHtml, epUrl);
     if (!embed || !isHttp(embed))
-      return JSON.stringify({ streams: [] });
+      return JSON.stringify({ streams: [], subtitles: "" });
 
     const playerHtml = await getText(
       await soraFetch(embed, {
@@ -481,59 +476,98 @@ async function extractStreamUrl(url) {
       })
     );
     if (!playerHtml || playerHtml.length < 100)
-      return JSON.stringify({ streams: [] });
+      return JSON.stringify({ streams: [], subtitles: "" });
 
     const parsed = parsePlayerPage(playerHtml);
-    const streams = [];
+    if (!parsed.hls.length)
+      return JSON.stringify({ streams: [], subtitles: "" });
+
     const headers = {
       "User-Agent": UA,
       Accept: "*/*",
       Referer: playerHost + "/",
       Origin: playerHost,
     };
-    const subHeaders = {
-      "User-Agent": UA,
-      Accept: "text/vtt,*/*",
-      Referer: playerHost + "/",
-      Origin: playerHost,
-    };
 
-    const subPairs = [];
-    const allSubs = [];
-    for (let i = 0; i < parsed.subs.length; i++) {
-      const s = parsed.subs[i];
-      if (!s.url) continue;
-      subPairs.push(s.label || s.lang || "Sub");
-      subPairs.push(s.url);
-      allSubs.push({
-        url: s.url,
-        label: s.label || s.lang || "Sub",
-        headers: subHeaders,
-      });
+    // Official schema: subtitles is a single string URL
+    let subtitles = "";
+    if (parsed.subs.length) {
+      subtitles = forceHttps(parsed.subs[0].url);
     }
-    const defaultSub = allSubs.length ? allSubs[0].url : "";
+
+    const streams = [];
 
     for (let i = 0; i < parsed.hls.length; i++) {
-      const media = forceHttps(parsed.hls[i]);
-      if (!isHttp(media)) continue;
-      const stream = {
-        title: i === 0 ? "Videoplay · HLS" : "Videoplay · HLS " + (i + 1),
-        name: i === 0 ? "Videoplay · HLS" : "Videoplay · HLS " + (i + 1),
-        streamUrl: media,
-        url: media,
-        headers: headers,
-      };
-      if (defaultSub) {
-        stream.subtitle = defaultSub;
-        stream.subtitleHeaders = subHeaders;
+      const master = forceHttps(parsed.hls[i]);
+      if (!isHttp(master)) continue;
+
+      let expanded = false;
+      try {
+        const masterBody = await getText(
+          await soraFetch(master, {
+            headers: {
+              "User-Agent": UA,
+              Referer: playerHost + "/",
+              Accept: "*/*",
+            },
+          })
+        );
+        if (masterBody && masterBody.indexOf("#EXTM3U") >= 0) {
+          const lines = masterBody.split(/\r?\n/);
+          const variants = [];
+          for (let L = 0; L < lines.length; L++) {
+            const line = lines[L].trim();
+            if (!line || line.charAt(0) === "#") continue;
+            let vu = line;
+            if (vu.indexOf("http") !== 0) {
+              if (vu.charAt(0) === "/") vu = playerHost + vu;
+              else vu = playerHost + "/" + vu;
+            }
+            vu = forceHttps(vu);
+            if (!/\.m3u8/i.test(vu) && vu.indexOf("m3u8") < 0) continue;
+            let q = "Auto";
+            const prev = L > 0 ? lines[L - 1] : "";
+            const rm = prev.match(/RESOLUTION=(\d+)x(\d+)/i);
+            if (rm) q = rm[2] + "p";
+            variants.push({ url: vu, title: "Videoplay · " + q });
+          }
+          variants.sort(function (a, b) {
+            const na = parseInt(a.title, 10) || 0;
+            const nb = parseInt(b.title, 10) || 0;
+            return nb - na;
+          });
+          for (let v = 0; v < variants.length; v++) {
+            streams.push({
+              title: variants[v].title,
+              streamUrl: variants[v].url,
+              headers: headers,
+            });
+          }
+          expanded = variants.length > 0;
+        }
+      } catch (e) {}
+
+      if (!expanded) {
+        streams.push({
+          title: "Videoplay · HLS",
+          streamUrl: master,
+          headers: headers,
+        });
+      } else {
+        streams.push({
+          title: "Videoplay · Auto (master)",
+          streamUrl: master,
+          headers: headers,
+        });
       }
-      if (subPairs.length) stream.subtitles = subPairs;
-      if (allSubs.length) stream.allSubtitles = allSubs;
-      streams.push(stream);
     }
 
-    return JSON.stringify({ streams: streams.slice(0, 6) });
+    // Official Luna/Sora shape only
+    return JSON.stringify({
+      streams: streams.slice(0, 8),
+      subtitles: subtitles || "",
+    });
   } catch (e) {
-    return JSON.stringify({ streams: [] });
+    return JSON.stringify({ streams: [], subtitles: "" });
   }
 }
