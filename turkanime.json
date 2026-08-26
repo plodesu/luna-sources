@@ -5,10 +5,11 @@
     "name": "plodesu",
     "icon": ""
   },
-  "version": "1.0.0",
+  "version": "1.2.0",
   "language": "Turkish",
   "languageType": [
-    "Subbed"
+    "Subbed",
+    "Dubbed"
   ],
   "streamType": "HLS",
   "quality": "HD",
