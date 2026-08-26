@@ -16,9 +16,14 @@
  *     auto-generated "Subtitle 1/2/3". `allSubtitles` = both sources.
  * Episodes: number = in-season episode number + separate `season` field
  *   (docs contract), so clients render "Sezon X / Bölüm Y" instead of "1001".
+ * Episode validation (SUBTITLES.md §5): OpenSubtitles v3's imdbId:s:e mapping
+ *   is polluted for some shows. Attempt to validate via OS REST release names
+ *   (fetchTrustedSubtitleIds) and drop foreign-episode files. NOTE: keyless
+ *   rest.opensubtitles.org currently 302s to "_/" (decommissioned), so the
+ *   trust filter is a no-op until that endpoint returns.
  * Async: bounded response cache (static pages only) to avoid redundant
  *   fetches across the flow; the player page is never cached (expiring token).
- * v1.5.1
+ * v1.5.2
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -452,6 +457,118 @@ async function fetchStremioSubs(imdbId, type, s, e) {
   }
 }
 
+/* ---------------- Episode validation (SUBTITLES.md §5) -------------------- *
+ * OpenSubtitles v3's imdbId:s:e mapping is polluted for some shows: it can
+ * list OTHER seasons'/episodes' premieres alongside the true episode (the
+ * Family Guy case: "Blue Harvest" S06E01, "Lottery Fever" S10E01, ...). A
+ * large wrong-episode file otherwise auto-loads -> "right video, wrong subs".
+ * Validate through the OS REST SEPARATE-endpoint, which returns each row's
+ * release NAME (SubFileName). Parse an s:e code out of it and classify:
+ *   verified (name == requested s:e)  -> keep, outrank
+ *   blocked  (name != requested s:e)  -> drop for every language
+ *   unknown  (no parsable code)       -> keep, lower priority
+ * ----------------------------------------------------------------------- */
+const OS_REST = "https://rest.opensubtitles.org/search";
+
+// Numeric OpenSubtitles file id from either provider URL shape:
+//   .../subencoding-stremio-utf8/src-api/file/1958351161   (v3)
+//   .../dl.opensubtitles.org/en/download/filead/1957978378 (REST)
+function subtitleFileId(url) {
+  const m = String(url || "").match(/file(?:ad)?\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Parse (season, episode) from a release-style subtitle filename. Recognized:
+// S01E01 / S01.E01, 1x01, [3.01], and the bare three-digit "101" form.
+// Resolution tags like "1080p" cannot false-match (three-digit form needs
+// word-ish boundaries around all digits AND rejects trailing letters).
+function parseSubtitleNameEpisode(name) {
+  const n = String(name || "");
+  let m = n.match(/\bS(\d{1,2})[.\-_ ]?E(\d{1,3})\b/i);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  m = n.match(/\b(\d{1,2})x(\d{1,3})\b/i);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  m = n.match(/\[(\d{1,2})\.(\d{1,3})\]/);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  m = n.match(/(?:^|[\s\-_.])(\d)(\d{2})(?:[\s\-_.]|$)/);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  return null;
+}
+
+const __trustCache = {};
+async function fetchTrustedSubtitleIds(imdbId, isMovie, s, e) {
+  const bare = String(imdbId || "").replace(/^tt/i, "");
+  if (!/^\d+$/.test(bare)) return null;
+  const key = "trusted/" + imdbId + "/" + (isMovie ? "m" : "s") + "/" + s + ":" + e;
+  if (__trustCache[key]) return __trustCache[key];
+  try {
+    let url = OS_REST + "/";
+    if (!isMovie) url += "episode-" + encodeURIComponent(String(e || 1)) + "/";
+    url += "imdbid-" + bare;
+    if (!isMovie) url += "/season-" + encodeURIComponent(String(s || 1));
+    url += "/sublanguageid-eng";
+    const r = await cachedJson(url, {
+      headers: { "X-User-Agent": "trailers.to-UA", Accept: "application/json" },
+    });
+    if (!Array.isArray(r)) return null;
+    const wantS = parseInt(s || "1", 10);
+    const wantE = parseInt(e || "1", 10);
+    const verified = {};
+    const blocked = {};
+    for (let i = 0; i < r.length; i++) {
+      const row = r[i];
+      if (!row || row.IDSubtitleFile == null) continue;
+      const parsed = parseSubtitleNameEpisode(row.SubFileName);
+      if (!parsed) continue;
+      const id = String(row.IDSubtitleFile);
+      if (parsed.s === wantS && parsed.e === wantE) verified[id] = true;
+      else blocked[id] = true;
+    }
+    const result =
+      Object.keys(verified).length > 0 || Object.keys(blocked).length > 0
+        ? { verified: verified, blocked: blocked }
+        : null;
+    __trustCache[key] = result;
+    return result;
+  } catch (e2) {
+    return null;
+  }
+}
+
+// Apply the trust filter to a list of provider subs: drop blocked (foreign
+// episode) files, keep verified first and unknown as eligible fallback.
+// Returns the same {url,lang,label} list but ordered verified-first within
+// each language and with wrong-episode files removed.
+function applyTrustFilter(subs, trust) {
+  if (!trust) return subs;
+  const eligible = [];
+  for (let i = 0; i < subs.length; i++) {
+    const sub = subs[i];
+    const fid = subtitleFileId(sub.url);
+    if (!fid) { eligible.push(sub); continue; }
+    if (trust.blocked && trust.blocked[fid]) continue; // foreign episode
+    eligible.push(sub);
+  }
+  // verified-first within each language
+  const byLang = {};
+  const order = [];
+  for (let i = 0; i < eligible.length; i++) {
+    const sub = eligible[i];
+    const lang = sub.lang;
+    const cls = trust.verified && trust.verified[subtitleFileId(sub.url)] ? 1 : 0;
+    const existing = byLang[lang];
+    if (!existing) {
+      byLang[lang] = { sub: sub, cls: cls };
+      order.push(lang);
+    } else if (cls > existing.cls) {
+      byLang[lang] = { sub: sub, cls: cls };
+    }
+  }
+  const out = [];
+  for (let i = 0; i < order.length; i++) out.push(byLang[order[i]].sub);
+  return out;
+}
+
 /* ===================== SEARCH ===================== */
 async function searchResults(keyword) {
   try {
@@ -727,7 +844,13 @@ async function extractStreamUrl(url) {
       const e = isMovie ? 1 : (hf.episode || 1);
       const title = String(hf.slug || "").replace(/-/g, " ").trim();
       const imdbId = await resolveImdbId(title, type);
-      if (imdbId) osSubs = await fetchStremioSubs(imdbId, type, s, e);
+      if (imdbId) {
+        osSubs = await fetchStremioSubs(imdbId, type, s, e);
+        // Drop other-episode/other-season files (SUBTITLES.md §5) so we never
+        // auto-load a foreign episode's dialogue over the requested one.
+        const trust = await fetchTrustedSubtitleIds(imdbId, isMovie, s, e);
+        if (trust) osSubs = applyTrustFilter(osSubs, trust);
+      }
     } catch (e2) { osSubs = []; }
     // Order header-free tracks: Turkish first, then English, then the rest.
     osSubs.sort(function (a, b) {
