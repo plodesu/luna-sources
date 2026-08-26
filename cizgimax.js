@@ -1,10 +1,10 @@
 /**
  * ÇizgiMax (cizgimax.online) – Sora / Luna
- * Search: /ara/?q=
+ * Search: /ara/?q=  (poster + film-name cards only)
  * Series: /diziler/{slug}-izle/
- * Episodes: /{slug}-{n}-sezon-{m}-bolum-izle/  or  /{slug}-{m}-bolum-izle/
- * Streams: atob(serverList) → /api/stream/sibnet/?t=… → direct mp4
- * v1.0.0
+ * Episodes: /{slug}-{s}-sezon-{e}-bolum-izle/
+ * Streams: JSON.parse(atob(...)) → /api/stream/sibnet/?t= → mp4 302
+ * v1.0.1
  */
 const baseUrl = "https://cizgimax.online";
 const UA =
@@ -46,9 +46,6 @@ async function getText(res) {
     if (typeof res === "object") {
       if (typeof res.data === "string") return res.data;
       if (typeof res.body === "string") return res.body;
-      if (res.headers && typeof res.headers.get === "function") {
-        /* Response object without body yet */
-      }
     }
     return String(res);
   } catch (e) {
@@ -90,7 +87,6 @@ function cleanQuery(keyword) {
     .replace(/\s+/g, " ")
     .trim();
 }
-
 function b64decode(str) {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -109,126 +105,168 @@ function b64decode(str) {
   }
   return out;
 }
-
-function parseHref(url) {
-  const s = String(url || "");
-  // /slug-2-sezon-15-bolum-izle/
-  let m = s.match(
-    /\/([^/?#]+?)-(\d+)-sezon-(\d+)-bolum(?:-izle)?\/?/i
-  );
-  if (m) {
-    return {
-      type: "episode",
-      slug: m[1],
-      season: parseInt(m[2], 10),
-      episode: parseInt(m[3], 10),
-      fullPath: s.replace(/^https?:\/\/[^/]+/i, "").split("?")[0],
-    };
-  }
-  // /slug-15-bolum-izle/
-  m = s.match(/\/([^/?#]+?)-(\d+)-bolum(?:-izle)?\/?/i);
-  if (m) {
-    return {
-      type: "episode",
-      slug: m[1],
-      season: 0,
-      episode: parseInt(m[2], 10),
-      fullPath: s.replace(/^https?:\/\/[^/]+/i, "").split("?")[0],
-    };
-  }
-  // /diziler/slug-izle/
-  m = s.match(/\/diziler\/([^/?#]+?)(?:-izle)?\/?/i);
-  if (m) {
-    return {
-      type: "series",
-      slug: m[1].replace(/-izle$/i, ""),
-      season: 0,
-      episode: 0,
-      fullPath: "",
-    };
-  }
-  return { type: "unknown", slug: "", season: 0, episode: 0, fullPath: "" };
-}
-
 function hostRank(name) {
   const n = String(name || "").toLowerCase();
   if (/sibnet/.test(n)) return 0;
   if (/vidmoly|rapidvid|vidmoxy/.test(n)) return 1;
   if (/voe/.test(n)) return 2;
   if (/dzen/.test(n)) return 3;
-  if (/mailru|hdfc|byse|fkr/.test(n)) return 4;
+  if (/mailru|hdfc|byse|fkr|hexload/.test(n)) return 4;
   return 5;
 }
+function parseHref(url) {
+  const s = String(url || "");
+  let m = s.match(/\/([^/?#]+?)-(\d+)-sezon-(\d+)-bolum(?:-izle)?\/?/i);
+  if (m)
+    return {
+      type: "episode",
+      slug: m[1],
+      season: parseInt(m[2], 10),
+      episode: parseInt(m[3], 10),
+    };
+  m = s.match(/\/([^/?#]+?)-(\d+)-bolum(?:-izle)?\/?/i);
+  if (m)
+    return {
+      type: "episode",
+      slug: m[1],
+      season: 0,
+      episode: parseInt(m[2], 10),
+    };
+  m = s.match(/\/diziler\/([^/?#]+?)(?:-izle)?\/?/i);
+  if (m)
+    return {
+      type: "series",
+      slug: m[1].replace(/-izle$/i, ""),
+      season: 0,
+      episode: 0,
+    };
+  return { type: "unknown", slug: "", season: 0, episode: 0 };
+}
 
-/* ---------- stream helpers ---------- */
+/* ---------- server list (fix \/ escapes before atob) ---------- */
+function parseServerList(html) {
+  const servers = [];
+  if (!html) return servers;
+
+  const re = /JSON\.parse\(\s*atob\(\s*["']([^"']+)["']\s*\)\s*\)/g;
+  let m;
+  while ((m = re.exec(html))) {
+    let raw = m[1]
+      .replace(/\\\//g, "/")
+      .replace(/\\n/g, "\n")
+      .replace(/\\"/g, '"');
+    let decoded = "";
+    try {
+      decoded = b64decode(raw);
+    } catch (e) {
+      continue;
+    }
+    if (!decoded || (decoded.charAt(0) !== "[" && decoded.charAt(0) !== "{"))
+      continue;
+    try {
+      const j = JSON.parse(decoded);
+      if (Array.isArray(j)) {
+        j.forEach(function (s) {
+          if (s && (s.streamUrl || s.resolveUrl || s.videoId)) servers.push(s);
+        });
+      } else if (j && typeof j === "object") {
+        ["sub", "dub", "any"].forEach(function (k) {
+          if (Array.isArray(j[k])) {
+            j[k].forEach(function (s) {
+              if (s && (s.streamUrl || s.resolveUrl || s.videoId))
+                servers.push(s);
+            });
+          }
+        });
+      }
+    } catch (e) {}
+  }
+
+  const seen = {};
+  const out = [];
+  for (let i = 0; i < servers.length; i++) {
+    const s = servers[i];
+    const key =
+      String(s.type || "") +
+      "|" +
+      String(s.streamUrl || s.resolveUrl || s.videoId || i);
+    if (seen[key]) continue;
+    seen[key] = true;
+    out.push(s);
+  }
+  return out;
+}
+
+/* ---------- resolve stream proxy (302 → mp4) ---------- */
 async function resolveProxyStream(proxyPath, referer) {
   const url = absUrl(proxyPath);
   if (!url) return [];
+  const headers = {
+    "User-Agent": UA,
+    Referer: referer || baseUrl + "/",
+    Accept: "*/*",
+  };
+
+  // 1) try manual redirect for Location
   try {
-    // Prefer manual redirect to capture Location (direct mp4)
-    let res = null;
-    try {
-      res = await fetch(url, {
-        method: "GET",
-        redirect: "manual",
-        headers: {
-          "User-Agent": UA,
-          Referer: referer || baseUrl + "/",
-          Accept: "*/*",
-        },
-      });
-    } catch (e) {
-      res = await soraFetch(url, {
-        headers: {
-          "User-Agent": UA,
-          Referer: referer || baseUrl + "/",
-          Accept: "*/*",
-        },
-      });
-    }
-
-    if (!res) return [];
-
-    // 302 / 301 → Location
-    let loc = "";
-    try {
-      if (res.headers && typeof res.headers.get === "function") {
-        loc = res.headers.get("Location") || res.headers.get("location") || "";
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+      headers: headers,
+    });
+    if (res) {
+      let loc = "";
+      try {
+        if (res.headers && res.headers.get)
+          loc = res.headers.get("Location") || res.headers.get("location") || "";
+      } catch (e) {}
+      // some runtimes expose status + headers differently
+      if (!loc && res.status >= 300 && res.status < 400) {
+        try {
+          loc = (res.headers && res.headers.Location) || "";
+        } catch (e) {}
       }
-    } catch (e) {}
-    if (loc) {
-      if (loc.indexOf("//") === 0) loc = "https:" + loc;
-      if (loc.charAt(0) === "/") loc = baseUrl + loc;
-      return [forceHttps(loc)];
-    }
-
-    // Some runtimes auto-follow; final url may be on response
-    try {
+      if (loc) {
+        if (loc.indexOf("//") === 0) loc = "https:" + loc;
+        if (loc.charAt(0) === "/") loc = baseUrl + loc;
+        return [forceHttps(loc)];
+      }
       if (res.url && /\.(mp4|m3u8)(\?|$)/i.test(res.url)) {
         return [forceHttps(res.url)];
       }
-    } catch (e) {}
-
-    // Body might be tiny redirect HTML or already media URL text
-    const text = await getText(res);
-    if (/^https?:\/\//i.test(text.trim())) {
-      return [forceHttps(text.trim().split(/\s/)[0])];
     }
-    const m = text.match(/https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*/i);
-    if (m) return [forceHttps(m[0])];
+  } catch (e) {}
 
-    // Last resort: return proxy URL itself (player may follow 302)
-    return [url];
-  } catch (e) {
-    return [url];
-  }
+  // 2) soraFetch / fetchv2 may auto-follow; check final url
+  try {
+    const res2 = await soraFetch(url, { headers: headers });
+    if (res2) {
+      try {
+        if (res2.url && /\.(mp4|m3u8)(\?|$)/i.test(res2.url)) {
+          return [forceHttps(res2.url)];
+        }
+      } catch (e) {}
+      // headers Location if still present
+      try {
+        if (res2.headers && res2.headers.get) {
+          const loc2 =
+            res2.headers.get("Location") || res2.headers.get("location") || "";
+          if (loc2 && isHttp(loc2)) return [forceHttps(loc2)];
+        }
+      } catch (e) {}
+    }
+  } catch (e) {}
+
+  // 3) return proxy URL itself — player often follows 302
+  return [url];
 }
 
 async function resolveSibnetById(videoId) {
   if (!videoId) return [];
   try {
     const shell =
-      "https://video.sibnet.ru/shell.php?videoid=" + encodeURIComponent(videoId);
+      "https://video.sibnet.ru/shell.php?videoid=" +
+      encodeURIComponent(String(videoId));
     const html = await getText(
       await soraFetch(shell, {
         headers: {
@@ -247,9 +285,9 @@ async function resolveSibnetById(videoId) {
       /["']src["']\s*:\s*["']([^"']+)["']/i,
     ];
     for (let i = 0; i < patterns.length; i++) {
-      const m = html.match(patterns[i]);
-      if (!m) continue;
-      let u = m[1].replace(/\\/g, "").trim();
+      const mm = html.match(patterns[i]);
+      if (!mm) continue;
+      let u = mm[1].replace(/\\/g, "").trim();
       if (u.indexOf("//") === 0) u = "https:" + u;
       if (u.charAt(0) === "/") u = "https://video.sibnet.ru" + u;
       if (isHttp(u)) found.push(u);
@@ -264,58 +302,12 @@ async function resolveSibnetById(videoId) {
   }
 }
 
-/** Parse atob("...") server JSON from episode HTML */
-function parseServerList(html) {
-  const servers = [];
-  if (!html) return servers;
-  const atobs = html.match(/atob\(["']([A-Za-z0-9+/=]+)["']\)/g) || [];
-  for (let i = 0; i < atobs.length; i++) {
-    const m = atobs[i].match(/atob\(["']([A-Za-z0-9+/=]+)["']\)/);
-    if (!m) continue;
-    let raw = "";
-    try {
-      raw = b64decode(m[1]);
-    } catch (e) {
-      continue;
-    }
-    if (!raw || (raw.charAt(0) !== "[" && raw.charAt(0) !== "{")) continue;
-    try {
-      const j = JSON.parse(raw);
-      if (Array.isArray(j)) {
-        j.forEach(function (s) {
-          if (s && (s.streamUrl || s.resolveUrl || s.videoId)) servers.push(s);
-        });
-      } else if (j && typeof j === "object") {
-        // { sub: [...], dub: [...], any: [...] }
-        ["sub", "dub", "any"].forEach(function (k) {
-          if (Array.isArray(j[k])) {
-            j[k].forEach(function (s) {
-              if (s && (s.streamUrl || s.resolveUrl || s.videoId))
-                servers.push(s);
-            });
-          }
-        });
-      }
-    } catch (e) {}
-  }
-  // dedupe by streamUrl/resolveUrl
-  const seen = {};
-  const out = [];
-  for (let i = 0; i < servers.length; i++) {
-    const s = servers[i];
-    const key = String(s.streamUrl || s.resolveUrl || s.videoId || i);
-    if (seen[key]) continue;
-    seen[key] = true;
-    out.push(s);
-  }
-  return out;
-}
-
 /* ===================== SEARCH ===================== */
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
+    const qLower = cleaned.toLowerCase();
 
     const results = [];
     const seen = {};
@@ -325,27 +317,21 @@ async function searchResults(keyword) {
       if (!/\/$/.test(href)) href += "/";
       if (!href || seen[href]) return;
       if (!/\/diziler\/[^/]+-izle\/?$/i.test(href)) return;
-      // skip category pages
-      if (/\/diziler\/(anime|cizgi-film|dizi)-izle\/?$/i.test(href)) return;
-      if (/\/diziler\/(anime|cizgi-film|dizi)\/?$/i.test(href)) return;
+      if (/\/diziler\/(anime|cizgi-film|dizi)(-izle)?\/?$/i.test(href)) return;
       seen[href] = true;
       let img = absUrl(image || "");
-      if (img && img.indexOf("http") !== 0) img = absUrl(img);
       if (img.indexOf("data:") === 0) img = "";
-      results.push({
-        title: decodeEntities(title || "Seri")
-          .replace(/\s+izle\s*$/i, "")
-          .replace(/\s+/g, " ")
-          .trim(),
-        image: img,
-        href: href,
-      });
+      title = decodeEntities(title || "")
+        .replace(/\s+izle\s*$/i, "")
+        .replace(/\s+-\s*Sezonluk Dizi.*$/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!title) return;
+      results.push({ title: title, image: img, href: href });
     }
 
-    const searchUrl =
-      baseUrl + "/ara/?q=" + encodeURIComponent(cleaned);
     const html = await getText(
-      await soraFetch(searchUrl, {
+      await soraFetch(baseUrl + "/ara/?q=" + encodeURIComponent(cleaned), {
         headers: {
           "User-Agent": UA,
           Accept: "text/html,*/*",
@@ -353,38 +339,65 @@ async function searchResults(keyword) {
         },
       })
     );
-    if (!html || html.length < 500) return JSON.stringify([]);
+    if (!html || html.length < 400) return JSON.stringify([]);
 
-    // links to /diziler/xxx-izle/ + nearby poster/title
-    let re =
-      /href="((?:https?:\/\/[^"]+)?\/diziler\/[^"]+-izle\/?)"[\s\S]{0,400}?(?:src|data-src)="([^"]+\.(?:webp|jpg|jpeg|png)[^"]*)"/gi;
+    // Primary: poster card + film-name
+    // <a href="/diziler/xxx-izle/" class="poster"> ... img ... </a>
+    // <a href="..." class="film-name">Title</a>
+    const posterRe =
+      /<a\s+href="((?:https?:\/\/[^"]+)?\/diziler\/[^"]+-izle\/?)"\s+class="poster">([\s\S]{0,900}?)<\/a>/gi;
     let m;
-    while ((m = re.exec(html))) {
-      const slug = (m[1].match(/\/diziler\/([^/]+)-izle/i) || [])[1] || "";
-      const title = slug
-        .replace(/-/g, " ")
-        .replace(/\b\w/g, function (c) {
-          return c.toUpperCase();
-        });
-      push(m[1], title, m[2]);
+    while ((m = posterRe.exec(html))) {
+      const href = m[1];
+      const block = m[2];
+      const imgM = block.match(/(?:src|data-src)="([^"]+)"/i);
+      const after = html.slice(m.index, m.index + m[0].length + 500);
+      const nameM =
+        after.match(/class="film-name"[^>]*>([^<]+)/i) ||
+        after.match(/class="phc-title"[^>]*>([^<]+)/i);
+      const altM = after.match(/data-alt-title="([^"]+)"/i);
+      let title = nameM ? nameM[1] : altM ? altM[1] : "";
+      if (!title) {
+        const slug = (href.match(/\/diziler\/([^/]+)-izle/i) || [])[1] || "";
+        title = slug.replace(/-/g, " ");
+      }
+      // relevance: title or slug must contain a query token
+      const slug = (href.match(/\/diziler\/([^/]+)-izle/i) || [])[1] || "";
+      const hay = (title + " " + slug).toLowerCase();
+      const tokens = qLower.split(/\s+/).filter(function (t) {
+        return t.length > 1;
+      });
+      let ok = tokens.length === 0;
+      for (let t = 0; t < tokens.length; t++) {
+        if (hay.indexOf(tokens[t]) >= 0) {
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) continue;
+      push(href, title, imgM ? imgM[1] : "");
     }
 
-    re =
-      /href="((?:https?:\/\/[^"]+)?\/diziler\/([^"]+)-izle\/?)"[^>]*title="([^"]+)"/gi;
-    while ((m = re.exec(html))) push(m[1], m[3], "");
-
-    re =
-      /href="((?:https?:\/\/[^"]+)?\/diziler\/([^"]+)-izle\/?)"/gi;
-    while ((m = re.exec(html))) {
-      if (results.length >= 25) break;
-      const title = m[2]
-        .replace(/-/g, " ")
-        .replace(/\b\w/g, function (c) {
-          return c.toUpperCase();
+    // Fallback: film-name links only (still filter by keyword)
+    if (results.length < 3) {
+      const fnRe =
+        /<a\s+href="((?:https?:\/\/[^"]+)?\/diziler\/([^"]+)-izle\/?)"\s+class="film-name"[^>]*>([^<]+)/gi;
+      while ((m = fnRe.exec(html))) {
+        const hay = (m[2] + " " + m[3]).toLowerCase();
+        const tokens = qLower.split(/\s+/).filter(function (t) {
+          return t.length > 1;
         });
-      // try poster convention
-      const poster = "/img/locandine/" + m[2] + "-poster.webp";
-      push(m[1], title, poster);
+        let ok = false;
+        for (let t = 0; t < tokens.length; t++) {
+          if (hay.indexOf(tokens[t]) >= 0) {
+            ok = true;
+            break;
+          }
+        }
+        if (!ok) continue;
+        const poster = "/img/locandine/" + m[2] + "-poster.webp";
+        push(m[1], m[3], poster);
+      }
     }
 
     return JSON.stringify(results.slice(0, 25));
@@ -398,11 +411,7 @@ async function extractDetails(url) {
   try {
     const p = parseHref(url);
     let page = String(url);
-    if (p.type === "series" && p.slug) {
-      page = baseUrl + "/diziler/" + p.slug + "-izle/";
-    } else if (p.type === "episode" && p.slug) {
-      page = baseUrl + "/diziler/" + p.slug + "-izle/";
-    }
+    if (p.slug) page = baseUrl + "/diziler/" + p.slug + "-izle/";
     const html = await getText(await soraFetch(page));
 
     let description = "N/A";
@@ -411,16 +420,13 @@ async function extractDetails(url) {
         /property=["']og:description["'][^>]*content=["']([^"']+)/i
       ) ||
       html.match(/name=["']description["']\s+content=["']([^"']+)/i);
-    if (dm) {
-      description = decodeEntities(dm[1])
-        .replace(/<[^>]+>/g, "")
-        .slice(0, 900);
-    }
+    if (dm)
+      description = decodeEntities(dm[1]).replace(/<[^>]+>/g, "").slice(0, 900);
 
     let aliases = "N/A";
     const am =
       html.match(/Orijinal\s*(?:Ad|İsim)\s*:?\s*([^<\n]{2,120})/i) ||
-      html.match(/English\s*:?\s*([^<\n]{2,120})/i);
+      html.match(/data-alt-title="([^"]+)"/i);
     if (am) aliases = decodeEntities(am[1]).trim();
 
     let airdate = "N/A";
@@ -443,16 +449,13 @@ async function extractDetails(url) {
 async function extractEpisodes(url) {
   try {
     const p = parseHref(url);
-    const seriesUrl =
-      p.slug
-        ? baseUrl + "/diziler/" + p.slug.replace(/-izle$/i, "") + "-izle/"
-        : String(url);
-
+    const seriesUrl = p.slug
+      ? baseUrl + "/diziler/" + p.slug.replace(/-izle$/i, "") + "-izle/"
+      : String(url);
     const html = await getText(await soraFetch(seriesUrl));
     const eps = [];
     const seen = {};
 
-    // /slug-2-sezon-15-bolum-izle/
     let re =
       /href="((?:https?:\/\/[^"]+)?\/([^"/]+?)-(\d+)-sezon-(\d+)-bolum(?:-izle)?\/?)"/gi;
     let m;
@@ -468,15 +471,11 @@ async function extractEpisodes(url) {
       seen[key] = true;
       eps.push({
         href: full,
-        number: season > 1 ? season * 1000 + num : num,
-        title:
-          season > 0
-            ? season + ". Sezon " + num + ". Bölüm"
-            : num + ". Bölüm",
+        number: season * 1000 + num,
+        title: season + ". Sezon " + num + ". Bölüm",
       });
     }
 
-    // /slug-15-bolum-izle/ (no season)
     re =
       /href="((?:https?:\/\/[^"]+)?\/([^"/]+?)-(\d+)-bolum(?:-izle)?\/?)"/gi;
     while ((m = re.exec(html))) {
@@ -489,22 +488,14 @@ async function extractEpisodes(url) {
       if (p.slug && m[2].indexOf(p.slug) < 0 && p.slug.indexOf(m[2]) < 0)
         continue;
       seen[key] = true;
-      eps.push({
-        href: full,
-        number: num,
-        title: num + ". Bölüm",
-      });
+      eps.push({ href: full, number: num, title: num + ". Bölüm" });
     }
 
     eps.sort(function (a, b) {
       return a.number - b.number;
     });
-
-    // renumber if we used season*1000 scheme for display order only —
-    // keep href/title; number field used for sorting in app
-    if (!eps.length) {
+    if (!eps.length)
       eps.push({ href: String(url), number: 1, title: "1. Bölüm" });
-    }
     return JSON.stringify(eps.slice(0, 800));
   } catch (e) {
     return JSON.stringify([
@@ -517,12 +508,10 @@ async function extractEpisodes(url) {
 async function extractStreamUrl(url) {
   try {
     let epUrl = String(url).split("?")[0];
-    if (!/^https?:\/\//i.test(epUrl)) {
+    if (!/^https?:\/\//i.test(epUrl))
       epUrl = baseUrl + (epUrl.charAt(0) === "/" ? epUrl : "/" + epUrl);
-    }
     if (!/\/$/.test(epUrl)) epUrl += "/";
 
-    // series page → first episode
     if (/\/diziler\//i.test(epUrl)) {
       const seriesHtml = await getText(await soraFetch(epUrl));
       const em =
@@ -542,84 +531,90 @@ async function extractStreamUrl(url) {
         headers: { Referer: baseUrl + "/", "User-Agent": UA },
       })
     );
-    if (!epHtml || epHtml.length < 400) {
+    if (!epHtml || epHtml.length < 400)
       return JSON.stringify({ streams: [], subtitles: "" });
-    }
 
     const servers = parseServerList(epHtml);
     const streams = [];
     const seen = {};
 
-    for (let i = 0; i < servers.length && streams.length < 10; i++) {
+    function addStream(title, media, refererHint) {
+      media = forceHttps(String(media || ""));
+      if (media.indexOf("//") === 0) media = "https:" + media;
+      if (!isHttp(media) || seen[media]) return;
+      if (
+        !/\.(mp4|m3u8)(\?|$)/i.test(media) &&
+        !/\/api\/stream\//i.test(media) &&
+        !/sibnet\.ru/i.test(media)
+      )
+        return;
+      seen[media] = true;
+      const isSib = /sibnet/i.test(media) || /sibnet/i.test(title);
+      const isProxy = /cizgimax\.online\/api\/stream/i.test(media);
+      streams.push({
+        title: title,
+        name: title,
+        streamUrl: media,
+        url: media,
+        headers: {
+          "User-Agent": UA,
+          Accept: "*/*",
+          Referer: isSib
+            ? "https://video.sibnet.ru/"
+            : isProxy
+            ? epUrl
+            : refererHint || baseUrl + "/",
+          Origin: isSib ? "https://video.sibnet.ru" : baseUrl,
+        },
+      });
+    }
+
+    for (let i = 0; i < servers.length && streams.length < 12; i++) {
       const s = servers[i];
       const type = String(s.type || "").toLowerCase();
-      const label =
-        decodeEntities(s.label || type || "Host").trim() || type || "Host";
+      let label = decodeEntities(s.label || type || "Host").trim();
+      if (!label) label = type || "Host";
+      // clearer picker labels
+      if (s.lang === "sub" && label.toLowerCase().indexOf("altyaz") < 0)
+        label = label + " (Altyazı)";
+      if (s.lang === "dub" && label.toLowerCase().indexOf("dublaj") < 0)
+        label = label + " (Dublaj)";
 
-      let mediaUrls = [];
-
-      // 1) Official stream proxy (best path)
+      // A) Official proxy (sibnet / vidmoly / voe / …)
       if (s.streamUrl) {
-        mediaUrls = await resolveProxyStream(s.streamUrl, epUrl);
+        const resolved = await resolveProxyStream(s.streamUrl, epUrl);
+        for (let r = 0; r < resolved.length; r++) {
+          addStream(label, resolved[r], epUrl);
+        }
+        // always also expose proxy URL as selectable option
+        addStream(label + " · Proxy", absUrl(s.streamUrl), epUrl);
       }
 
-      // 2) Sibnet videoId fallback
-      if (!mediaUrls.length && s.videoId) {
-        mediaUrls = await resolveSibnetById(String(s.videoId));
+      // B) Sibnet videoId fallback
+      if (s.videoId) {
+        const byId = await resolveSibnetById(String(s.videoId));
+        for (let r = 0; r < byId.length; r++) {
+          addStream(label + " · CDN", byId[r], "https://video.sibnet.ru/");
+        }
       }
 
-      // 3) Dzen / opaque resolve – try np-resolve then skip heavy SPA
-      if (!mediaUrls.length && s.resolveUrl && /dzen|np-resolve/i.test(String(s.resolveUrl) + type)) {
+      // C) Dzen opaque – only if direct media appears
+      if (s.resolveUrl && !s.streamUrl) {
         try {
-          const resolved = await getText(
+          const body = await getText(
             await soraFetch(absUrl(s.resolveUrl), {
               headers: {
                 "User-Agent": UA,
                 Referer: epUrl,
-                Accept: "application/json",
+                Accept: "application/json,*/*",
               },
             })
           );
-          // may return {"id":"..."} – not a direct media URL; skip for now
-          const jm = resolved.match(/https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*/i);
-          if (jm) mediaUrls = [jm[0]];
+          const jm = body.match(
+            /https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*/i
+          );
+          if (jm) addStream(label, jm[0], epUrl);
         } catch (e) {}
-      }
-
-      for (let r = 0; r < mediaUrls.length; r++) {
-        let media = forceHttps(mediaUrls[r]);
-        if (media.indexOf("//") === 0) media = "https:" + media;
-        if (!isHttp(media) || seen[media]) continue;
-        // accept mp4/m3u8 or our own stream proxy / sibnet CDN
-        if (
-          !/\.(mp4|m3u8)(\?|$)/i.test(media) &&
-          !/\/api\/stream\//i.test(media) &&
-          !/sibnet\.ru/i.test(media)
-        )
-          continue;
-        seen[media] = true;
-
-        const isSib = /sibnet/i.test(media) || type === "sibnet";
-        const isProxy = /cizgimax\.online\/api\/stream/i.test(media);
-
-        streams.push({
-          title: label,
-          name: label,
-          streamUrl: media,
-          url: media,
-          headers: {
-            "User-Agent": UA,
-            Accept: "*/*",
-            Referer: isSib
-              ? "https://video.sibnet.ru/"
-              : isProxy
-              ? epUrl
-              : baseUrl + "/",
-            Origin: isSib
-              ? "https://video.sibnet.ru"
-              : baseUrl,
-          },
-        });
       }
     }
 
@@ -628,7 +623,7 @@ async function extractStreamUrl(url) {
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 10),
+      streams: streams.slice(0, 12),
       subtitles: "",
     });
   } catch (e) {
