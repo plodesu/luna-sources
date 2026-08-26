@@ -1,13 +1,15 @@
 {
   "sourceName": "TürkAnime TV",
-  "iconUrl": "https://www.turkanime.tv/imajlar/favicon.ico",
+  "iconUrl": "https://www.turkanime.tv/favicon.ico",
   "author": {
     "name": "plodesu",
     "icon": ""
   },
   "version": "1.0.0",
   "language": "Turkish",
-  "languageType": ["Subbed", "Dubbed"],
+  "languageType": [
+    "Subbed"
+  ],
   "streamType": "HLS",
   "quality": "HD",
   "baseUrl": "https://www.turkanime.tv",
