@@ -1,6 +1,8 @@
 /**
- * YeuAnime Module - Scraped from actual site structure
- * Works with Sora, Luna, Anymex, Mojuru
+ * YeuAnime Module - Using exact site patterns
+ * Episode URL: /xem-phim/{slug}/tap-{num}/{language}?server={SERVER}
+ * Search: /tim-kiem?q={keyword}
+ * Series: /phim/{slug}
  */
 
 const baseUrl = "https://yeuanime.buzz";
@@ -17,7 +19,6 @@ async function getHTML(url) {
       "Referer": baseUrl + "/"
     };
     
-    // Try fetchv2 first (Sora's internal fetch)
     if (typeof fetchv2 === "function") {
       try {
         const res = await fetchv2(url, headers, "GET");
@@ -29,7 +30,6 @@ async function getHTML(url) {
       } catch (_) {}
     }
     
-    // Fallback to standard fetch
     const res = await fetch(url, { headers });
     if (res && typeof res.text === "function") {
       return await res.text();
@@ -61,6 +61,11 @@ function absUrl(path) {
   return baseUrl + "/" + path;
 }
 
+function extractSlugFromUrl(url) {
+  const match = String(url).match(/\/phim\/([^/?#]+)/);
+  return match ? match[1] : null;
+}
+
 // ============ SEARCH ============
 
 async function searchResults(keyword) {
@@ -76,9 +81,8 @@ async function searchResults(keyword) {
     const results = [];
     const seen = {};
     
-    // Pattern 1: Find all anime cards - matches the actual site structure
-    // Look for: <a href="/phim/SLUG"> ... <img src="IMAGE" alt="TITLE"> ... </a>
-    // Then the title appears in a <h3> inside a sibling div
+    // Pattern: Find anime cards with <a href="/phim/SLUG">
+    // and <img src="..." alt="TITLE">
     const cardRegex = /<a[^>]+href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]+alt="([^"]*)"[^>]*>/gi;
     
     let match;
@@ -87,16 +91,14 @@ async function searchResults(keyword) {
       const image = absUrl(match[2]);
       let title = cleanString(match[3]);
       
-      // If title is empty from alt, try to find it in a nearby <h3>
+      // If no alt, try to get title from nearby h3
       if (!title) {
         const slice = html.slice(Math.max(0, match.index - 300), match.index + 500);
         const hMatch = slice.match(/<h3[^>]*>([^<]+)<\/h3>/);
-        if (hMatch) {
-          title = cleanString(hMatch[1]);
-        }
+        if (hMatch) title = cleanString(hMatch[1]);
       }
       
-      // If still no title, use slug
+      // Fallback: use slug
       if (!title) {
         title = slug.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
       }
@@ -108,7 +110,7 @@ async function searchResults(keyword) {
       }
     }
     
-    // Pattern 2: If no results, try to find cards with title in a separate link
+    // Alternative pattern
     if (results.length === 0) {
       const altRegex = /<a[^>]+href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/gi;
       while ((match = altRegex.exec(html))) {
@@ -116,7 +118,6 @@ async function searchResults(keyword) {
         const title = cleanString(match[2]);
         const href = baseUrl + "/phim/" + slug;
         
-        // Try to find image for this card
         const slice = html.slice(Math.max(0, match.index - 500), match.index + 100);
         const imgMatch = slice.match(/<img[^>]+src="([^"]+)"[^>]*>/);
         const image = imgMatch ? absUrl(imgMatch[1]) : "";
@@ -142,27 +143,49 @@ async function extractDetails(url) {
     const html = await getHTML(url);
     if (!html) return JSON.stringify([{ description: "N/A", aliases: "N/A", airdate: "N/A" }]);
     
-    // Get description from meta tags
     let description = "N/A";
-    const descMatch = html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i) ||
-                     html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i);
-    if (descMatch) {
-      description = cleanString(descMatch[1].substring(0, 500));
-    }
-    
-    // Get title/aliases
     let aliases = "N/A";
-    const titleMatch = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
-                      html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    if (titleMatch) {
-      aliases = cleanString(titleMatch[1]);
+    let airdate = "N/A";
+    
+    // Try JSON-LD first
+    const ldRegex = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let match;
+    while ((match = ldRegex.exec(html))) {
+      try {
+        const data = JSON.parse(match[1]);
+        if (Array.isArray(data)) {
+          for (let item of data) {
+            if (item['@type'] === 'TVSeries' || item['@type'] === 'Movie') {
+              if (item.description) description = cleanString(item.description.substring(0, 500));
+              if (item.name) aliases = cleanString(item.name);
+              if (item.datePublished) airdate = item.datePublished.substring(0, 4);
+              break;
+            }
+          }
+        } else if (data['@type'] === 'TVSeries' || data['@type'] === 'Movie') {
+          if (data.description) description = cleanString(data.description.substring(0, 500));
+          if (data.name) aliases = cleanString(data.name);
+          if (data.datePublished) airdate = data.datePublished.substring(0, 4);
+        }
+      } catch (_) {}
     }
     
-    // Get year
-    let airdate = "N/A";
-    const yearMatch = html.match(/(\d{4})/);
-    if (yearMatch) {
-      airdate = yearMatch[1];
+    // Fallback: HTML meta tags
+    if (description === "N/A") {
+      const descMatch = html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i) ||
+                       html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i);
+      if (descMatch) description = cleanString(descMatch[1].substring(0, 500));
+    }
+    
+    if (aliases === "N/A") {
+      const titleMatch = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
+                        html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (titleMatch) aliases = cleanString(titleMatch[1]);
+    }
+    
+    if (airdate === "N/A") {
+      const yearMatch = html.match(/(\d{4})/);
+      if (yearMatch) airdate = yearMatch[1];
     }
     
     return JSON.stringify([{ description, aliases, airdate }]);
@@ -176,30 +199,31 @@ async function extractDetails(url) {
 
 async function extractEpisodes(url) {
   try {
-    // Extract slug from URL
-    const slugMatch = url.match(/\/phim\/([^/?#]+)/);
-    if (!slugMatch) return "[]";
+    const slug = extractSlugFromUrl(url);
+    if (!slug) return "[]";
     
-    const slug = slugMatch[1];
     const html = await getHTML(baseUrl + "/phim/" + slug);
-    
     if (!html) return "[]";
     
     const episodes = [];
     const seen = {};
     
-    // Find all episode links: /xem-phim/SLUG/tap-NUM/LANG?server=XXX
-    const epRegex = /<a[^>]+href="(\/xem-phim\/[^"]+?\/tap-(\d+)\/[^"]+?)"[^>]*>/gi;
+    // Exact pattern from the site:
+    // <a href="/xem-phim/{slug}/tap-{num}/{language}?server={SERVER}">
+    //   <p>Tập {num}</p>
+    // </a>
+    const epRegex = /<a[^>]+href="(\/xem-phim\/[^"]+?)"[^>]*>[\s\S]*?<p[^>]*>([^<]+)<\/p>[\s\S]*?<\/a>/gi;
     
     let match;
     while ((match = epRegex.exec(html))) {
       const href = absUrl(match[1]);
-      const epNum = parseInt(match[2], 10);
+      const title = cleanString(match[2]);
       
-      // Get episode title
-      const slice = html.slice(Math.max(0, match.index - 100), match.index + 300);
-      let titleMatch = slice.match(/<span[^>]*>([^<]+)<\/span>/);
-      let title = titleMatch ? cleanString(titleMatch[1]) : ("Tập " + epNum);
+      // Extract episode number from href
+      const epMatch = href.match(/\/tap-(\d+)\//);
+      if (!epMatch) continue;
+      
+      const epNum = parseInt(epMatch[1], 10);
       
       if (!seen[epNum]) {
         seen[epNum] = true;
@@ -208,8 +232,30 @@ async function extractEpisodes(url) {
           number: epNum,
           season: 1,
           episode: epNum,
-          title: title
+          title: title || "Tập " + epNum
         });
+      }
+    }
+    
+    // If no episodes found, try simpler pattern
+    if (episodes.length === 0) {
+      const altRegex = /href="(\/xem-phim\/[^"]+?)"/gi;
+      while ((match = altRegex.exec(html))) {
+        const href = absUrl(match[1]);
+        const epMatch = href.match(/\/tap-(\d+)\//);
+        if (epMatch) {
+          const epNum = parseInt(epMatch[1], 10);
+          if (!seen[epNum]) {
+            seen[epNum] = true;
+            episodes.push({
+              href: href,
+              number: epNum,
+              season: 1,
+              episode: epNum,
+              title: "Tập " + epNum
+            });
+          }
+        }
       }
     }
     
@@ -230,27 +276,66 @@ async function extractStreamUrl(url) {
     const html = await getHTML(url);
     if (!html) return JSON.stringify({ streams: [], subtitles: "" });
     
-    // Extract HLS URL from the hidden form input
-    const m = html.match(/<input[^>]+name="url"[^>]+value="([^"]+)"[^>]*>/i);
-    if (!m) {
-      // Try to find it in JavaScript
-      const jsMatch = html.match(/url\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
-      if (!jsMatch) return JSON.stringify({ streams: [], subtitles: "" });
-      var hlsUrl = jsMatch[1];
-    } else {
-      var hlsUrl = m[1];
+    let hlsUrl = null;
+    
+    // Pattern 1: Hidden input with name="url"
+    const inputMatch = html.match(/<input[^>]+name="url"[^>]+value="([^"]+)"[^>]*>/i);
+    if (inputMatch) {
+      hlsUrl = inputMatch[1];
     }
     
-    // Clean up the URL if needed
-    hlsUrl = String(hlsUrl).replace(/\\/g, '');
+    // Pattern 2: JavaScript variable
+    if (!hlsUrl) {
+      const jsMatch = html.match(/url\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']/i);
+      if (jsMatch) {
+        hlsUrl = jsMatch[1];
+      }
+    }
     
-    // Build headers
+    // Pattern 3: Direct .m3u8 URL
+    if (!hlsUrl) {
+      const m3u8Match = html.match(/(https?:\/\/[^\s"']+\.m3u8[^\s"']*)/i);
+      if (m3u8Match) {
+        hlsUrl = m3u8Match[1];
+      }
+    }
+    
+    // Pattern 4: From iframe src
+    if (!hlsUrl) {
+      const iframeMatch = html.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i);
+      if (iframeMatch) {
+        const iframeUrl = iframeMatch[1];
+        if (iframeUrl.includes('player') || iframeUrl.includes('embed')) {
+          const iframeHTML = await getHTML(iframeUrl);
+          if (iframeHTML) {
+            const m3u8Match2 = iframeHTML.match(/(https?:\/\/[^\s"']+\.m3u8[^\s"']*)/i);
+            if (m3u8Match2) {
+              hlsUrl = m3u8Match2[1];
+            }
+          }
+        }
+      }
+    }
+    
+    if (!hlsUrl) {
+      return JSON.stringify({ streams: [], subtitles: "" });
+    }
+    
+    hlsUrl = String(hlsUrl).replace(/\\/g, '').trim();
+    
     const headers = {
       "User-Agent": UA,
       "Referer": url,
       "Origin": baseUrl,
       "Accept": "*/*"
     };
+    
+    // Try to extract subtitles
+    let subtitles = "";
+    const subMatch = html.match(/<track[^>]+src="([^"]+\.vtt[^"]*)"[^>]*>/i);
+    if (subMatch) {
+      subtitles = absUrl(subMatch[1]);
+    }
     
     return JSON.stringify({
       streams: [
@@ -260,7 +345,7 @@ async function extractStreamUrl(url) {
           headers: headers
         }
       ],
-      subtitles: ""
+      subtitles: subtitles
     });
     
   } catch (_) {
