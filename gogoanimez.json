@@ -1,21 +1,21 @@
 {
-  "sourceName": "TürkAnime TV",
-  "iconUrl": "https://www.turkanime.tv/favicon.ico",
+  "sourceName": "GogoAnimeZ",
+  "iconUrl": "https://gogoanimez.to/favicon.ico",
   "author": {
     "name": "plodesu",
     "icon": ""
   },
-  "version": "1.2.0",
-  "language": "Turkish",
+  "version": "1.0.0",
+  "language": "English",
   "languageType": [
     "Subbed",
     "Dubbed"
   ],
   "streamType": "HLS",
   "quality": "HD",
-  "baseUrl": "https://www.turkanime.tv",
-  "searchBaseUrl": "https://www.turkanime.tv",
-  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/turkanime.js",
+  "baseUrl": "https://gogoanimez.to",
+  "searchBaseUrl": "https://gogoanimez.to",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/gogoanimez.js",
   "type": "anime",
   "asyncJS": true,
   "softsub": true,
