@@ -4,19 +4,21 @@
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
  * Player: videoplay.vip → HLS master (A/V together)
- * Subtitle: BOTH sources, so every client shows subs.
+ * Subtitle: BOTH sources, so every client shows subs with real labels.
  *   - Provider C (site/player embedded): `allSubtitles` carries the Referer
  *     (videoplay.vip 403 without it) for clients that send per-track headers.
- *   - Provider A (keyless OpenSubtitles v3): HEADER-FREE URLs that the
- *     Sora/Sulfur client can load (it reads `subtitles` as [String] and
- *     fetches each with URLSession.shared — no headers). Resolved via keyless
- *     Cinemeta title -> IMDb id. Best-effort + success-cached.
- *   `subtitles` = header-free [String] URLs; `allSubtitles` = both sources.
+ *   - Provider A (keyless OpenSubtitles v3): HEADER-FREE URLs the Sora/Sulfur
+ *     client can load (it fetches each with URLSession.shared — no headers).
+ *     Resolved via keyless Cinemeta title -> IMDb id. Best-effort + cached.
+ *   `subtitles` = [label, url, label, url, ...] pair-array (SUBTITLES.md §7 /
+ *     the working hydrahd shape). The Sora/Sulfur client pairs adjacent
+ *     elements to build the subtitle picker, so a flat [url,url,...] rendered
+ *     auto-generated "Subtitle 1/2/3". `allSubtitles` = both sources.
  * Episodes: number = in-season episode number + separate `season` field
  *   (docs contract), so clients render "Sezon X / Bölüm Y" instead of "1001".
  * Async: bounded response cache (static pages only) to avoid redundant
  *   fetches across the flow; the player page is never cached (expiring token).
- * v1.5.0
+ * v1.5.1
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -734,12 +736,19 @@ async function extractStreamUrl(url) {
     });
     const osEntries = curatedSubtitleEntries(osSubs, null);
 
-    // `subtitles` = header-free URLs only (these are what the Sora/Sulfur
-    // client can actually load without a Referer). Keep OpenSubtitles ahead of
-    // the site tracks so the auto-load picks a loadable track.
-    const subtitleUrls = osEntries.length
-      ? osEntries.map(function (x) { return x.url; })
-      : curated.map(function (x) { return x.url; });
+    // `subtitles` = [label, url, label, url, ...] pair-array (SUBTITLES.md
+    // §7 — the working hydrahd shape). The Sora/Sulfur client pairs adjacent
+    // elements to build the subtitle picker, so a flat [url,url,...] made it
+    // render auto-generated "Subtitle 1/2/3". Header-free OpenSubtitles tracks
+    // go first so the picker/auto-load picks one that actually loads here.
+    const subtitlePairs = [];
+    function pushSub(entries) {
+      for (let i = 0; i < entries.length; i++) {
+        subtitlePairs.push(entries[i].label, entries[i].url);
+      }
+    }
+    if (osEntries.length) pushSub(osEntries);
+    else pushSub(curated);
 
     // Header-carrying list for clients that send per-track headers
     // (Shirox-family / SUBTITLES.md §7): site tracks keep their Referer,
@@ -769,7 +778,7 @@ async function extractStreamUrl(url) {
       stream: primary,
       streams: streams.slice(0, 4),
       subtitle: subtitle,
-      subtitles: subtitleUrls,
+      subtitles: subtitlePairs,
       subtitlesHeaders: subtitleHeaders || {},
       subtitleHeaders: subtitleHeaders || {},
       allSubtitles: allSubtitles,
