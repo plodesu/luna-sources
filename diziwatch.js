@@ -4,14 +4,16 @@
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
  * Player: videoplay.vip → HLS master (A/V together)
- * Subtitle: embedded tracks from the player (Provider C) — must carry
- *   the player Referer header (403 without it). Emitted as both
- *   `subtitles` pair-array and `allSubtitles`, per documentation/SUBTITLES.md §4/§6/§7.
+ * Subtitle: embedded tracks from the player (Provider C) — must carry the
+ *   player Referer header (403 without it). Emitted at the TOP LEVEL of the
+ *   return, matching the working hydrahd shape: subtitle (default auto-load),
+ *   subtitles ([label,url,…] pair-array), subtitlesHeaders (Referer!), and
+ *   allSubtitles ([{url,label,kind,headers}]).
  * Async: bounded response cache (static pages only) to avoid redundant
  *   fetches across the flow; the player page is never cached (expiring token).
  * Episodes: number = in-season episode number + separate `season` field
  *   (docs contract), so clients render "Sezon X / Bölüm Y" instead of "1001".
- * v1.3.0
+ * v1.4.0
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -331,55 +333,30 @@ function parsePlayerPage(html) {
 }
 
 /**
- * Build the app-facing subtitle shapes from embedded tracks (Provider C).
- * SUBTITLES.md §4/§6/§7: keep per-track headers alive (Referer!), dedupe by
- * URL, emit BOTH `subtitles` (flat [label,url,…] pair-array) and
- * `allSubtitles` ([{url,label,headers}]) so every client reads the key it
- * knows. `subtitle`/`subtitleHeaders` is the auto-load default.
+ * Curate embedded tracks (Provider C) into one entry per language, deduped
+ * by URL, preserving the provider's rank order. Each entry carries its own
+ * headers (Referer!) so the app can fetch the VTT without a 403 (§4).
  */
-function buildSubtitleFields(tracks, subHeaders) {
-  const out = {
-    subtitle: "",
-    subtitleHeaders: subHeaders || null,
-    subtitles: [],
-    allSubtitles: [],
-  };
-  if (!tracks || !tracks.length) return out;
-
-  const seen = {};
-  const uniq = [];
+function curatedSubtitleEntries(tracks, subHeaders) {
+  const out = [];
+  const seenUrl = {};
+  const seenLang = {};
+  if (!tracks) return out;
   for (let i = 0; i < tracks.length; i++) {
     const t = tracks[i];
     if (!t || !t.url) continue;
-    const key = String(t.url);
-    if (seen[key]) continue;
-    seen[key] = true;
-    uniq.push(t);
+    const url = String(t.url);
+    const lang = String(t.lang || "und").toLowerCase();
+    if (seenUrl[url] || seenLang[lang]) continue;
+    seenUrl[url] = true;
+    seenLang[lang] = true;
+    out.push({
+      url: url,
+      label: decodeEntities(String(t.label || t.lang || "Sub")),
+      lang: lang,
+      headers: subHeaders,
+    });
   }
-
-  // Default (auto-load): the provider's own default track, else the first.
-  let def = null;
-  for (let i = 0; i < uniq.length; i++) {
-    if (uniq[i].default) {
-      def = uniq[i];
-      break;
-    }
-  }
-  if (!def) def = uniq[0];
-
-  const pairs = [];
-  const all = [];
-  for (let i = 0; i < uniq.length; i++) {
-    const t = uniq[i];
-    const label = decodeEntities(String(t.label || t.lang || "Sub"));
-    pairs.push(label);
-    pairs.push(String(t.url));
-    all.push({ url: String(t.url), label: label, headers: subHeaders });
-  }
-
-  out.subtitle = String(def.url);
-  out.subtitles = pairs;
-  out.allSubtitles = all;
   return out;
 }
 
@@ -617,15 +594,44 @@ async function extractStreamUrl(url) {
     };
 
     // Subtitle tracks come from the player origin and 403 without the
-    // Referer/Origin (SUBTITLES.md §4) — keep the headers on every track so
-    // the app doesn't render an empty track (§7).
+    // Referer/Origin (SUBTITLES.md §4) — carry the headers on every track so
+    // the app never renders an empty track.
     const subHeaders = {
       "User-Agent": UA,
       Accept: "text/vtt,*/*",
       Referer: playerHost + "/",
       Origin: playerHost,
     };
-    const subFields = buildSubtitleFields(parsed.subs, subHeaders);
+    const curated = curatedSubtitleEntries(parsed.subs, subHeaders);
+
+    // Default (auto-load) subtitle: the provider's own default track, else
+    // the first one available. For diziwatch that is the Turkish track.
+    let subtitle = "";
+    let subtitleHeaders = null;
+    if (curated.length) {
+      let def = null;
+      for (let i = 0; i < parsed.subs.length; i++) {
+        if (parsed.subs[i] && parsed.subs[i].default) { def = parsed.subs[i]; break; }
+      }
+      if (!def) def = parsed.subs[0];
+      if (def) {
+        subtitle = String(def.url);
+        subtitleHeaders = subHeaders;
+      }
+    }
+
+    // Sora picker shape: flat [label, url, label, url, ...] pair-array.
+    const subtitlePairs = [];
+    curated.forEach(function (entry) { subtitlePairs.push(entry.label, entry.url); });
+    let finalSubtitles;
+    if (subtitlePairs.length >= 2) finalSubtitles = subtitlePairs;
+    else if (subtitle) finalSubtitles = subtitle;
+    else finalSubtitles = [];
+
+    // Shirox-family builds read [{url,label,kind,headers}] instead.
+    const allSubtitles = curated.map(function (entry) {
+      return { url: entry.url, label: entry.label, kind: "subtitles", headers: entry.headers || {} };
+    });
 
     // Master only — keeps VIDEO + AUDIO together (better for Luna)
     const streams = [];
@@ -637,21 +643,18 @@ async function extractStreamUrl(url) {
         streamUrl: master,
         headers: headers,
       };
-      if (subFields.subtitle) {
-        stream.subtitle = subFields.subtitle;
-        stream.subtitleHeaders = subFields.subtitleHeaders;
-      }
-      if (subFields.subtitles.length) stream.subtitles = subFields.subtitles;
-      if (subFields.allSubtitles.length)
-        stream.allSubtitles = subFields.allSubtitles;
+      if (subtitle) stream.subtitle = subtitle;
       streams.push(stream);
     }
 
+    const primary = streams.length ? streams[0].streamUrl : "";
     return JSON.stringify({
+      stream: primary,
       streams: streams.slice(0, 4),
-      // Backwards-compatible top-level default for clients that read the
-      // simple root key (older SoftSubs readers / Mojuru).
-      subtitles: subFields.subtitle || "",
+      subtitle: subtitle,
+      subtitles: finalSubtitles,
+      subtitlesHeaders: subtitleHeaders || {},
+      allSubtitles: allSubtitles,
     });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "" });
