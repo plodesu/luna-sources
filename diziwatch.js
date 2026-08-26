@@ -21,9 +21,15 @@
  *   (fetchTrustedSubtitleIds) and drop foreign-episode files. NOTE: keyless
  *   rest.opensubtitles.org currently 302s to "_/" (decommissioned), so the
  *   trust filter is a no-op until that endpoint returns.
+ * Exact site subs for the Sora/Sulfur client: the player's own VTT is
+ *   Referer-gated and the Sora client fetches subtitles with no headers, so
+ *   it is served as an inline data:text/vtt;base64 URI (fetched with the
+ *   Referer, UTF-8->base64 encoded). This gives the EXACT (correctly-synced)
+ *   translation instead of the community OpenSubtitles one. OpenSubtitles
+ *   remains as a header-free fallback in the picker.
  * Async: bounded response cache (static pages only) to avoid redundant
  *   fetches across the flow; the player page is never cached (expiring token).
- * v1.5.2
+ * v1.5.3
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -175,6 +181,36 @@ function b64decode(str) {
       out += String.fromCharCode(((b & 15) << 4) | (c >> 2));
     if (d !== -1 && str.charAt(i + 3) !== "=")
       out += String.fromCharCode(((c & 3) << 6) | d);
+  }
+  return out;
+}
+
+// UTF-8 -> base64 (the player's own VTT may contain non-ASCII Turkish text, so
+// we must UTF-8 encode before base64, or btoa() mangles multi-byte chars).
+function b64encodeUtf8(str) {
+  const utf8 = [];
+  for (let i = 0; i < str.length; i++) {
+    let c = str.charCodeAt(i);
+    if (c < 0x80) utf8.push(c);
+    else if (c < 0x800) utf8.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    else if (c < 0x10000)
+      utf8.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    else
+      utf8.push(
+        0xf0 | (c >> 18),
+        0x80 | ((c >> 12) & 0x3f),
+        0x80 | ((c >> 6) & 0x3f),
+        0x80 | (c & 0x3f)
+      );
+  }
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < utf8.length; i += 3) {
+    const a = utf8[i], b = utf8[i + 1], c = utf8[i + 2];
+    out += chars[a >> 2];
+    out += chars[((a & 3) << 4) | (b === undefined ? 0 : b >> 4)];
+    out += b === undefined ? "=" : chars[((b & 15) << 2) | (c === undefined ? 0 : c >> 6)];
+    out += c === undefined ? "=" : chars[c & 63];
   }
   return out;
 }
@@ -859,23 +895,42 @@ async function extractStreamUrl(url) {
     });
     const osEntries = curatedSubtitleEntries(osSubs, null);
 
-    // `subtitles` = [label, url, label, url, ...] pair-array (SUBTITLES.md
-    // §7 — the working hydrahd shape). The Sora/Sulfur client pairs adjacent
-    // elements to build the subtitle picker, so a flat [url,url,...] made it
-    // render auto-generated "Subtitle 1/2/3". Header-free OpenSubtitles tracks
-    // go first so the picker/auto-load picks one that actually loads here.
+    // Serve the site's OWN tracks as inline data: URIs so the Sora/Sulfur
+    // client (which fetches subtitles with URLSession.shared — no Referer)
+    // can actually load the EXACT / accurately-synced subs instead of the
+    // community OpenSubtitles translation. Fetch each VTT with its Referer,
+    // UTF-8->base64 it, and embed it. Keeps the label; falls back to the raw
+    // URL if the fetch fails.
+    const siteEntries = [];
+    for (let i = 0; i < curated.length; i++) {
+      const entry = curated[i];
+      let url = entry.url;
+      try {
+        const vtt = await cachedText(entry.url, { headers: entry.headers || {} });
+        if (vtt && (/^WEBVTT/.test(vtt) || vtt.indexOf("-->") >= 0)) {
+          url = "data:text/vtt;base64," + b64encodeUtf8(vtt);
+        }
+      } catch (e) { /* keep the raw URL */ }
+      siteEntries.push({ label: entry.label, lang: entry.lang, url: url, headers: entry.headers });
+    }
+
+    // `subtitles` = [label, url, label, url, ...] pair-array (SUBTITLES.md §7
+    // — the working hydrahd shape). The Sora/Sulfur client pairs adjacent
+    // elements to build the subtitle picker. Site data-URIs first (exact
+    // subs); OpenSubtitles URLs after as a header-free fallback.
     const subtitlePairs = [];
     function pushSub(entries) {
       for (let i = 0; i < entries.length; i++) {
         subtitlePairs.push(entries[i].label, entries[i].url);
       }
     }
+    pushSub(siteEntries);
     if (osEntries.length) pushSub(osEntries);
-    else pushSub(curated);
+    else if (!siteEntries.length) pushSub(curated);
 
     // Header-carrying list for clients that send per-track headers
-    // (Shirox-family / SUBTITLES.md §7): site tracks keep their Referer,
-    // OpenSubtitles need none.
+    // (Shirox-family / SUBTITLES.md §7): keep the site's real URLs with their
+    // Referer (they load exactly there), plus OpenSubtitles.
     const allSubtitles = curated.map(function (entry) {
       return { url: entry.url, label: entry.label, kind: "subtitles", headers: entry.headers || {} };
     }).concat(osEntries.map(function (entry) {
