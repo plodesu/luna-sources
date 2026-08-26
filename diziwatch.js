@@ -3,8 +3,8 @@
  * Search: /api/search.php?q=
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
- * Player: videoplay.vip → HLS (+ softsubs when present)
- * v1.0.4
+ * Player: videoplay.vip → HLS master (A/V together)
+ * v1.0.5
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -426,7 +426,7 @@ async function extractEpisodes(url) {
   }
 }
 
-/* ===================== STREAMS (Luna-safe) ===================== */
+/* ===================== STREAMS ===================== */
 async function extractStreamUrl(url) {
   try {
     let epUrl = String(url).split("?")[0];
@@ -482,6 +482,7 @@ async function extractStreamUrl(url) {
     if (!parsed.hls.length)
       return JSON.stringify({ streams: [], subtitles: "" });
 
+    // Must be sent on playlist AND every segment (.jpg TS)
     const headers = {
       "User-Agent": UA,
       Accept: "*/*",
@@ -489,82 +490,25 @@ async function extractStreamUrl(url) {
       Origin: playerHost,
     };
 
-    // Official schema: subtitles is a single string URL
     let subtitles = "";
     if (parsed.subs.length) {
       subtitles = forceHttps(parsed.subs[0].url);
     }
 
+    // Master only — keeps VIDEO + AUDIO together (better for Luna)
     const streams = [];
-
     for (let i = 0; i < parsed.hls.length; i++) {
       const master = forceHttps(parsed.hls[i]);
       if (!isHttp(master)) continue;
-
-      let expanded = false;
-      try {
-        const masterBody = await getText(
-          await soraFetch(master, {
-            headers: {
-              "User-Agent": UA,
-              Referer: playerHost + "/",
-              Accept: "*/*",
-            },
-          })
-        );
-        if (masterBody && masterBody.indexOf("#EXTM3U") >= 0) {
-          const lines = masterBody.split(/\r?\n/);
-          const variants = [];
-          for (let L = 0; L < lines.length; L++) {
-            const line = lines[L].trim();
-            if (!line || line.charAt(0) === "#") continue;
-            let vu = line;
-            if (vu.indexOf("http") !== 0) {
-              if (vu.charAt(0) === "/") vu = playerHost + vu;
-              else vu = playerHost + "/" + vu;
-            }
-            vu = forceHttps(vu);
-            if (!/\.m3u8/i.test(vu) && vu.indexOf("m3u8") < 0) continue;
-            let q = "Auto";
-            const prev = L > 0 ? lines[L - 1] : "";
-            const rm = prev.match(/RESOLUTION=(\d+)x(\d+)/i);
-            if (rm) q = rm[2] + "p";
-            variants.push({ url: vu, title: "Videoplay · " + q });
-          }
-          variants.sort(function (a, b) {
-            const na = parseInt(a.title, 10) || 0;
-            const nb = parseInt(b.title, 10) || 0;
-            return nb - na;
-          });
-          for (let v = 0; v < variants.length; v++) {
-            streams.push({
-              title: variants[v].title,
-              streamUrl: variants[v].url,
-              headers: headers,
-            });
-          }
-          expanded = variants.length > 0;
-        }
-      } catch (e) {}
-
-      if (!expanded) {
-        streams.push({
-          title: "Videoplay · HLS",
-          streamUrl: master,
-          headers: headers,
-        });
-      } else {
-        streams.push({
-          title: "Videoplay · Auto (master)",
-          streamUrl: master,
-          headers: headers,
-        });
-      }
+      streams.push({
+        title: i === 0 ? "Videoplay · HLS" : "Videoplay · HLS " + (i + 1),
+        streamUrl: master,
+        headers: headers,
+      });
     }
 
-    // Official Luna/Sora shape only
     return JSON.stringify({
-      streams: streams.slice(0, 8),
+      streams: streams.slice(0, 4),
       subtitles: subtitles || "",
     });
   } catch (e) {
