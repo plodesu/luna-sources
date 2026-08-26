@@ -1,43 +1,33 @@
 /**
- * TürkAnime TV – Sora / Luna
+ * GogoAnimeZ - Sora / Luna
  *
- * v1.2.0
+ * Search + series + episodes + stream extraction
+ * + Turkish-only soft subtitles.
  *
- * Fixed:
- * - TürkAnime /anime/<slug> series pages
- * - /video/<slug>-<episode>-bolum episode pages
- * - HTML named entities (&ouml;, &uuml;, etc.)
- * - Search using direct anime slug + anime-list fallback
- * - Proper episode extraction from anime pages
- * - Byse /e/<file_code> player
- * - Byse embed/settings API
- * - JW Player sources
- * - HLS / MP4 extraction
+ * Subtitle pipeline:
+ *   Gogo page -> IMDb id -> OpenSubtitles v3 + legacy REST
+ *   -> validate S/E from release names -> Turkish only
+ *
+ * v1.0.0
  */
 
-const baseUrl = "https://www.turkanime.tv";
+const baseUrl = "https://gogoanimez.to";
+const UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
-const UA =
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) " +
-  "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 " +
-  "Mobile/15E148 Safari/604.1";
-
-/* =========================================================
- * HTTP
- * ========================================================= */
+const OS_V3 = "https://opensubtitles-v3.strem.io";
+const OS_REST = "https://rest.opensubtitles.org/search";
+const IMDB_SUGGEST = "https://v3.sg.media-imdb.com/suggestion/x/";
 
 async function soraFetch(url, options) {
   options = options || {};
 
-  const headers = Object.assign(
-    {
-      "User-Agent": UA,
-      Accept: "text/html,application/xhtml+xml,application/json,*/*",
-      "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-      Referer: baseUrl + "/"
-    },
-    options.headers || {}
-  );
+  const headers = Object.assign({
+    "User-Agent": UA,
+    "Accept": "text/html,application/json,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "identity",
+    "Referer": baseUrl + "/"
+  }, options.headers || {});
 
   const method = options.method || "GET";
   const body = options.body || null;
@@ -55,7 +45,7 @@ async function soraFetch(url, options) {
       headers: headers,
       body: body
     });
-  } catch (e2) {
+  } catch (e) {
     return null;
   }
 }
@@ -84,23 +74,39 @@ async function getText(res) {
   }
 }
 
-/* =========================================================
- * HTML / URL helpers
- * ========================================================= */
+async function getJSON(url, headers) {
+  const text = await getText(
+    await soraFetch(url, {
+      headers: headers || {}
+    })
+  );
+
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const a = text.indexOf("{");
+    const b = text.lastIndexOf("}");
+
+    if (a >= 0 && b > a) {
+      try {
+        return JSON.parse(text.slice(a, b + 1));
+      } catch (e2) {}
+    }
+  }
+
+  return null;
+}
 
 function decodeEntities(s) {
-  let out = String(s || "");
+  let x = String(s || "");
 
-  /*
-   * Decode repeatedly because pages sometimes contain
-   * &amp;ouml; -> &ouml;
-   */
   for (let i = 0; i < 3; i++) {
-    out = out
+    x = x
       .replace(/&amp;/gi, "&")
       .replace(/&quot;/gi, '"')
-      .replace(/&#039;/gi, "'")
-      .replace(/&#39;/gi, "'")
+      .replace(/&#039;|&#39;/gi, "'")
       .replace(/&lt;/gi, "<")
       .replace(/&gt;/gi, ">")
       .replace(/&nbsp;/gi, " ")
@@ -112,20 +118,8 @@ function decodeEntities(s) {
       .replace(/&Ccedil;/g, "Ç")
       .replace(/&scedil;/gi, "ş")
       .replace(/&Scedil;/g, "Ş")
-      .replace(/&igrave;/gi, "ì")
-      .replace(/&iacute;/gi, "í")
-      .replace(/&Iacute;/g, "Í")
       .replace(/&eacute;/gi, "é")
       .replace(/&Eacute;/g, "É")
-      .replace(/&aring;/gi, "å")
-      .replace(/&Aring;/g, "Å")
-      .replace(/&acirc;/gi, "â")
-      .replace(/&Acirc;/g, "Â")
-      .replace(/&iuml;/gi, "ï")
-      .replace(/&Iuml;/g, "Ï")
-      .replace(/&rsquo;/gi, "’")
-      .replace(/&ldquo;/gi, "“")
-      .replace(/&rdquo;/gi, "”")
       .replace(/&#x([0-9a-f]+);/gi, function (_, h) {
         return String.fromCharCode(parseInt(h, 16));
       })
@@ -134,7 +128,7 @@ function decodeEntities(s) {
       });
   }
 
-  return out;
+  return x;
 }
 
 function cleanText(s) {
@@ -144,154 +138,86 @@ function cleanText(s) {
     .trim();
 }
 
-function isHttp(url) {
-  return /^https?:\/\//i.test(String(url || ""));
+function isHttp(u) {
+  return /^https?:\/\//i.test(String(u || ""));
 }
 
-function absUrl(url, parent) {
-  url = decodeEntities(String(url || "").trim());
+function absUrl(u, parent) {
+  u = decodeEntities(String(u || "").trim())
+    .replace(/\\\//g, "/")
+    .replace(/\\u0026/g, "&");
 
-  if (!url) return "";
+  if (!u) return "";
 
-  url = url
-    .replace(/\\u0026/g, "&")
-    .replace(/\\u002F/gi, "/")
-    .replace(/\\\//g, "/");
-
-  if (url.indexOf("//") === 0) {
-    return "https:" + url;
+  if (u.indexOf("//") === 0) {
+    return "https:" + u;
   }
 
-  if (isHttp(url)) {
-    return url;
+  if (isHttp(u)) {
+    return u;
   }
 
   try {
-    return new URL(url, parent || baseUrl).toString();
+    return new URL(u, parent || baseUrl).toString();
   } catch (e) {}
 
-  if (url.charAt(0) === "/") {
-    return baseUrl + url;
-  }
-
-  return url;
+  return u.charAt(0) === "/"
+    ? baseUrl + u
+    : u;
 }
 
-function unique(items) {
-  const seen = {};
-  const out = [];
+function unique(a) {
+  const s = {};
 
-  for (let i = 0; i < items.length; i++) {
-    const u = String(items[i] || "").trim();
+  return a.filter(function (x) {
+    x = String(x || "");
 
-    if (!u || seen[u]) continue;
+    if (!x || s[x]) {
+      return false;
+    }
 
-    seen[u] = true;
-    out.push(u);
-  }
-
-  return out;
+    s[x] = true;
+    return true;
+  });
 }
 
 function slugify(s) {
-  let x = decodeEntities(String(s || "")).toLowerCase();
-
-  x = x
-    .replace(/ı/g, "i")
-    .replace(/ğ/g, "g")
-    .replace(/ü/g, "u")
-    .replace(/ş/g, "s")
-    .replace(/ö/g, "o")
-    .replace(/ç/g, "c")
-    .replace(/â/g, "a")
-    .replace(/î/g, "i")
-    .replace(/û/g, "u");
-
-  return x
-    .replace(/['’":!?.,()[\]{}]/g, " ")
+  return String(s || "")
+    .toLowerCase()
+    .replace(/['’]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
 
 /* =========================================================
- * TürkAnime URL parsing
+ * HTML
  * ========================================================= */
 
-function getPath(url) {
-  try {
-    return new URL(url).pathname;
-  } catch (e) {
-    return String(url || "");
-  }
-}
-
-function getSlug(url) {
-  const path = getPath(url)
-    .replace(/\/+$/, "")
-    .split("/");
-
-  return path[path.length - 1] || "";
-}
-
-function episodeNumber(urlOrTitle, fallback) {
-  const s = decodeEntities(String(urlOrTitle || ""));
-
-  let m =
-    s.match(/(?:bölüm|bolum|episode|episod|ep)\s*\.?\s*(\d+)/i) ||
-    s.match(/-(\d+)-bolum(?:$|-)/i) ||
-    s.match(/-(\d+)-bolum$/i);
+function extractTitle(html) {
+  let m = html.match(
+    /<h1[^>]*>([\s\S]*?)<\/h1>/i
+  );
 
   if (m) {
-    return parseInt(m[1], 10);
+    return cleanText(m[1]);
   }
 
-  return fallback;
-}
-
-/*
- * /video/kimiai-8-bolum
- *        ↓
- * /anime/kimiai
- *
- * /video/bungou-stray-dogs-wan-2-8-bolum
- *        ↓
- * /anime/bungou-stray-dogs-wan-2
- */
-function seriesUrlFromEpisode(url) {
-  const slug = getSlug(url);
-
-  let seriesSlug = slug.replace(
-    /-(\d+)-bolum(?:-[^/]*)?$/i,
-    ""
+  m = html.match(
+    /<title[^>]*>([\s\S]*?)<\/title>/i
   );
 
-  /*
-   * Also handle "episode" spelling.
-   */
-  seriesSlug = seriesSlug.replace(
-    /-(\d+)-episode(?:-[^/]*)?$/i,
-    ""
-  );
-
-  if (!seriesSlug || seriesSlug === slug) {
-    return "";
-  }
-
-  return baseUrl + "/anime/" + seriesSlug;
+  return m
+    ? cleanText(m[1])
+        .replace(/\s*[-|]\s*Gogoanime.*$/i, "")
+    : "";
 }
 
-/* =========================================================
- * HTML extraction
- * ========================================================= */
-
-function extractMeta(html, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
+function meta(html, key) {
   let m = html.match(
     new RegExp(
-      '<meta[^>]+(?:name|property)=["\']' +
-        escaped +
-        '["\'][^>]+content=["\']([^"\']*)["\']',
+      '<meta[^>]+(?:name|property)=["\\\']' +
+        key +
+        '["\\\'][^>]+content=["\\\']([^"\\\']*)',
       "i"
     )
   );
@@ -299,9 +225,9 @@ function extractMeta(html, name) {
   if (!m) {
     m = html.match(
       new RegExp(
-        '<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:name|property)=["\']' +
-          escaped +
-          '["\']',
+        '<meta[^>]+content=["\\\']([^"\\\']*)["\\\'][^>]+(?:name|property)=["\\\']' +
+          key +
+          '["\\\']',
         "i"
       )
     );
@@ -310,31 +236,33 @@ function extractMeta(html, name) {
   return m ? cleanText(m[1]) : "";
 }
 
-function extractTitle(html) {
-  let m = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+function images(html, parent) {
+  const out = [];
+  let m;
 
-  if (m) {
-    const t = cleanText(m[1]);
+  const rs = [
+    /property=["']og:image["'][^>]+content=["']([^"']+)["']/gi,
+    /<img[^>]+(?:data-src|data-original|src)=["']([^"']+)["']/gi
+  ];
 
-    if (t && t.length > 1) {
-      return t;
+  rs.forEach(function (re) {
+    while ((m = re.exec(html))) {
+      const u = absUrl(m[1], parent);
+
+      if (
+        u &&
+        !/^data:/i.test(u) &&
+        !/logo|avatar|banner|advert/i.test(u)
+      ) {
+        out.push(u);
+      }
     }
-  }
+  });
 
-  m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-
-  if (m) {
-    return cleanText(
-      m[1]
-        .replace(/\s*\|\s*Türk Anime TV.*$/i, "")
-        .replace(/\s*-\s*Türk Anime TV.*$/i, "")
-    );
-  }
-
-  return "";
+  return unique(out);
 }
 
-function extractLinks(html, parent) {
+function links(html, parent) {
   const out = [];
   let m;
 
@@ -342,12 +270,8 @@ function extractLinks(html, parent) {
     /<a\b([^>]*?)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi;
 
   while ((m = re.exec(html))) {
-    const href = absUrl(m[2], parent);
-
-    if (!href) continue;
-
     out.push({
-      href: href,
+      href: absUrl(m[2], parent),
       text: cleanText(m[4]),
       attrs: (m[1] || "") + " " + (m[3] || "")
     });
@@ -356,56 +280,17 @@ function extractLinks(html, parent) {
   return out;
 }
 
-function extractImages(html, parent) {
+function iframes(html, parent) {
   const out = [];
   let m;
 
-  const patterns = [
-    /property=["']og:image["'][^>]+content=["']([^"']+)["']/gi,
-    /name=["']twitter:image["'][^>]+content=["']([^"']+)["']/gi,
-    /<img[^>]+(?:data-src|data-original)=["']([^"']+)["']/gi,
-    /<img[^>]+src=["']([^"']+)["']/gi
-  ];
+  const re =
+    /<(?:iframe|embed)[^>]+(?:src|data-src)=["']([^"']+)["']/gi;
 
-  for (let i = 0; i < patterns.length; i++) {
-    const re = patterns[i];
+  while ((m = re.exec(html))) {
+    const u = absUrl(m[1], parent);
 
-    while ((m = re.exec(html))) {
-      const u = absUrl(m[1], parent);
-
-      if (!u || /^data:/i.test(u)) continue;
-
-      if (/logo|avatar|advert|banner/i.test(u)) continue;
-
-      out.push(u);
-    }
-  }
-
-  return unique(out);
-}
-
-function extractIframeUrls(html, parent) {
-  const out = [];
-  let m;
-
-  const patterns = [
-    /<iframe[^>]+src=["']([^"']+)["']/gi,
-    /<iframe[^>]+data-src=["']([^"']+)["']/gi,
-    /<embed[^>]+src=["']([^"']+)["']/gi
-  ];
-
-  for (let i = 0; i < patterns.length; i++) {
-    const re = patterns[i];
-
-    while ((m = re.exec(html))) {
-      const u = absUrl(m[1], parent);
-
-      if (!u || !isHttp(u)) continue;
-
-      if (/google|facebook|twitter|instagram|doubleclick/i.test(u)) {
-        continue;
-      }
-
+    if (isHttp(u)) {
       out.push(u);
     }
   }
@@ -414,318 +299,357 @@ function extractIframeUrls(html, parent) {
 }
 
 /* =========================================================
- * Search
+ * MEDIA
  * ========================================================= */
 
-function searchScore(title, query) {
-  const t = slugify(title);
-  const q = slugify(query);
-
-  if (!t || !q) return 0;
-
-  let score = 0;
-
-  if (t === q) score += 100;
-  if (t.indexOf(q) >= 0) score += 50;
-
-  const words = q.split("-");
-
-  for (let i = 0; i < words.length; i++) {
-    if (words[i].length > 1 && t.indexOf(words[i]) >= 0) {
-      score += 10;
-    }
-  }
-
-  return score;
-}
-
-function parseAnimeList(html, parent) {
-  const results = [];
-  const seen = {};
-
-  const links = extractLinks(html, parent);
-
-  for (let i = 0; i < links.length; i++) {
-    const l = links[i];
-
-    if (!/\/anime\/[^/]+\/?$/i.test(getPath(l.href))) {
-      continue;
-    }
-
-    const title = cleanText(l.text);
-
-    if (!title || title.length < 2) continue;
-
-    if (seen[l.href]) continue;
-
-    seen[l.href] = true;
-
-    results.push({
-      title: title,
-      image: "",
-      href: l.href
-    });
-  }
-
-  /*
-   * Some cards contain title in title/alt rather than text.
-   */
+function mediaUrls(text, parent) {
+  const out = [];
   let m;
 
-  const cardRe =
-    /<a[^>]+href=["']([^"']*\/anime\/[^"']+)["'][^>]*>[\s\S]{0,2500}?(?:title|alt)=["']([^"']+)["']/gi;
+  if (!text) return out;
 
-  while ((m = cardRe.exec(html))) {
-    const href = absUrl(m[1], parent);
-    const title = cleanText(m[2]);
+  const patterns = [
+    /(?:["'](?:file|src|source|url|videoUrl|hls)["']?\s*[:=]\s*["'])([^"']+)(?:["'])/gi,
 
-    if (!href || !title) continue;
+    /<source[^>]+(?:src|data-src)=["']([^"']+)["']/gi,
 
-    if (!seen[href]) {
-      seen[href] = true;
+    /https?:\/\/[^"'\\\s<>]+?\.m3u8(?:\?[^"'\\\s<>]*)?/gi,
 
-      results.push({
-        title: title,
-        image: "",
-        href: href
-      });
+    /https?:\/\/[^"'\\\s<>]+?\.mp4(?:\?[^"'\\\s<>]*)?/gi
+  ];
+
+  patterns.forEach(function (re, idx) {
+    while ((m = re.exec(text))) {
+      const raw = idx >= 2 ? m[0] : m[1];
+
+      const u = absUrl(raw, parent);
+
+      if (
+        /\.m3u8(?:$|[?#])|\.mp4(?:$|[?#])|\.m4v(?:$|[?#])|\.webm(?:$|[?#])/i.test(
+          u
+        )
+      ) {
+        out.push(u);
+      }
     }
-  }
+  });
 
-  return results;
+  return unique(out);
 }
 
-async function fetchAnimePageBySlug(slug) {
-  const url = baseUrl + "/anime/" + slug;
+/* =========================================================
+ * EPISODE PARSING
+ * ========================================================= */
 
-  const html = await getText(
-    await soraFetch(url, {
-      headers: {
-        Referer: baseUrl + "/",
-        "User-Agent": UA,
-        Accept: "text/html,*/*"
-      }
-    })
+function episodeNumber(s, fallback) {
+  s = decodeEntities(String(s || ""));
+
+  let m =
+    s.match(
+      /(?:episode|ep|e)[\s._-]*(\d{1,4})/i
+    ) ||
+    s.match(/-episode-(\d+)/i) ||
+    s.match(
+      /(?:^|[-_. ])(\d{1,4})(?:[-_. ]|$)/
+    );
+
+  return m
+    ? parseInt(m[1], 10)
+    : fallback;
+}
+
+function seasonNumber(s) {
+  const m = String(s || "").match(
+    /season[\s._-]*(\d{1,2})/i
   );
 
-  if (!html || html.length < 500) {
-    return null;
-  }
-
-  /*
-   * A valid anime detail page has /anime/ and usually
-   * an anime title or "Bölüm".
-   */
-  if (
-    !/Bölüm|Anime Detayı|Anime Türü|Özet/i.test(html)
-  ) {
-    return null;
-  }
-
-  return {
-    url: url,
-    html: html
-  };
+  return m
+    ? parseInt(m[1], 10)
+    : 1;
 }
+
+function parseSubEpisode(name) {
+  const n = String(name || "");
+
+  let m = n.match(
+    /\bS(\d{1,2})[.\-_ ]?E(\d{1,3})\b/i
+  );
+
+  if (m) {
+    return {
+      s: +m[1],
+      e: +m[2]
+    };
+  }
+
+  m = n.match(
+    /\b(\d{1,2})x(\d{1,3})\b/i
+  );
+
+  if (m) {
+    return {
+      s: +m[1],
+      e: +m[2]
+    };
+  }
+
+  m = n.match(
+    /\[(\d{1,2})\.(\d{1,3})\]/
+  );
+
+  if (m) {
+    return {
+      s: +m[1],
+      e: +m[2]
+    };
+  }
+
+  m = n.match(
+    /(?:^|[\s\-_.])(\d)(\d{2})(?:[\s\-_.]|$)/
+  );
+
+  if (m) {
+    return {
+      s: +m[1],
+      e: +m[2]
+    };
+  }
+
+  return null;
+}
+
+function animeSlugFromEpisode(url) {
+  const p =
+    String(url || "")
+      .replace(/\/+$/, "")
+      .split("/")
+      .pop() || "";
+
+  const m = p.match(
+    /^(.*?)-episode-\d+(?:-english-subbed|-dubbed)?$/i
+  );
+
+  return m
+    ? m[1]
+    : p.replace(
+        /-episode-\d+.*$/i,
+        ""
+      );
+}
+
+function seriesUrlFromEpisode(url) {
+  const slug = animeSlugFromEpisode(url);
+
+  return slug
+    ? baseUrl + "/series/" + slug + "/"
+    : "";
+}
+
+/* =========================================================
+ * SEARCH
+ * ========================================================= */
 
 async function searchResults(keyword) {
   try {
-    const query = cleanText(keyword);
+    const q = cleanText(keyword);
 
-    if (!query) {
+    if (!q) {
       return JSON.stringify([]);
     }
 
     const results = [];
     const seen = {};
 
-    function push(title, href, image) {
-      href = absUrl(href);
+    function push(href, title, image) {
+      href = absUrl(
+        String(href || "").split("?")[0]
+      );
 
-      if (!href || !/\/anime\/[^/]+\/?$/i.test(getPath(href))) {
+      if (
+        !href ||
+        seen[href] ||
+        !/\/series\/[^/]+\/?$/i.test(
+          new URL(href).pathname
+        )
+      ) {
         return;
       }
-
-      if (seen[href]) return;
 
       seen[href] = true;
 
       results.push({
-        title: cleanText(title),
-        image: image || "",
+        title: cleanText(title) || "Anime",
+        image: absUrl(image || ""),
         href: href
       });
     }
 
-    /*
-     * =====================================================
-     * 1. Direct slug search
-     * =====================================================
-     *
-     * This handles:
-     * Bungou Stray Dogs Wan! 2
-     * Kimiai
-     * One Piece
-     * etc.
-     */
-    const slug = slugify(query);
+    const urls = [
+      baseUrl +
+        "/search.html?keyword=" +
+        encodeURIComponent(q),
 
-    const candidates = [
-      slug,
-      slug.replace(/-season-2$/, "-2"),
-      slug.replace(/-season-1$/, ""),
-      slug.replace(/-the-/, "-")
+      baseUrl +
+        "/search?keyword=" +
+        encodeURIComponent(q),
+
+      baseUrl +
+        "/?s=" +
+        encodeURIComponent(q)
     ];
 
-    for (let i = 0; i < candidates.length; i++) {
-      if (!candidates[i]) continue;
+    let html = "";
 
-      const page = await fetchAnimePageBySlug(candidates[i]);
-
-      if (!page) continue;
-
-      const title =
-        extractTitle(page.html) ||
-        candidates[i].replace(/-/g, " ");
-
-      const image =
-        extractMeta(page.html, "og:image") ||
-        extractImages(page.html, page.url)[0] ||
-        "";
-
-      push(title, page.url, image);
-    }
-
-    /*
-     * =====================================================
-     * 2. Scan current anime list pages
-     * =====================================================
-     *
-     * TürkAnime currently has a large paginated anime list.
-     * We scan the first pages as fallback.
-     */
-    const pagesToScan = 8;
-
-    for (let pageNo = 1; pageNo <= pagesToScan; pageNo++) {
-      let url = baseUrl + "/animeler";
-
-      if (pageNo > 1) {
-        url += "?page=" + pageNo;
-      }
-
-      const html = await getText(
-        await soraFetch(url, {
-          headers: {
-            Referer: baseUrl + "/",
-            "User-Agent": UA,
-            Accept: "text/html,*/*"
-          }
-        })
+    for (let i = 0; i < urls.length; i++) {
+      html = await getText(
+        await soraFetch(urls[i])
       );
 
-      if (!html || html.length < 1000) {
-        continue;
-      }
-
-      const parsed = parseAnimeList(html, url);
-
-      for (let i = 0; i < parsed.length; i++) {
-        const score = searchScore(parsed[i].title, query);
-
-        if (score > 0) {
-          push(
-            parsed[i].title,
-            parsed[i].href,
-            parsed[i].image
-          );
-        }
-      }
-
-      /*
-       * Exact/direct result already found.
-       */
       if (
-        results.some(function (r) {
-          return slugify(r.title) === slug;
-        })
+        html &&
+        html.length > 1000 &&
+        !/Just a moment|cf-chl-/i.test(html)
       ) {
         break;
       }
     }
 
-    results.sort(function (a, b) {
-      return (
-        searchScore(b.title, query) -
-        searchScore(a.title, query)
+    if (html) {
+      const ls = links(
+        html,
+        baseUrl
       );
+
+      ls.forEach(function (l) {
+        if (/\/series\//i.test(l.href)) {
+          push(
+            l.href,
+            l.text ||
+              (
+                l.attrs.match(
+                  /title=["']([^"']+)/i
+                ) || []
+              )[1] ||
+              "",
+            ""
+          );
+        }
+      });
+    }
+
+    /*
+     * Direct slug fallback.
+     */
+    if (!results.length) {
+      const candidate =
+        baseUrl +
+        "/series/" +
+        slugify(q) +
+        "/";
+
+      const h = await getText(
+        await soraFetch(candidate)
+      );
+
+      if (
+        h &&
+        /<h1|Episode|Synopsis/i.test(h)
+      ) {
+        push(
+          candidate,
+          extractTitle(h) || q,
+          images(h, candidate)[0] || ""
+        );
+      }
+    }
+
+    const norm = slugify(q);
+
+    results.sort(function (a, b) {
+      const sa = slugify(a.title);
+      const sb = slugify(b.title);
+
+      const scoreA =
+        sa === norm
+          ? 100
+          : sa.includes(norm)
+          ? 50
+          : 0;
+
+      const scoreB =
+        sb === norm
+          ? 100
+          : sb.includes(norm)
+          ? 50
+          : 0;
+
+      return scoreB - scoreA;
     });
 
-    return JSON.stringify(results.slice(0, 30));
+    return JSON.stringify(
+      results.slice(0, 30)
+    );
   } catch (e) {
     return JSON.stringify([]);
   }
 }
 
 /* =========================================================
- * Details
+ * SERIES
  * ========================================================= */
+
+async function getSeriesHtml(url) {
+  let u = String(url || "");
+
+  if (/\/episode-\d+/i.test(u)) {
+    u =
+      seriesUrlFromEpisode(u) ||
+      u;
+  }
+
+  const html = await getText(
+    await soraFetch(u)
+  );
+
+  return {
+    url: u,
+    html: html
+  };
+}
 
 async function extractDetails(url) {
   try {
-    let pageUrl = String(url || "");
+    const p =
+      await getSeriesHtml(url);
 
-    if (/\/video\//i.test(getPath(pageUrl))) {
-      const derived = seriesUrlFromEpisode(pageUrl);
-
-      if (derived) {
-        pageUrl = derived;
-      }
-    }
-
-    const html = await getText(
-      await soraFetch(pageUrl, {
-        headers: {
-          Referer: baseUrl + "/",
-          "User-Agent": UA,
-          Accept: "text/html,*/*"
-        }
-      })
-    );
-
-    if (!html) {
-      return JSON.stringify([
-        {
-          description: "N/A",
-          aliases: "N/A",
-          airdate: "N/A"
-        }
-      ]);
-    }
+    const h = p.html || "";
 
     const description =
-      extractMeta(html, "description") ||
-      extractMeta(html, "og:description") ||
+      meta(h, "description") ||
+      meta(h, "og:description") ||
       "N/A";
 
-    const title = extractTitle(html);
+    const title =
+      extractTitle(h) ||
+      "Anime";
 
-    /*
-     * Extract aliases from the "Diğer Adları" field if present.
-     */
-    let aliases = title;
-
-    const aliasMatch = html.match(
-      /Diğer Adları\s*:([\s\S]{0,500}?)(?:Japonca|Anime Türü|Bölüm Sayısı|Başlama Tarihi)/i
-    );
-
-    if (aliasMatch) {
-      aliases = cleanText(aliasMatch[1]);
-    }
+    const imdb =
+      (
+        h.match(
+          /imdb\.com\/title\/(tt\d+)/i
+        ) || []
+      )[1] || "";
 
     return JSON.stringify([
       {
-        description: description.slice(0, 1500),
-        aliases: aliases || "N/A",
+        description:
+          description.slice(0, 1500),
+
+        aliases:
+          imdb
+            ? title + " | " + imdb
+            : title,
+
         airdate: "N/A"
       }
     ]);
@@ -741,131 +665,76 @@ async function extractDetails(url) {
 }
 
 /* =========================================================
- * Episodes
+ * EPISODES
  * ========================================================= */
-
-function parseEpisodes(html, parent) {
-  const eps = [];
-  const seen = {};
-
-  const links = extractLinks(html, parent);
-
-  for (let i = 0; i < links.length; i++) {
-    const l = links[i];
-
-    if (!/\/video\/[^/]+/i.test(getPath(l.href))) {
-      continue;
-    }
-
-    const number = episodeNumber(
-      l.text || l.href,
-      0
-    );
-
-    if (!number) continue;
-
-    if (seen[l.href]) continue;
-
-    seen[l.href] = true;
-
-    let title = cleanText(l.text);
-
-    if (!title || title.length < 2) {
-      title = "Bölüm " + number;
-    }
-
-    eps.push({
-      href: l.href,
-      number: number,
-      title: title
-    });
-  }
-
-  /*
-   * Fallback: regex directly over HTML.
-   */
-  let m;
-
-  const re =
-    /href=["']([^"']*\/video\/[^"']+)["'][^>]*>/gi;
-
-  while ((m = re.exec(html))) {
-    const href = absUrl(m[1], parent);
-
-    if (!href || seen[href]) continue;
-
-    const n = episodeNumber(href, 0);
-
-    if (!n) continue;
-
-    seen[href] = true;
-
-    eps.push({
-      href: href,
-      number: n,
-      title: "Bölüm " + n
-    });
-  }
-
-  eps.sort(function (a, b) {
-    return a.number - b.number;
-  });
-
-  return eps;
-}
 
 async function extractEpisodes(url) {
   try {
-    let seriesUrl = String(url || "");
+    const p =
+      await getSeriesHtml(url);
+
+    const h = p.html || "";
+
+    const eps = [];
+    const seen = {};
+
+    links(h, p.url).forEach(function (l) {
+      if (!/\/episode-\d+/i.test(l.href)) {
+        return;
+      }
+
+      const n = episodeNumber(
+        l.text + " " + l.href,
+        eps.length + 1
+      );
+
+      if (!n || seen[l.href]) {
+        return;
+      }
+
+      seen[l.href] = true;
+
+      eps.push({
+        href: l.href,
+        number: n,
+        title: "Episode " + n
+      });
+    });
 
     /*
-     * If the app passes an episode URL, derive:
-     *
-     * /video/kimiai-8-bolum
-     * -> /anime/kimiai
+     * Generic fallback.
      */
-    if (/\/video\//i.test(getPath(seriesUrl))) {
-      const derived = seriesUrlFromEpisode(seriesUrl);
+    if (!eps.length) {
+      let m;
 
-      if (derived) {
-        seriesUrl = derived;
+      const re =
+        /href=["']([^"']*-episode-(\d+)[^"']*)["']/gi;
+
+      while ((m = re.exec(h))) {
+        const href =
+          absUrl(m[1], p.url);
+
+        if (seen[href]) {
+          continue;
+        }
+
+        seen[href] = true;
+
+        eps.push({
+          href: href,
+          number: +m[2],
+          title:
+            "Episode " + m[2]
+        });
       }
     }
 
-    const html = await getText(
-      await soraFetch(seriesUrl, {
-        headers: {
-          Referer: baseUrl + "/",
-          "User-Agent": UA,
-          Accept: "text/html,*/*"
-        }
-      })
-    );
-
-    if (!html) {
-      return JSON.stringify([]);
-    }
-
-    const eps = parseEpisodes(html, seriesUrl);
-
-    /*
-     * If the app somehow passed the actual episode page and
-     * the series page did not expose the list, retain it.
-     */
-    if (!eps.length && /\/video\//i.test(getPath(url))) {
-      const n = episodeNumber(url, 1);
-
-      return JSON.stringify([
-        {
-          href: url,
-          number: n,
-          title: "Bölüm " + n
-        }
-      ]);
-    }
+    eps.sort(function (a, b) {
+      return a.number - b.number;
+    });
 
     return JSON.stringify(
-      eps.slice(0, 500)
+      eps.slice(0, 1000)
     );
   } catch (e) {
     return JSON.stringify([]);
@@ -873,310 +742,547 @@ async function extractEpisodes(url) {
 }
 
 /* =========================================================
- * Media extraction
+ * IMDb
  * ========================================================= */
 
-function isMediaUrl(url) {
-  const u = String(url || "");
+async function findImdbId(title, year) {
+  const clean =
+    cleanText(title)
+      .replace(
+        /\s*\(\d{4}\)\s*$/,
+        ""
+      );
 
-  return (
-    /\.m3u8(?:$|[?#])/i.test(u) ||
-    /\.mp4(?:$|[?#])/i.test(u) ||
-    /\.m4v(?:$|[?#])/i.test(u) ||
-    /\.webm(?:$|[?#])/i.test(u) ||
-    /\/hls\/|\/manifest\/|\/playlist\//i.test(u)
-  );
+  const first =
+    (clean.charAt(0) || "x")
+      .toLowerCase();
+
+  const urls = [
+    IMDB_SUGGEST +
+      encodeURIComponent(clean) +
+      ".json",
+
+    "https://v2.sg.media-imdb.com/suggestion/" +
+      encodeURIComponent(first) +
+      "/" +
+      encodeURIComponent(clean) +
+      ".json"
+  ];
+
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      const d = await getJSON(
+        urls[i],
+        {
+          Accept:
+            "application/json"
+        }
+      );
+
+      const list =
+        d &&
+        Array.isArray(d.d)
+          ? d.d
+          : [];
+
+      const candidates =
+        list.filter(function (x) {
+          return (
+            x &&
+            /^tt\d+$/.test(x.id)
+          );
+        });
+
+      candidates.sort(
+        function (a, b) {
+          const na =
+            slugify(
+              a.l ||
+              a.title ||
+              ""
+            );
+
+          const nb =
+            slugify(
+              b.l ||
+              b.title ||
+              ""
+            );
+
+          const q =
+            slugify(clean);
+
+          const sa =
+            na === q
+              ? 100
+              : na.includes(q) ||
+                q.includes(na)
+              ? 50
+              : 0;
+
+          const sb =
+            nb === q
+              ? 100
+              : nb.includes(q) ||
+                q.includes(nb)
+              ? 50
+              : 0;
+
+          const ya =
+            year && a.y
+              ? Math.abs(
+                  +a.y - +year
+                )
+              : 99;
+
+          const yb =
+            year && b.y
+              ? Math.abs(
+                  +b.y - +year
+                )
+              : 99;
+
+          return (
+            sb - sa ||
+            ya - yb
+          );
+        }
+      );
+
+      if (candidates[0]) {
+        return candidates[0].id;
+      }
+    } catch (e) {}
+  }
+
+  return "";
 }
 
-function extractMediaUrls(text, parent) {
-  const out = [];
+async function imdbForEpisode(
+  episodeUrl,
+  episodeHtml
+) {
+  let m =
+    episodeHtml.match(
+      /imdb\.com\/title\/(tt\d+)/i
+    );
 
-  if (!text) return out;
-
-  let m;
-
-  /*
-   * JW Player / video.js / Plyr
-   */
-  const sourceRe =
-    /(?:["'](?:file|src|source|url|videoUrl|hls)["']?\s*[:=]\s*["'])([^"']+)(?:["'])/gi;
-
-  while ((m = sourceRe.exec(text))) {
-    const u = absUrl(m[1], parent);
-
-    if (isMediaUrl(u)) {
-      out.push(u);
-    }
+  if (m) {
+    return m[1];
   }
 
-  /*
-   * HTML <source>
-   */
-  const htmlSource =
-    /<source[^>]+(?:src|data-src)=["']([^"']+)["']/gi;
+  const seriesUrl =
+    seriesUrlFromEpisode(
+      episodeUrl
+    );
 
-  while ((m = htmlSource.exec(text))) {
-    const u = absUrl(m[1], parent);
+  if (seriesUrl) {
+    const h = await getText(
+      await soraFetch(seriesUrl)
+    );
 
-    if (isMediaUrl(u)) {
-      out.push(u);
+    m =
+      h.match(
+        /imdb\.com\/title\/(tt\d+)/i
+      );
+
+    if (m) {
+      return m[1];
     }
-  }
 
-  /*
-   * Direct m3u8.
-   */
-  const m3u8 =
-    /https?:\/\/[^"'\\\s<>]+?\.m3u8(?:\?[^"'\\\s<>]*)?/gi;
+    const title =
+      extractTitle(h);
 
-  while ((m = m3u8.exec(text))) {
-    out.push(
-      absUrl(
-        m[0].replace(/\\u0026/g, "&").replace(/\\\//g, "/"),
-        parent
-      )
+    const ym =
+      h.match(
+        /(?:Released|Release(?:d)?|Year)\s*[:\-]?\s*(20\d{2}|19\d{2})/i
+      );
+
+    return await findImdbId(
+      title,
+      ym ? ym[1] : ""
     );
   }
 
-  /*
-   * Direct MP4.
-   */
-  const mp4 =
-    /https?:\/\/[^"'\\\s<>]+?\.mp4(?:\?[^"'\\\s<>]*)?/gi;
-
-  while ((m = mp4.exec(text))) {
-    out.push(absUrl(m[0], parent));
-  }
-
-  /*
-   * Generic JSON URLs.
-   */
-  const generic =
-    /["'](https?:\/\/[^"']+)["']/gi;
-
-  while ((m = generic.exec(text))) {
-    const candidate = absUrl(m[1], parent);
-
-    if (isMediaUrl(candidate)) {
-      out.push(candidate);
-    }
-  }
-
-  return unique(out);
+  return "";
 }
 
 /* =========================================================
- * JSON recursive extraction
+ * TURKISH SUBTITLES
  * ========================================================= */
 
-function extractUrlsFromObject(obj, parent) {
+function subtitleRank(
+  x,
+  s,
+  e
+) {
+  const parsed =
+    parseSubEpisode(
+      x.filename ||
+      x.name ||
+      ""
+    );
+
+  /*
+   * Wrong S/E = completely rejected.
+   */
+  if (
+    parsed &&
+    (
+      parsed.s !== s ||
+      parsed.e !== e
+    )
+  ) {
+    return -100000;
+  }
+
+  let score =
+    parsed
+      ? 1000
+      : 100;
+
+  const n =
+    String(
+      x.filename ||
+      x.name ||
+      ""
+    ).toLowerCase();
+
+  if (
+    /forced|signs|sdh|hearing/i.test(n)
+  ) {
+    score -= 30;
+  }
+
+  if (
+    /utf8|utf-8/i.test(
+      String(x.url || "")
+    )
+  ) {
+    score += 10;
+  }
+
+  return score;
+}
+
+async function turkishSubtitles(
+  imdbId,
+  season,
+  episode
+) {
+  if (!imdbId) {
+    return [];
+  }
+
   const out = [];
 
-  function walk(value) {
-    if (value == null) return;
-
-    if (typeof value === "string") {
-      const decoded = decodeEntities(value);
-      const u = absUrl(decoded, parent);
-
-      if (isMediaUrl(u)) {
-        out.push(u);
-      }
-
-      /*
-       * Sometimes JSON contains escaped JSON.
-       */
-      if (
-        decoded.charAt(0) === "{" ||
-        decoded.charAt(0) === "["
-      ) {
-        try {
-          walk(JSON.parse(decoded));
-        } catch (e) {}
-      }
-
-      return;
-    }
-
-    if (Array.isArray(value)) {
-      for (let i = 0; i < value.length; i++) {
-        walk(value[i]);
-      }
-
-      return;
-    }
-
-    if (typeof value === "object") {
-      const keys = Object.keys(value);
-
-      for (let i = 0; i < keys.length; i++) {
-        walk(value[keys[i]]);
-      }
-    }
-  }
-
-  walk(obj);
-
-  return unique(out);
-}
-
-/* =========================================================
- * Byse player
- * ========================================================= */
-
-function extractByseCode(url) {
-  const m = String(url || "").match(
-    /bysesukior\.com\/e\/([A-Za-z0-9_-]+)/i
-  );
-
-  return m ? m[1] : "";
-}
-
-async function resolveByse(playerUrl, episodeUrl) {
-  const found = [];
-
-  const fileCode = extractByseCode(playerUrl);
-
   /*
-   * 1. Public embed settings API.
+   * Provider A:
+   * Stremio OpenSubtitles v3
    *
-   * Byse uses:
-   * /api/videos/{file_code}/embed/settings
+   * IMPORTANT:
+   * IMDb:S:E format is required.
    */
-  if (fileCode) {
-    const apiUrl =
-      "https://bysesukior.com/api/videos/" +
-      encodeURIComponent(fileCode) +
-      "/embed/settings";
+  try {
+    const id =
+      encodeURIComponent(
+        imdbId +
+          ":" +
+          season +
+          ":" +
+          episode
+      );
 
-    const apiResponse = await soraFetch(apiUrl, {
-      headers: {
-        Referer: playerUrl,
-        Origin: "https://bysesukior.com",
-        "User-Agent": UA,
-        Accept: "application/json,text/plain,*/*"
+    const d =
+      await getJSON(
+        OS_V3 +
+          "/subtitles/series/" +
+          id +
+          ".json",
+        {
+          Accept:
+            "application/json",
+
+          Referer:
+            "https://app.strem.io/",
+
+          "Accept-Encoding":
+            "identity"
+        }
+      );
+
+    const arr =
+      d &&
+      Array.isArray(d.subtitles)
+        ? d.subtitles
+        : [];
+
+    arr.forEach(function (x) {
+      if (
+        x &&
+        x.url &&
+        String(
+          x.lang || ""
+        ).toLowerCase() === "tur"
+      ) {
+        out.push({
+          url: x.url,
+          label: "Türkçe",
+          lang: "tur",
+          filename:
+            x.filename ||
+            x.name ||
+            ""
+        });
       }
     });
-
-    const apiText = await getText(apiResponse);
-
-    if (apiText) {
-      /*
-       * Raw text extraction.
-       */
-      const direct = extractMediaUrls(
-        apiText,
-        playerUrl
-      );
-
-      for (let i = 0; i < direct.length; i++) {
-        found.push(direct[i]);
-      }
-
-      /*
-       * JSON extraction.
-       */
-      try {
-        const json = JSON.parse(apiText);
-
-        const jsonUrls = extractUrlsFromObject(
-          json,
-          playerUrl
-        );
-
-        for (let i = 0; i < jsonUrls.length; i++) {
-          found.push(jsonUrls[i]);
-        }
-      } catch (e) {}
-    }
-  }
+  } catch (e) {}
 
   /*
-   * 2. Fetch actual Byse embed.
+   * Provider B:
+   * OpenSubtitles legacy REST
+   *
+   * Gives release names so we can
+   * validate S/E.
    */
-  const playerHtml = await getText(
-    await soraFetch(playerUrl, {
-      headers: {
-        Referer: episodeUrl || baseUrl + "/",
-        Origin: baseUrl,
-        "User-Agent": UA,
-        Accept: "text/html,application/xhtml+xml,*/*"
-      }
-    })
-  );
-
-  if (playerHtml) {
-    const direct = extractMediaUrls(
-      playerHtml,
-      playerUrl
-    );
-
-    for (let i = 0; i < direct.length; i++) {
-      found.push(direct[i]);
-    }
-
-    /*
-     * Look for JSON objects embedded in scripts.
-     */
-    const scripts =
-      playerHtml.match(
-        /<script[^>]*>([\s\S]*?)<\/script>/gi
-      ) || [];
-
-    for (let i = 0; i < scripts.length; i++) {
-      const script = scripts[i];
-
-      const media = extractMediaUrls(
-        script,
-        playerUrl
+  try {
+    const id =
+      imdbId.replace(
+        /^tt/i,
+        ""
       );
 
-      for (let x = 0; x < media.length; x++) {
-        found.push(media[x]);
+    const url =
+      OS_REST +
+      "/episode-" +
+      episode +
+      "/imdbid-" +
+      id +
+      "/season-" +
+      season +
+      "/sublanguageid-tur";
+
+    const d =
+      await getJSON(
+        url,
+        {
+          "X-User-Agent":
+            "trailers.to-UA",
+
+          Accept:
+            "application/json",
+
+          "Accept-Encoding":
+            "identity"
+        }
+      );
+
+    const arr =
+      Array.isArray(d)
+        ? d
+        : [];
+
+    arr.forEach(function (x) {
+      if (!x) {
+        return;
       }
+
+      if (
+        String(
+          x.SubLanguageID ||
+          ""
+        ).toLowerCase() !==
+        "tur"
+      ) {
+        return;
+      }
+
+      const name =
+        x.SubFileName ||
+        x.MovieReleaseName ||
+        "";
+
+      const parsed =
+        parseSubEpisode(name);
 
       /*
-       * Try JSON-looking portions.
+       * Reject subtitles belonging
+       * to another season/episode.
        */
-      const jsonCandidates =
-        script.match(
-          /\{[\s\S]{20,}\}/g
-        ) || [];
-
-      for (let x = 0; x < jsonCandidates.length; x++) {
-        try {
-          const obj = JSON.parse(
-            jsonCandidates[x]
-          );
-
-          const urls = extractUrlsFromObject(
-            obj,
-            playerUrl
-          );
-
-          for (let z = 0; z < urls.length; z++) {
-            found.push(urls[z]);
-          }
-        } catch (e) {}
+      if (
+        parsed &&
+        (
+          parsed.s !== season ||
+          parsed.e !== episode
+        )
+      ) {
+        return;
       }
-    }
-  }
 
-  return unique(found);
+      const idf =
+        x.IDSubtitleFile;
+
+      if (!idf) {
+        return;
+      }
+
+      const u =
+        "https://dl.opensubtitles.org/en/download/filead/" +
+        encodeURIComponent(idf);
+
+      out.push({
+        url: u,
+        label: "Türkçe",
+        lang: "tur",
+        filename: name
+      });
+    });
+  } catch (e) {}
+
+  const dedup = {};
+  const valid = [];
+
+  out.sort(
+    function (a, b) {
+      return (
+        subtitleRank(
+          b,
+          season,
+          episode
+        ) -
+        subtitleRank(
+          a,
+          season,
+          episode
+        )
+      );
+    }
+  );
+
+  out.forEach(function (x) {
+    if (
+      x.url &&
+      !dedup[x.url]
+    ) {
+      dedup[x.url] = true;
+      valid.push(x);
+    }
+  });
+
+  return valid.slice(0, 8);
 }
 
 /* =========================================================
- * Other players
+ * STREAM PLAYER
  * ========================================================= */
 
-function playerName(url) {
-  const u = String(url || "").toLowerCase();
+async function resolvePlayer(
+  url,
+  referer,
+  depth
+) {
+  if (depth > 2) {
+    return [];
+  }
 
-  if (/filemoon/.test(u)) return "FILEMOON";
-  if (/mediacm|media-cm/.test(u)) return "MEDIACM";
-  if (/streamwish|swdyu|wish/.test(u)) return "STREAMWISH";
-  if (/voe\.sx/.test(u)) return "VOE";
-  if (/bysesukior/.test(u)) return "BYSE";
+  const h =
+    await getText(
+      await soraFetch(
+        url,
+        {
+          headers: {
+            Referer:
+              referer ||
+              baseUrl + "/",
+
+            Accept:
+              "text/html,*/*",
+
+            "User-Agent":
+              UA
+          }
+        }
+      )
+    );
+
+  if (!h) {
+    return [];
+  }
+
+  let out =
+    mediaUrls(
+      h,
+      url
+    );
+
+  /*
+   * Some players contain another
+   * iframe.
+   */
+  if (!out.length) {
+    const nested =
+      iframes(
+        h,
+        url
+      );
+
+    for (
+      let i = 0;
+      i <
+        Math.min(
+          nested.length,
+          5
+        );
+      i++
+    ) {
+      out =
+        out.concat(
+          await resolvePlayer(
+            nested[i],
+            url,
+            depth + 1
+          )
+        );
+    }
+  }
+
+  return unique(out);
+}
+
+function playerLabel(url) {
+  const u =
+    String(url || "")
+      .toLowerCase();
+
+  if (
+    /megacloud|rapid-cloud/.test(u)
+  ) {
+    return "MegaCloud";
+  }
+
+  if (
+    /vidcloud|vidstream/.test(u)
+  ) {
+    return "VidCloud";
+  }
+
+  if (
+    /rabbitstream|dokicloud/.test(u)
+  ) {
+    return "RabbitStream";
+  }
+
+  if (
+    /streamwish/.test(u)
+  ) {
+    return "StreamWish";
+  }
+
+  if (
+    /vidhide/.test(u)
+  ) {
+    return "VidHide";
+  }
 
   try {
     return new URL(url).hostname;
@@ -1185,303 +1291,280 @@ function playerName(url) {
   }
 }
 
-async function resolveGenericPlayer(
-  playerUrl,
-  episodeUrl,
-  depth
-) {
-  if (depth > 2) {
-    return [];
-  }
-
-  /*
-   * Byse has its own resolver.
-   */
-  if (/bysesukior\.com/i.test(playerUrl)) {
-    return await resolveByse(
-      playerUrl,
-      episodeUrl
-    );
-  }
-
-  const html = await getText(
-    await soraFetch(playerUrl, {
-      headers: {
-        Referer: episodeUrl || baseUrl + "/",
-        "User-Agent": UA,
-        Accept: "text/html,*/*"
-      }
-    })
-  );
-
-  if (!html) return [];
-
-  let streams = extractMediaUrls(
-    html,
-    playerUrl
-  );
-
-  /*
-   * If player page contains another iframe,
-   * follow it once/twice.
-   */
-  if (!streams.length) {
-    const nested =
-      extractIframeUrls(
-        html,
-        playerUrl
-      );
-
-    for (
-      let i = 0;
-      i < nested.length && i < 5;
-      i++
-    ) {
-      const n = await resolveGenericPlayer(
-        nested[i],
-        playerUrl,
-        depth + 1
-      );
-
-      streams = streams.concat(n);
-    }
-  }
-
-  return unique(streams);
-}
-
 /* =========================================================
- * Player discovery
- * ========================================================= */
-
-function discoverPlayers(
-  html,
-  episodeUrl
-) {
-  const players = [];
-  const seen = {};
-
-  function add(url) {
-    url = absUrl(url, episodeUrl);
-
-    if (!url || !isHttp(url)) return;
-
-    if (seen[url]) return;
-
-    /*
-     * Don't treat the TürkAnime page itself as a player.
-     */
-    if (/turkanime\.tv/i.test(url)) {
-      return;
-    }
-
-    seen[url] = true;
-
-    players.push(url);
-  }
-
-  /*
-   * Main iframe.
-   */
-  const iframes =
-    extractIframeUrls(
-      html,
-      episodeUrl
-    );
-
-  for (let i = 0; i < iframes.length; i++) {
-    add(iframes[i]);
-  }
-
-  /*
-   * Player buttons can contain hidden iframe URLs
-   * inside onclick/data attributes.
-   */
-  let m;
-
-  const hostRe =
-    /https?:\/\/[^"'\\\s<>]+(?:bysesukior|filemoon|mediacm|streamwish|voe\.sx)[^"'\\\s<>]*/gi;
-
-  while ((m = hostRe.exec(html))) {
-    add(
-      m[0]
-        .replace(/&amp;/gi, "&")
-        .replace(/\\\//g, "/")
-    );
-  }
-
-  /*
-   * Sort Byse first because it is the actual main iframe
-   * shown on the current TürkAnime page.
-   */
-  players.sort(function (a, b) {
-    const aa =
-      /bysesukior/i.test(a) ? 0 : 1;
-
-    const bb =
-      /bysesukior/i.test(b) ? 0 : 1;
-
-    return aa - bb;
-  });
-
-  return players;
-}
-
-/* =========================================================
- * Stream entry
+ * MAIN STREAM FUNCTION
  * ========================================================= */
 
 async function extractStreamUrl(url) {
   try {
-    const episodeUrl = String(url || "");
+    const episodeUrl =
+      String(url || "");
 
-    const html = await getText(
-      await soraFetch(episodeUrl, {
-        headers: {
-          Referer: baseUrl + "/",
-          Origin: baseUrl,
-          "User-Agent": UA,
-          Accept: "text/html,*/*"
-        }
-      })
-    );
+    const epHtml =
+      await getText(
+        await soraFetch(
+          episodeUrl,
+          {
+            headers: {
+              Referer:
+                baseUrl + "/",
 
-    if (!html) {
+              "User-Agent":
+                UA
+            }
+          }
+        )
+      );
+
+    if (!epHtml) {
       return JSON.stringify({
         streams: [],
         subtitles: ""
       });
     }
 
-    const found = [];
-
     /*
-     * Direct sources.
+     * Direct media.
      */
-    const direct =
-      extractMediaUrls(
-        html,
+    let found =
+      mediaUrls(
+        epHtml,
         episodeUrl
-      );
-
-    for (let i = 0; i < direct.length; i++) {
-      found.push({
-        url: direct[i],
-        label: "TürkAnime",
-        player: episodeUrl
+      ).map(function (u) {
+        return {
+          url: u,
+          label: "GogoAnime",
+          player: episodeUrl
+        };
       });
-    }
 
     /*
      * External players.
      */
     const players =
-      discoverPlayers(
-        html,
+      iframes(
+        epHtml,
         episodeUrl
-      );
+      ).filter(function (u) {
+        return !/youtube|facebook|twitter|google/i.test(u);
+      });
 
     for (
       let i = 0;
-      i < players.length && i < 8;
+      i <
+        Math.min(
+          players.length,
+          8
+        );
       i++
     ) {
-      const player = players[i];
-
-      const streams =
-        await resolveGenericPlayer(
-          player,
+      const us =
+        await resolvePlayer(
+          players[i],
           episodeUrl,
           0
         );
 
-      for (
-        let x = 0;
-        x < streams.length;
-        x++
-      ) {
-        found.push({
-          url: streams[x],
-          label: playerName(player),
-          player: player
-        });
-      }
+      us.forEach(
+        function (u) {
+          found.push({
+            url: u,
+            label:
+              playerLabel(
+                players[i]
+              ),
+            player:
+              players[i]
+          });
+        }
+      );
     }
 
     /*
      * Deduplicate.
      */
-    const seen = {};
-    const output = [];
-
-    for (let i = 0; i < found.length; i++) {
-      const item = found[i];
-
-      if (!item.url || seen[item.url]) {
-        continue;
-      }
-
-      seen[item.url] = true;
-
-      let title =
-        "TürkAnime · " +
-        item.label;
-
-      if (/master\.m3u8/i.test(item.url)) {
-        title += " · HLS";
-      } else if (/\.m3u8/i.test(item.url)) {
-        title += " · HLS";
-      } else if (/\.mp4/i.test(item.url)) {
-        title += " · MP4";
-      }
-
-      if (/1080/i.test(item.url)) {
-        title += " · 1080p";
-      } else if (/720/i.test(item.url)) {
-        title += " · 720p";
-      } else if (/480/i.test(item.url)) {
-        title += " · 480p";
-      } else if (/360/i.test(item.url)) {
-        title += " · 360p";
-      }
-
-      output.push({
-        title: title,
-        name: title,
-        streamUrl: item.url,
-        headers: {
-          "User-Agent": UA,
-          Referer:
-            item.player ||
-            episodeUrl,
-          Accept:
-            "application/vnd.apple.mpegurl,video/*,*/*"
+    found =
+      found.filter(
+        function (x, i, a) {
+          return (
+            a.findIndex(
+              function (y) {
+                return (
+                  y.url ===
+                  x.url
+                );
+              }
+            ) === i
+          );
         }
-      });
-    }
+      );
 
     /*
      * HLS first.
      */
-    output.sort(function (a, b) {
-      const ah =
-        /\.m3u8/i.test(a.streamUrl)
-          ? 0
-          : 1;
+    found.sort(
+      function (a, b) {
+        return (
+          (/\.m3u8/i.test(
+            a.url
+          )
+            ? 0
+            : 1) -
+          (/\.m3u8/i.test(
+            b.url
+          )
+            ? 0
+            : 1)
+        );
+      }
+    );
 
-      const bh =
-        /\.m3u8/i.test(b.streamUrl)
-          ? 0
-          : 1;
+    /*
+     * Determine S/E.
+     */
+    const title =
+      extractTitle(
+        epHtml
+      );
 
-      return ah - bh;
-    });
+    const season =
+      seasonNumber(
+        title +
+          " " +
+          episodeUrl
+      );
+
+    const episode =
+      episodeNumber(
+        title +
+          " " +
+          episodeUrl,
+        1
+      );
+
+    /*
+     * Subtitle extraction is OPTIONAL.
+     * A subtitle failure must NEVER
+     * remove a working stream.
+     */
+    const imdbId =
+      await imdbForEpisode(
+        episodeUrl,
+        epHtml
+      );
+
+    const subs =
+      await turkishSubtitles(
+        imdbId,
+        season,
+        episode
+      );
+
+    const subPairs = [];
+    const allSubs = [];
+
+    for (
+      let i = 0;
+      i < subs.length;
+      i++
+    ) {
+      const headers = {
+        Referer:
+          "https://app.strem.io/",
+
+        "User-Agent":
+          UA,
+
+        Accept:
+          "text/plain,text/vtt,application/x-subrip,*/*"
+      };
+
+      /*
+       * Only Turkish is exposed.
+       */
+      subPairs.push(
+        "Türkçe",
+        subs[i].url
+      );
+
+      allSubs.push({
+        url: subs[i].url,
+        label: "Türkçe",
+        headers: headers
+      });
+    }
+
+    const streams = [];
+
+    found
+      .slice(0, 10)
+      .forEach(function (x) {
+        const t =
+          "GogoAnime · " +
+          x.label +
+          (
+            /\.m3u8/i.test(
+              x.url
+            )
+              ? " · HLS"
+              : " · MP4"
+          );
+
+        const item = {
+          title: t,
+          name: t,
+
+          streamUrl:
+            x.url,
+
+          headers: {
+            "User-Agent":
+              UA,
+
+            Referer:
+              x.player ||
+              episodeUrl,
+
+            Accept:
+              "application/vnd.apple.mpegurl,video/*,*/*"
+          }
+        };
+
+        /*
+         * Turkish subtitle only.
+         */
+        if (allSubs.length) {
+          item.subtitle =
+            allSubs[0].url;
+
+          item.subtitleHeaders =
+            allSubs[0].headers;
+
+          item.subtitles =
+            subPairs;
+
+          item.allSubtitles =
+            allSubs;
+        } else {
+          item.subtitles = [];
+          item.allSubtitles = [];
+        }
+
+        streams.push(item);
+      });
 
     return JSON.stringify({
-      streams: output.slice(0, 20),
-      subtitles: ""
+      streams: streams,
+
+      subtitles:
+        allSubs.length
+          ? allSubs[0].url
+          : ""
     });
   } catch (e) {
+    /*
+     * Never crash Sora/Luna.
+     */
     return JSON.stringify({
       streams: [],
       subtitles: ""
