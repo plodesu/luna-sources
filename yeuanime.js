@@ -110,30 +110,85 @@ async function searchResults(keyword) {
     const url = baseUrl + "/tim-kiem?q=" + encodeURIComponent(cleaned);
     const html = await getText(await soraFetch(url));
 
+    if (!html || html.length < 50) {
+      // Try fallback search via main page? Not needed.
+      return JSON.stringify([]);
+    }
+
     const results = [];
     const seen = {};
 
-    // Find all anime cards: typically <a href="/phim/...">
-    const re = /<a[^>]*href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"[^>]*>[\s\S]*?<[^>]*class="[^"]*movie-title[^"]*"[^>]*>([^<]+)<\/[^>]+>/gi;
-    let m;
-    while ((m = re.exec(html))) {
-      const slug = m[1];
-      const image = absUrl(m[2]);
-      let title = decodeEntities(m[3]).trim();
-      if (!title) {
-        // try another pattern
-        const titleMatch = html.slice(m.index, m.index + 300).match(/<h[23][^>]*>([^<]+)<\/h[23]>/i);
-        if (titleMatch) title = decodeEntities(titleMatch[1]).trim();
+    // Method 1: Find all <a href="/phim/..."> with an image and title
+    // Many anime cards on this site have structure:
+    // <a href="/phim/{slug}"> ... <img src="..." alt="Title"> ... </a>
+    // or <a href="/phim/{slug}"><h3>Title</h3></a>
+    // We'll capture both.
+
+    // First, extract all <a> tags that point to /phim/
+    const linkRegex = /<a[^>]*href="\/phim\/([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    while ((match = linkRegex.exec(html))) {
+      const slug = match[1];
+      const inner = match[2];
+      let title = "";
+
+      // Try to get title from img alt
+      const imgAlt = inner.match(/<img[^>]*alt="([^"]+)"/i);
+      if (imgAlt) {
+        title = decodeEntities(imgAlt[1]).trim();
+      } else {
+        // Try to get title from any heading or text inside the link
+        const heading = inner.match(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/i);
+        if (heading) {
+          title = decodeEntities(heading[1]).trim();
+        } else {
+          // Fallback: get plain text from inner (remove tags)
+          const text = inner.replace(/<[^>]+>/g, " ").trim();
+          if (text) title = text;
+        }
       }
+
       if (!title) continue;
+
+      // Try to get image src from img inside the link
+      const imgSrc = inner.match(/<img[^>]*src="([^"]+)"/i);
+      let image = "";
+      if (imgSrc) {
+        image = absUrl(imgSrc[1]);
+      } else {
+        // If no image, use a placeholder or skip? For now, set empty.
+        image = "";
+      }
+
       const href = absUrl("/phim/" + slug);
       if (seen[href]) continue;
       seen[href] = true;
-      results.push({ title, image, href });
+
+      results.push({
+        title: title,
+        image: image,
+        href: href,
+      });
+    }
+
+    // If we got no results, try alternative: look for divs with class containing "movie"
+    if (results.length === 0) {
+      // Maybe the search results are in divs like the ranking list
+      const divRegex = /<div[^>]*class="[^"]*movie-card[^"]*"[^>]*>[\s\S]*?<a href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<h[1-6][^>]*>([^<]+)<\/h[1-6]>[\s\S]*?<img[^>]*src="([^"]+)"/gi;
+      while ((match = divRegex.exec(html))) {
+        const slug = match[1];
+        const title = decodeEntities(match[2]).trim();
+        const image = absUrl(match[3]);
+        const href = absUrl("/phim/" + slug);
+        if (seen[href]) continue;
+        seen[href] = true;
+        results.push({ title, image, href });
+      }
     }
 
     return JSON.stringify(results.slice(0, 30));
-  } catch (_) {
+  } catch (e) {
+    // Any error: return empty array
     return JSON.stringify([]);
   }
 }
@@ -188,27 +243,26 @@ async function extractEpisodes(url) {
     const seen = {};
 
     // Find episode links: /xem-phim/{slug}/tap-{num}/{lang}?server=...
-    const re = /<a[^>]*href="\/xem-phim\/([^/]+?)\/tap-(\d+)\/([^"?]+)[^"]*"[^>]*>[\s\S]*?<[^>]*class="[^"]*episode-title[^"]*"[^>]*>([^<]*)<\/[^>]+>/gi;
+    const re = /<a[^>]*href="(\/xem-phim\/[^"]+?)"[^>]*>[\s\S]*?<[^>]*class="[^"]*episode-title[^"]*"[^>]*>([^<]*)<\/[^>]+>/gi;
     let m;
     while ((m = re.exec(html))) {
-      const slug = m[1];
-      const epNum = parseInt(m[2], 10);
-      const lang = m[3];
-      const label = decodeEntities(m[4]).trim() || "Tập " + epNum;
+      const href = absUrl(m[1]);
+      const epMatch = href.match(/\/tap-(\d+)\//);
+      if (!epMatch) continue;
+      const epNum = parseInt(epMatch[1], 10);
+      const label = decodeEntities(m[2]).trim() || "Tập " + epNum;
       if (seen[epNum]) continue;
       seen[epNum] = true;
-      const href = absUrl("/xem-phim/" + slug + "/tap-" + epNum + "/" + lang);
-      // We can also include all language versions? For simplicity, take the first found (usually Vietsub)
       eps.push({
         href: href,
         number: epNum,
-        season: 1, // No season grouping
+        season: 1,
         episode: epNum,
         title: label,
       });
     }
 
-    // If no episodes found, maybe the page uses a different pattern.
+    // Fallback: simpler regex for just links
     if (!eps.length) {
       const re2 = /href="(\/xem-phim\/[^"]+?\/tap-\d+\/[^"]+?)"/gi;
       let m2;
@@ -259,7 +313,7 @@ async function extractStreamUrl(url) {
     }
     const hlsUrl = decodeEntities(match[1]);
 
-    // Optional: extract subtitle tracks if any (not present in typical page, but we can look for .vtt)
+    // Optional: extract subtitle tracks if any
     let subtitles = "";
     const subMatch = html.match(/<track[^>]*src="([^"]+\.vtt)"/i);
     if (subMatch) subtitles = absUrl(subMatch[1]);
