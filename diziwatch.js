@@ -4,16 +4,19 @@
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
  * Player: videoplay.vip → HLS master (A/V together)
- * Subtitle: embedded tracks from the player (Provider C) — must carry the
- *   player Referer header (403 without it). Emitted at the TOP LEVEL of the
- *   return, matching the working hydrahd shape: subtitle (default auto-load),
- *   subtitles ([label,url,…] pair-array), subtitlesHeaders (Referer!), and
- *   allSubtitles ([{url,label,kind,headers}]).
+ * Subtitle: embedded tracks from the player (Provider C).
+ *   - `subtitles` = [String] URLs (the Sora/Sulfur client reads this as an
+ *     array of URL strings and loads each with URLSession.shared — NO custom
+ *     headers, so a Referer-gated CDN blanks them).
+ *   - `allSubtitles`/`subtitlesHeaders` carry the Referer for clients that
+ *     can send headers.
+ *   Note: videoplay.vip VTT returns HTTP 403 without a Referer, so the
+ *   Sora/Sulfur client (which sends none) cannot render these.
  * Async: bounded response cache (static pages only) to avoid redundant
  *   fetches across the flow; the player page is never cached (expiring token).
  * Episodes: number = in-season episode number + separate `season` field
  *   (docs contract), so clients render "Sezon X / Bölüm Y" instead of "1001".
- * v1.4.0
+ * v1.4.1
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -620,15 +623,14 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // Sora picker shape: flat [label, url, label, url, ...] pair-array.
-    const subtitlePairs = [];
-    curated.forEach(function (entry) { subtitlePairs.push(entry.label, entry.url); });
-    let finalSubtitles;
-    if (subtitlePairs.length >= 2) finalSubtitles = subtitlePairs;
-    else if (subtitle) finalSubtitles = subtitle;
-    else finalSubtitles = [];
+    // The Sora/Sulfur client reads `subtitles` as an array of URL strings
+    // (json["subtitles"] as? [String]) and loads each with URLSession.shared
+    // — i.e. NO custom headers. Emit the bare URLs here (it ignores labels).
+    const subtitleUrls = curated.map(function (entry) { return entry.url; });
 
-    // Shirox-family builds read [{url,label,kind,headers}] instead.
+    // Header-carrying shapes for clients that CAN send them (Shirox-family
+    // read allSubtitles; SUBTITLES.md §7). Kept because the videoplay.vip VTT
+    // returns HTTP 403 without the Referer — see the note at the end.
     const allSubtitles = curated.map(function (entry) {
       return { url: entry.url, label: entry.label, kind: "subtitles", headers: entry.headers || {} };
     });
@@ -652,8 +654,9 @@ async function extractStreamUrl(url) {
       stream: primary,
       streams: streams.slice(0, 4),
       subtitle: subtitle,
-      subtitles: finalSubtitles,
+      subtitles: subtitleUrls,
       subtitlesHeaders: subtitleHeaders || {},
+      subtitleHeaders: subtitleHeaders || {},
       allSubtitles: allSubtitles,
     });
   } catch (e) {
