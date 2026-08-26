@@ -9,7 +9,7 @@
   "quality": "HD",
   "baseUrl": "https://diziwatch8.com",
   "searchBaseUrl": "https://diziwatch8.com",
-  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/diziwatch-softsub-seasons/diziwatch.js",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/pull/1/head/diziwatch.js",
   "type": "anime",
   "asyncJS": true,
   "softsub": true,
