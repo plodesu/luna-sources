@@ -4,7 +4,12 @@
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
  * Player: videoplay.vip → HLS master (A/V together)
- * v1.0.5
+ * Subtitle: embedded tracks from the player (Provider C) — must carry
+ *   the player Referer header (403 without it). Emitted as both
+ *   `subtitles` pair-array and `allSubtitles`, per documentation/SUBTITLES.md §4/§6/§7.
+ * Async: bounded response cache (static pages only) to avoid redundant
+ *   fetches across the flow; the player page is never cached (expiring token).
+ * v1.2.0
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -18,7 +23,9 @@ async function soraFetch(url, options) {
       "User-Agent": UA,
       "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
       Accept: "text/html,application/json,*/*",
+      // The fetchv2 bridge cannot decompress gzip/brotli (SUBTITLES.md §8).
       Referer: baseUrl + "/",
+      "Accept-Encoding": "identity",
     },
     options.headers || {}
   );
@@ -52,11 +59,44 @@ async function getText(res) {
   }
 }
 
-async function getJson(res) {
-  const t = await getText(res);
-  if (!t) return null;
+/* ---------------------------------------------------------------- *
+ *  Bounded in-memory response cache (SUBTITLES.md §8).              *
+ *  Caches only successful (2xx) non-empty bodies, keyed by URL.     *
+ *  The same module instance handles the whole flow (search →        *
+ *  details → episodes → stream), so the series page fetched by      *
+ *  extractDetails/extractEpisodes is reused by extractStreamUrl,    *
+ *  and re-opening an episode reuses its already-fetched player page.*
+ * ---------------------------------------------------------------- */
+const __httpCache = Object.create(null);
+const __httpCacheMax = 80;
+function __cacheSet(key, value) {
+  const keys = Object.keys(__httpCache);
+  if (keys.length >= __httpCacheMax) delete __httpCache[keys[0]];
+  __httpCache[key] = value;
+}
+
+async function cachedText(url, options) {
+  if (typeof __httpCache[url] === "string") return __httpCache[url];
+  const res = await soraFetch(url, options);
+  const text = await getText(res);
+  if (!text) return text; // don't cache failures
+  // `.status` is present on the fetchv2 bridge response; the legacy
+  // `fetch` fallback returns a bare string with no status, treat as ok.
+  const status =
+    res && res.status != null
+      ? res.status
+      : res && res.ok === false
+        ? 500
+        : 200;
+  if (status >= 200 && status < 300) __cacheSet(url, text);
+  return text;
+}
+
+async function cachedJson(url, options) {
+  const text = await cachedText(url, options);
+  if (!text) return null;
   try {
-    return JSON.parse(t);
+    return JSON.parse(text);
   } catch (e) {
     return null;
   }
@@ -141,13 +181,14 @@ function parseHref(url) {
 function extractPlayerEmbed(html, epUrl) {
   if (!html) return "";
 
+  // Player URL form: /dizi/{contentId}/{s}/{e} (series) OR /film/{contentId} (movie)
   let m = html.match(
-    /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
+    /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/(?:dizi|film)\/[^"']+)["']/i
   );
   if (m) return m[1];
 
   m = html.match(
-    /(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s<>]*)/i
+    /(https?:\/\/videoplay\.vip\/(?:dizi|film)\/[^"'\s<>]+)/i
   );
   if (m) return m[1];
 
@@ -158,18 +199,21 @@ function extractPlayerEmbed(html, epUrl) {
     try {
       const dec = b64decode(m[1]);
       const u = dec.match(
-        /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
+        /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/(?:dizi|film)\/[^"']+)["']/i
       );
       if (u) return u[1];
       const u2 = dec.match(
-        /(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s]*)/i
+        /(https?:\/\/videoplay\.vip\/(?:dizi|film)\/[^"'\s]*)/i
       );
       if (u2) return u2[1];
     } catch (e) {}
   }
 
+  const p = parseHref(epUrl || "");
+
+  // Series progressKey: "<contentId>_<season>_<episode>"
   m = html.match(/progressKey\s*=\s*['"](\d+)_(\d+)_(\d+)['"]/);
-  if (m)
+  if (m) {
     return (
       playerHost +
       "/dizi/" +
@@ -180,8 +224,9 @@ function extractPlayerEmbed(html, epUrl) {
       m[3] +
       "?sid=diziwatch8.com"
     );
+  }
 
-  const p = parseHref(epUrl || "");
+  // Series fallback: poster/backdrop id + season/episode parsed from the URL
   const idMatch = html.match(
     /(?:dizi_poster|bolum_|dizi_backdrop)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
   );
@@ -197,6 +242,17 @@ function extractPlayerEmbed(html, epUrl) {
       "?sid=diziwatch8.com"
     );
   }
+
+  // Movie progressKey: "<contentId>" (single number, no season/episode)
+  m = html.match(/progressKey\s*=\s*['"](\d+)['"]/);
+  if (m) return playerHost + "/film/" + m[1] + "?sid=diziwatch8.com";
+
+  // Movie fallback: poster/backdrop id
+  const fim = html.match(
+    /(?:film_poster|film_backdrop|dizi_poster|bolum_)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
+  );
+  if (fim && p.type === "movie")
+    return playerHost + "/film/" + fim[1] + "?sid=diziwatch8.com";
 
   return "";
 }
@@ -272,22 +328,73 @@ function parsePlayerPage(html) {
   return result;
 }
 
+/**
+ * Build the app-facing subtitle shapes from embedded tracks (Provider C).
+ * SUBTITLES.md §4/§6/§7: keep per-track headers alive (Referer!), dedupe by
+ * URL, emit BOTH `subtitles` (flat [label,url,…] pair-array) and
+ * `allSubtitles` ([{url,label,headers}]) so every client reads the key it
+ * knows. `subtitle`/`subtitleHeaders` is the auto-load default.
+ */
+function buildSubtitleFields(tracks, subHeaders) {
+  const out = {
+    subtitle: "",
+    subtitleHeaders: subHeaders || null,
+    subtitles: [],
+    allSubtitles: [],
+  };
+  if (!tracks || !tracks.length) return out;
+
+  const seen = {};
+  const uniq = [];
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if (!t || !t.url) continue;
+    const key = String(t.url);
+    if (seen[key]) continue;
+    seen[key] = true;
+    uniq.push(t);
+  }
+
+  // Default (auto-load): the provider's own default track, else the first.
+  let def = null;
+  for (let i = 0; i < uniq.length; i++) {
+    if (uniq[i].default) {
+      def = uniq[i];
+      break;
+    }
+  }
+  if (!def) def = uniq[0];
+
+  const pairs = [];
+  const all = [];
+  for (let i = 0; i < uniq.length; i++) {
+    const t = uniq[i];
+    const label = decodeEntities(String(t.label || t.lang || "Sub"));
+    pairs.push(label);
+    pairs.push(String(t.url));
+    all.push({ url: String(t.url), label: label, headers: subHeaders });
+  }
+
+  out.subtitle = String(def.url);
+  out.subtitles = pairs;
+  out.allSubtitles = all;
+  return out;
+}
+
 /* ===================== SEARCH ===================== */
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
-    const data = await getJson(
-      await soraFetch(
-        baseUrl + "/api/search.php?q=" + encodeURIComponent(cleaned),
-        {
-          headers: {
-            "User-Agent": UA,
-            Accept: "application/json",
-            Referer: baseUrl + "/",
-          },
-        }
-      )
+    const data = await cachedJson(
+      baseUrl + "/api/search.php?q=" + encodeURIComponent(cleaned),
+      {
+        headers: {
+          "User-Agent": UA,
+          Accept: "application/json",
+          Referer: baseUrl + "/",
+        },
+      }
     );
     const list = (data && data.results) || [];
     const results = [];
@@ -325,7 +432,7 @@ async function extractDetails(url) {
     const p = parseHref(url);
     let page = String(url);
     if (p.type === "episode" && p.slug) page = baseUrl + "/dizi/" + p.slug;
-    const html = await getText(await soraFetch(page));
+    const html = await cachedText(page);
     let description = "N/A";
     const dm =
       html.match(
@@ -361,12 +468,27 @@ async function extractDetails(url) {
 async function extractEpisodes(url) {
   try {
     const p = parseHref(url);
+
+    // Movies have no episode list — expose the film itself as a single
+    // entry so the client can play it (see extractStreamUrl / /film/*).
+    if (p.type === "movie") {
+      return JSON.stringify([
+        {
+          href: String(url),
+          number: 1,
+          season: 1,
+          episode: 1,
+          title: "Film · 1 Bölüm",
+        },
+      ]);
+    }
+
     const seriesUrl =
       p.slug && p.type !== "movie"
         ? baseUrl + "/dizi/" + p.slug
         : String(url);
 
-    const html = await getText(await soraFetch(seriesUrl));
+    const html = await cachedText(seriesUrl);
     const raw = [];
     const seen = {};
 
@@ -435,7 +557,7 @@ async function extractStreamUrl(url) {
 
     // Series page → first episode
     if (/\/dizi\//i.test(epUrl) && !/\/bolum\//i.test(epUrl)) {
-      const seriesHtml = await getText(await soraFetch(epUrl));
+      const seriesHtml = await cachedText(epUrl);
       const all = [];
       const re =
         /href="((?:https?:\/\/[^"]+)?\/bolum\/[^"]+?-(\d+)-sezon-(\d+)-bolum\/?)"/gi;
@@ -454,11 +576,9 @@ async function extractStreamUrl(url) {
       epUrl = all[0].href;
     }
 
-    const epHtml = await getText(
-      await soraFetch(epUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
+    const epHtml = await cachedText(epUrl, {
+      headers: { Referer: baseUrl + "/", "User-Agent": UA },
+    });
     if (!epHtml || epHtml.length < 200)
       return JSON.stringify({ streams: [], subtitles: "" });
 
@@ -466,6 +586,8 @@ async function extractStreamUrl(url) {
     if (!embed || !isHttp(embed))
       return JSON.stringify({ streams: [], subtitles: "" });
 
+    // NOTE: the player page is NOT cached — its HLS master carries an
+    // expiring token, so a cached page could serve a dead stream URL.
     const playerHtml = await getText(
       await soraFetch(embed, {
         headers: {
@@ -490,26 +612,42 @@ async function extractStreamUrl(url) {
       Origin: playerHost,
     };
 
-    let subtitles = "";
-    if (parsed.subs.length) {
-      subtitles = forceHttps(parsed.subs[0].url);
-    }
+    // Subtitle tracks come from the player origin and 403 without the
+    // Referer/Origin (SUBTITLES.md §4) — keep the headers on every track so
+    // the app doesn't render an empty track (§7).
+    const subHeaders = {
+      "User-Agent": UA,
+      Accept: "text/vtt,*/*",
+      Referer: playerHost + "/",
+      Origin: playerHost,
+    };
+    const subFields = buildSubtitleFields(parsed.subs, subHeaders);
 
     // Master only — keeps VIDEO + AUDIO together (better for Luna)
     const streams = [];
     for (let i = 0; i < parsed.hls.length; i++) {
       const master = forceHttps(parsed.hls[i]);
       if (!isHttp(master)) continue;
-      streams.push({
+      const stream = {
         title: i === 0 ? "Videoplay · HLS" : "Videoplay · HLS " + (i + 1),
         streamUrl: master,
         headers: headers,
-      });
+      };
+      if (subFields.subtitle) {
+        stream.subtitle = subFields.subtitle;
+        stream.subtitleHeaders = subFields.subtitleHeaders;
+      }
+      if (subFields.subtitles.length) stream.subtitles = subFields.subtitles;
+      if (subFields.allSubtitles.length)
+        stream.allSubtitles = subFields.allSubtitles;
+      streams.push(stream);
     }
 
     return JSON.stringify({
       streams: streams.slice(0, 4),
-      subtitles: subtitles || "",
+      // Backwards-compatible top-level default for clients that read the
+      // simple root key (older SoftSubs readers / Mojuru).
+      subtitles: subFields.subtitle || "",
     });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "" });
