@@ -1,0 +1,21 @@
+{
+  "sourceName": "diziwatch",
+  "iconUrl": "https://diziwatch8.com/uploads/assets/6a73a9d7aaee6_1785965015.png",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
+  "language": "Turkish",
+  "languageType": ["Subbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://diziwatch8.com",
+  "searchBaseUrl": "https://diziwatch8.com",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/diziwatch.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
