@@ -1,5 +1,5 @@
 {
-  "sourceName": "diziwatch Her sezon arama sonuçlarına karışıyor. Örneğin, 1.001. bölüm 1. sezon 1. bölüm, 2.001. bölüm ise 2. sezon 1. bölüm olarak görünüyor ve bu şekilde devam ediyor. Ayrıca bazı animelerde, örneğin Bleach’te, altyazılar görünmüyor.",
+  "sourceName": "diziwatch Arama sonuçlarında sezonlar birbirine karışıyor. Örneğin, 1001. bölüm "1. Sezon, 1. Bölüm" olarak görünürken, 2001. bölüm "2. Sezon, 1. Bölüm" olarak görünüyor. Ayrıca bazı animelerde altyazılar eksik; *Bleach* gibi yapımlarda hatalar mevcut ("Luna" yerine "Sora" kullanıldığında daha iyi çalışıyor).",
   "iconUrl": "https://diziwatch8.com/uploads/assets/6a73a9d7aaee6_1785965015.png",
   "author": { "name": "plodesu", "icon": "" },
   "version": "1.0.5",
