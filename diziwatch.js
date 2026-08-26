@@ -4,22 +4,29 @@
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
  * Player: videoplay.vip → HLS master (A/V together)
- * Subtitle: embedded tracks from the player (Provider C).
- *   - `subtitles` = [String] URLs (the Sora/Sulfur client reads this as an
- *     array of URL strings and loads each with URLSession.shared — NO custom
- *     headers, so a Referer-gated CDN blanks them).
- *   - `allSubtitles`/`subtitlesHeaders` carry the Referer for clients that
- *     can send headers.
- *   Note: videoplay.vip VTT returns HTTP 403 without a Referer, so the
- *   Sora/Sulfur client (which sends none) cannot render these.
- * Async: bounded response cache (static pages only) to avoid redundant
- *   fetches across the flow; the player page is never cached (expiring token).
+ * Subtitle: BOTH sources, so every client shows subs.
+ *   - Provider C (site/player embedded): `allSubtitles` carries the Referer
+ *     (videoplay.vip 403 without it) for clients that send per-track headers.
+ *   - Provider A (keyless OpenSubtitles v3): HEADER-FREE URLs that the
+ *     Sora/Sulfur client can load (it reads `subtitles` as [String] and
+ *     fetches each with URLSession.shared — no headers). Resolved via keyless
+ *     Cinemeta title -> IMDb id. Best-effort + success-cached.
+ *   `subtitles` = header-free [String] URLs; `allSubtitles` = both sources.
  * Episodes: number = in-season episode number + separate `season` field
  *   (docs contract), so clients render "Sezon X / Bölüm Y" instead of "1001".
- * v1.4.1
+ * Async: bounded response cache (static pages only) to avoid redundant
+ *   fetches across the flow; the player page is never cached (expiring token).
+ * v1.5.0
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
+// Keyless providers (SUBTITLES.md) for HEADER-FREE subtitles. The diziwatch
+// player's own tracks are Referer-gated (videoplay.vip 403 without it), and
+// the Sora/Sulfur client loads `subtitles` with URLSession.shared (NO custom
+// headers), so those can never render there. OpenSubtitles URLs need no
+// header and DO load in every client. Cinemeta resolves the title -> IMDb id.
+const OS_V3 = "https://opensubtitles-v3.strem.io";
+const CINEMETA = "https://v3-cinemeta.strem.io";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
@@ -340,6 +347,20 @@ function parsePlayerPage(html) {
  * by URL, preserving the provider's rank order. Each entry carries its own
  * headers (Referer!) so the app can fetch the VTT without a 403 (§4).
  */
+// Human-readable labels for 3-letter subtitle language codes.
+const LANG_NAMES = {
+  en: "English", eng: "English", tr: "Türkçe", tur: "Türkçe",
+  spa: "Español", es: "Español", por: "Português", por: "Português",
+  pob: "Português (BR)", pt: "Português", fra: "Français", fre: "Français",
+  deu: "Deutsch", ger: "Deutsch", ita: "Italiano", kor: "한국어", ko: "한국어",
+  jpn: "日本語", ja: "日本語", ara: "العربية", rus: "Русский", ru: "Русский",
+  vie: "Tiếng Việt", vi: "Tiếng Việt", zho: "中文", zh: "中文", pol: "Polski",
+  ukr: "Українська", heb: "עברית", fas: "فارسی", ind: "Indonesia",
+};
+function langLabel(code) {
+  return LANG_NAMES[String(code || "").toLowerCase()] || String(code || "Sub");
+}
+
 function curatedSubtitleEntries(tracks, subHeaders) {
   const out = [];
   const seenUrl = {};
@@ -361,6 +382,72 @@ function curatedSubtitleEntries(tracks, subHeaders) {
     });
   }
   return out;
+}
+
+/* ---------------- Header-free subtitle providers (SUBTITLES.md) --------- *
+ * The diziwatch player's own tracks are Referer-gated and the Sora/Sulfur
+ * client fetches `subtitles` with URLSession.shared (no headers), so those
+ * can't render there. OpenSubtitles URLs need no header, so they load in
+ * every client. Resolve the title -> IMDb id via keyless Cinemeta, then pull
+ * the episode's OpenSubtitles v3 tracks. All success-cached.
+ * ----------------------------------------------------------------------- */
+const __imdbCache = {};
+async function resolveImdbId(title, type) {
+  if (!title) return "";
+  const key = type + ":" + String(title).trim().toLowerCase();
+  if (__imdbCache[key]) return __imdbCache[key];
+  try {
+    const r = await cachedJson(
+      CINEMETA + "/catalog/" + type + "/top/search=" + encodeURIComponent(title) + ".json"
+    );
+    const metas = (r && r.metas) || [];
+    if (!metas.length) return "";
+    const lower = String(title).trim().toLowerCase();
+    let best = null;
+    for (let i = 0; i < metas.length; i++) {
+      if (String(metas[i].name || "").toLowerCase() === lower) { best = metas[i]; break; }
+    }
+    if (!best) {
+      for (let i = 0; i < metas.length; i++) {
+        if (String(metas[i].name || "").toLowerCase().indexOf(lower) === 0) { best = metas[i]; break; }
+      }
+    }
+    if (!best) best = metas[0];
+    const id = String((best && best.id) || "");
+    if (id) __imdbCache[key] = id;
+    return id;
+  } catch (e) {
+    return "";
+  }
+}
+
+async function fetchStremioSubs(imdbId, type, s, e) {
+  if (!imdbId) return [];
+  // Series MUST use the colon path imdbId:s:e (SUBTITLES.md §2); the query
+  // form is silently ignored by the addon.
+  const id = type === "series"
+    ? imdbId + ":" + encodeURIComponent(s) + ":" + encodeURIComponent(e)
+    : imdbId;
+  try {
+    const r = await cachedJson(OS_V3 + "/subtitles/" + type + "/" + id + ".json", {
+      headers: { Accept: "application/json", Referer: "https://app.strem.io/" },
+    });
+    const subs = (r && r.subtitles) || [];
+    const out = [];
+    const seen = {};
+    for (let i = 0; i < subs.length; i++) {
+      const sub = subs[i];
+      if (!sub || !sub.url) continue;
+      const url = String(sub.url);
+      if (seen[url]) continue;
+      seen[url] = true;
+      const code = String(sub.lang || "und").toLowerCase();
+      out.push({ lang: code, url: url, label: langLabel(code) });
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
 }
 
 /* ===================== SEARCH ===================== */
@@ -607,8 +694,9 @@ async function extractStreamUrl(url) {
     };
     const curated = curatedSubtitleEntries(parsed.subs, subHeaders);
 
-    // Default (auto-load) subtitle: the provider's own default track, else
-    // the first one available. For diziwatch that is the Turkish track.
+    // Default (auto-load) subtitle for HEADER-CAPABLE clients: the player's
+    // own default track (Turkish on diziwatch), with its Referer headers kept
+    // attached (SUBTITLES.md §7).
     let subtitle = "";
     let subtitleHeaders = null;
     if (curated.length) {
@@ -623,17 +711,44 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // The Sora/Sulfur client reads `subtitles` as an array of URL strings
-    // (json["subtitles"] as? [String]) and loads each with URLSession.shared
-    // — i.e. NO custom headers. Emit the bare URLs here (it ignores labels).
-    const subtitleUrls = curated.map(function (entry) { return entry.url; });
+    // Header-free OpenSubtitles tracks (SUBTITLES.md provider A). The
+    // Sora/Sulfur client loads `subtitles` with URLSession.shared (no
+    // headers), so the Referer-gated videoplay.vip tracks can never render
+    // there; OpenSubtitles URLs need no header and load in every client.
+    // Best-effort and success-cached; never blocks the stream list.
+    let osSubs = [];
+    try {
+      const hf = parseHref(epUrl);
+      const isMovie = /\/film\//i.test(epUrl) || hf.type === "movie";
+      const type = isMovie ? "movie" : "series";
+      const s = isMovie ? 1 : (hf.season || 1);
+      const e = isMovie ? 1 : (hf.episode || 1);
+      const title = String(hf.slug || "").replace(/-/g, " ").trim();
+      const imdbId = await resolveImdbId(title, type);
+      if (imdbId) osSubs = await fetchStremioSubs(imdbId, type, s, e);
+    } catch (e2) { osSubs = []; }
+    // Order header-free tracks: Turkish first, then English, then the rest.
+    osSubs.sort(function (a, b) {
+      function r(x) { if (/^(tr|tur)$/i.test(x.lang)) return 0; if (/^(en|eng)$/i.test(x.lang)) return 1; return 2; }
+      return r(a) - r(b);
+    });
+    const osEntries = curatedSubtitleEntries(osSubs, null);
 
-    // Header-carrying shapes for clients that CAN send them (Shirox-family
-    // read allSubtitles; SUBTITLES.md §7). Kept because the videoplay.vip VTT
-    // returns HTTP 403 without the Referer — see the note at the end.
+    // `subtitles` = header-free URLs only (these are what the Sora/Sulfur
+    // client can actually load without a Referer). Keep OpenSubtitles ahead of
+    // the site tracks so the auto-load picks a loadable track.
+    const subtitleUrls = osEntries.length
+      ? osEntries.map(function (x) { return x.url; })
+      : curated.map(function (x) { return x.url; });
+
+    // Header-carrying list for clients that send per-track headers
+    // (Shirox-family / SUBTITLES.md §7): site tracks keep their Referer,
+    // OpenSubtitles need none.
     const allSubtitles = curated.map(function (entry) {
       return { url: entry.url, label: entry.label, kind: "subtitles", headers: entry.headers || {} };
-    });
+    }).concat(osEntries.map(function (entry) {
+      return { url: entry.url, label: entry.label, kind: "subtitles", headers: entry.headers || {} };
+    }));
 
     // Master only — keeps VIDEO + AUDIO together (better for Luna)
     const streams = [];
