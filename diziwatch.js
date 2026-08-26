@@ -9,7 +9,9 @@
  *   `subtitles` pair-array and `allSubtitles`, per documentation/SUBTITLES.md §4/§6/§7.
  * Async: bounded response cache (static pages only) to avoid redundant
  *   fetches across the flow; the player page is never cached (expiring token).
- * v1.2.0
+ * Episodes: number = in-season episode number + separate `season` field
+ *   (docs contract), so clients render "Sezon X / Bölüm Y" instead of "1001".
+ * v1.3.0
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -462,8 +464,10 @@ async function extractDetails(url) {
 
 /* ===================== EPISODES ===================== */
 /**
- * number = season*1000 + episode → S3E1 = 3001 (TMDB multi-season safe)
- * title  = S03E01 · …
+ * number = episode number within its season (docs contract: extractEpisodes
+ * → {href, number:"1", season}). A separate `season` field lets the client
+ * group/display seasons; an app-facing `title` carries "S03E01 · …".
+ * (Do NOT use season*1000+episode — clients render that literal "1001".)
  */
 async function extractEpisodes(url) {
   try {
@@ -514,7 +518,7 @@ async function extractEpisodes(url) {
       const code = "S" + pad2(e.season) + "E" + pad2(e.episode);
       return {
         href: e.href,
-        number: e.season * 1000 + e.episode,
+        number: e.episode,
         season: e.season,
         episode: e.episode,
         title: code + " · " + e.season + ". Sezon " + e.episode + ". Bölüm",
@@ -527,7 +531,7 @@ async function extractEpisodes(url) {
       const e = pe.episode || 1;
       eps.push({
         href: String(url),
-        number: s * 1000 + e,
+        number: e,
         season: s,
         episode: e,
         title: "S" + pad2(s) + "E" + pad2(e),
@@ -539,7 +543,7 @@ async function extractEpisodes(url) {
     return JSON.stringify([
       {
         href: String(url),
-        number: 1001,
+        number: 1,
         season: 1,
         episode: 1,
         title: "S01E01",
