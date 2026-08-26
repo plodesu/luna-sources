@@ -1,0 +1,21 @@
+{
+  "sourceName": "ÇizgiMax",
+  "iconUrl": "https://cizgimax.online/favicon.ico",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
+  "language": "Turkish",
+  "languageType": ["Subbed", "Dubbed"],
+  "streamType": "MP4",
+  "quality": "HD",
+  "baseUrl": "https://cizgimax.online",
+  "searchBaseUrl": "https://cizgimax.online",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/cizgimax.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
