@@ -1,40 +1,63 @@
 /**
- * GogoAnimeZ - Sora / Luna
+ * GogoAnimeZ / Anitaku
+ * Sora + Luna
  *
- * Search + series + episodes + stream extraction
- * + Turkish-only soft subtitles.
+ * Search
+ * Series
+ * Episodes
+ * Stream extraction
+ * Turkish subtitles only
  *
- * Subtitle pipeline:
- *   Gogo page -> IMDb id -> OpenSubtitles v3 + legacy REST
- *   -> validate S/E from release names -> Turkish only
+ * Current site structure:
+ *   /series/<slug>/
+ *   /<anime>-episode-<number>-english-subbed/
  *
- * v1.0.0
+ * v2.0.0
  */
 
 const baseUrl = "https://gogoanimez.to";
-const UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
-const OS_V3 = "https://opensubtitles-v3.strem.io";
-const OS_REST = "https://rest.opensubtitles.org/search";
-const IMDB_SUGGEST = "https://v3.sg.media-imdb.com/suggestion/x/";
+const UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+
+const KITSU =
+  "https://kitsu.io/api/edge/anime";
+
+const OS_V3 =
+  "https://opensubtitles-v3.strem.io";
+
+const OS_REST =
+  "https://rest.opensubtitles.org/search";
 
 async function soraFetch(url, options) {
   options = options || {};
 
-  const headers = Object.assign({
-    "User-Agent": UA,
-    "Accept": "text/html,application/json,*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "identity",
-    "Referer": baseUrl + "/"
-  }, options.headers || {});
+  const headers = Object.assign(
+    {
+      "User-Agent": UA,
+      Accept: "text/html,application/json,*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept-Encoding": "identity",
+      Referer: baseUrl + "/"
+    },
+    options.headers || {}
+  );
 
-  const method = options.method || "GET";
-  const body = options.body || null;
+  const method =
+    options.method || "GET";
+
+  const body =
+    options.body || null;
 
   try {
     if (typeof fetchv2 === "function") {
-      const r = await fetchv2(url, headers, method, body);
+      const r = await fetchv2(
+        url,
+        headers,
+        method,
+        body
+      );
+
       if (r) return r;
     }
   } catch (e) {}
@@ -51,20 +74,33 @@ async function soraFetch(url, options) {
 }
 
 async function getText(res) {
-  if (res == null) return "";
+  if (!res) return "";
 
   try {
-    if (typeof res === "string") return res;
-
-    if (typeof res.text === "function") {
-      return String((await res.text()) || "");
+    if (typeof res === "string") {
+      return res;
     }
 
-    if (typeof res.data === "string") {
+    if (
+      typeof res.text ===
+      "function"
+    ) {
+      return String(
+        (await res.text()) || ""
+      );
+    }
+
+    if (
+      typeof res.data ===
+      "string"
+    ) {
       return res.data;
     }
 
-    if (typeof res.body === "string") {
+    if (
+      typeof res.body ===
+      "string"
+    ) {
       return res.body;
     }
 
@@ -74,24 +110,37 @@ async function getText(res) {
   }
 }
 
-async function getJSON(url, headers) {
-  const text = await getText(
-    await soraFetch(url, {
-      headers: headers || {}
-    })
-  );
+async function getJSON(
+  url,
+  options
+) {
+  const text =
+    await getText(
+      await soraFetch(
+        url,
+        options || {}
+      )
+    );
 
   if (!text) return null;
 
   try {
     return JSON.parse(text);
   } catch (e) {
-    const a = text.indexOf("{");
-    const b = text.lastIndexOf("}");
+    const a =
+      text.indexOf("{");
 
-    if (a >= 0 && b > a) {
+    const b =
+      text.lastIndexOf("}");
+
+    if (
+      a >= 0 &&
+      b > a
+    ) {
       try {
-        return JSON.parse(text.slice(a, b + 1));
+        return JSON.parse(
+          text.slice(a, b + 1)
+        );
       } catch (e2) {}
     }
   }
@@ -99,495 +148,696 @@ async function getJSON(url, headers) {
   return null;
 }
 
+/* =========================================================
+ * HELPERS
+ * ========================================================= */
+
 function decodeEntities(s) {
-  let x = String(s || "");
-
-  for (let i = 0; i < 3; i++) {
-    x = x
-      .replace(/&amp;/gi, "&")
-      .replace(/&quot;/gi, '"')
-      .replace(/&#039;|&#39;/gi, "'")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&ouml;/gi, "ö")
-      .replace(/&Ouml;/g, "Ö")
-      .replace(/&uuml;/gi, "ü")
-      .replace(/&Uuml;/g, "Ü")
-      .replace(/&ccedil;/gi, "ç")
-      .replace(/&Ccedil;/g, "Ç")
-      .replace(/&scedil;/gi, "ş")
-      .replace(/&Scedil;/g, "Ş")
-      .replace(/&eacute;/gi, "é")
-      .replace(/&Eacute;/g, "É")
-      .replace(/&#x([0-9a-f]+);/gi, function (_, h) {
-        return String.fromCharCode(parseInt(h, 16));
-      })
-      .replace(/&#(\d+);/g, function (_, n) {
-        return String.fromCharCode(parseInt(n, 10));
-      });
-  }
-
-  return x;
+  return String(s || "")
+    .replace(
+      /&amp;/gi,
+      "&"
+    )
+    .replace(
+      /&quot;/gi,
+      '"'
+    )
+    .replace(
+      /&#039;|&#39;/gi,
+      "'"
+    )
+    .replace(
+      /&lt;/gi,
+      "<"
+    )
+    .replace(
+      /&gt;/gi,
+      ">"
+    )
+    .replace(
+      /&nbsp;/gi,
+      " "
+    )
+    .replace(
+      /&#x([0-9a-f]+);/gi,
+      function (_, h) {
+        return String.fromCharCode(
+          parseInt(h, 16)
+        );
+      }
+    )
+    .replace(
+      /&#(\d+);/g,
+      function (_, n) {
+        return String.fromCharCode(
+          parseInt(n, 10)
+        );
+      }
+    );
 }
 
 function cleanText(s) {
-  return decodeEntities(String(s || ""))
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
+  return decodeEntities(
+    String(s || "")
+  )
+    .replace(
+      /<[^>]*>/g,
+      " "
+    )
+    .replace(
+      /\s+/g,
+      " "
+    )
     .trim();
 }
 
-function isHttp(u) {
-  return /^https?:\/\//i.test(String(u || ""));
+function unique(arr) {
+  const seen = {};
+
+  return arr.filter(
+    function (x) {
+      const k =
+        String(x || "");
+
+      if (!k || seen[k]) {
+        return false;
+      }
+
+      seen[k] = true;
+      return true;
+    }
+  );
 }
 
-function absUrl(u, parent) {
-  u = decodeEntities(String(u || "").trim())
-    .replace(/\\\//g, "/")
-    .replace(/\\u0026/g, "&");
+function absUrl(
+  value,
+  parent
+) {
+  let u =
+    decodeEntities(
+      String(value || "")
+    )
+      .replace(
+        /\\\//g,
+        "/"
+      )
+      .replace(
+        /\\u0026/g,
+        "&"
+      )
+      .trim();
 
   if (!u) return "";
 
-  if (u.indexOf("//") === 0) {
+  if (
+    u.indexOf("//") ===
+    0
+  ) {
     return "https:" + u;
   }
 
-  if (isHttp(u)) {
+  if (
+    /^https?:\/\//i.test(u)
+  ) {
     return u;
   }
 
   try {
-    return new URL(u, parent || baseUrl).toString();
+    return new URL(
+      u,
+      parent || baseUrl
+    ).toString();
   } catch (e) {}
 
-  return u.charAt(0) === "/"
-    ? baseUrl + u
-    : u;
-}
+  if (
+    u.charAt(0) === "/"
+  ) {
+    return (
+      baseUrl + u
+    );
+  }
 
-function unique(a) {
-  const s = {};
-
-  return a.filter(function (x) {
-    x = String(x || "");
-
-    if (!x || s[x]) {
-      return false;
-    }
-
-    s[x] = true;
-    return true;
-  });
+  return u;
 }
 
 function slugify(s) {
   return String(s || "")
     .toLowerCase()
-    .replace(/['’]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .normalize("NFKD")
+    .replace(
+      /[\u0300-\u036f]/g,
+      ""
+    )
+    .replace(
+      /&/g,
+      " and "
+    )
+    .replace(
+      /[^a-z0-9]+/g,
+      "-"
+    )
+    .replace(
+      /^-+|-+$/g,
+      "");
 }
 
-/* =========================================================
- * HTML
- * ========================================================= */
-
-function extractTitle(html) {
-  let m = html.match(
-    /<h1[^>]*>([\s\S]*?)<\/h1>/i
-  );
+function getTitleFromHtml(
+  html
+) {
+  let m =
+    html.match(
+      /<h1[^>]*>([\s\S]*?)<\/h1>/i
+    );
 
   if (m) {
     return cleanText(m[1]);
   }
 
-  m = html.match(
-    /<title[^>]*>([\s\S]*?)<\/title>/i
-  );
+  m =
+    html.match(
+      /<title[^>]*>([\s\S]*?)<\/title>/i
+    );
 
-  return m
-    ? cleanText(m[1])
-        .replace(/\s*[-|]\s*Gogoanime.*$/i, "")
-    : "";
-}
-
-function meta(html, key) {
-  let m = html.match(
-    new RegExp(
-      '<meta[^>]+(?:name|property)=["\\\']' +
-        key +
-        '["\\\'][^>]+content=["\\\']([^"\\\']*)',
-      "i"
-    )
-  );
-
-  if (!m) {
-    m = html.match(
-      new RegExp(
-        '<meta[^>]+content=["\\\']([^"\\\']*)["\\\'][^>]+(?:name|property)=["\\\']' +
-          key +
-          '["\\\']',
-        "i"
-      )
+  if (m) {
+    return cleanText(
+      m[1]
+    ).replace(
+      /\s*[-|]\s*(Gogoanime|Anitaku).*$/i,
+      ""
     );
   }
 
-  return m ? cleanText(m[1]) : "";
+  return "";
 }
 
-function images(html, parent) {
-  const out = [];
-  let m;
-
-  const rs = [
-    /property=["']og:image["'][^>]+content=["']([^"']+)["']/gi,
-    /<img[^>]+(?:data-src|data-original|src)=["']([^"']+)["']/gi
-  ];
-
-  rs.forEach(function (re) {
-    while ((m = re.exec(html))) {
-      const u = absUrl(m[1], parent);
-
-      if (
-        u &&
-        !/^data:/i.test(u) &&
-        !/logo|avatar|banner|advert/i.test(u)
-      ) {
-        out.push(u);
-      }
-    }
-  });
-
-  return unique(out);
-}
-
-function links(html, parent) {
-  const out = [];
+function getLinks(
+  html,
+  parent
+) {
+  const result = [];
   let m;
 
   const re =
-    /<a\b([^>]*?)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+    /<a\b([^>]*)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi;
 
-  while ((m = re.exec(html))) {
-    out.push({
-      href: absUrl(m[2], parent),
-      text: cleanText(m[4]),
-      attrs: (m[1] || "") + " " + (m[3] || "")
+  while (
+    (m = re.exec(html))
+  ) {
+    result.push({
+      href: absUrl(
+        m[2],
+        parent
+      ),
+      text: cleanText(
+        m[4]
+      ),
+      attrs:
+        (m[1] || "") +
+        " " +
+        (m[3] || "")
     });
   }
 
-  return out;
+  return result;
 }
 
-function iframes(html, parent) {
-  const out = [];
+function getIframes(
+  html,
+  parent
+) {
+  const result = [];
   let m;
 
   const re =
-    /<(?:iframe|embed)[^>]+(?:src|data-src)=["']([^"']+)["']/gi;
+    /<(?:iframe|embed)[^>]+(?:src|data-src|data-video)=["']([^"']+)["']/gi;
 
-  while ((m = re.exec(html))) {
-    const u = absUrl(m[1], parent);
+  while (
+    (m = re.exec(html))
+  ) {
+    const u =
+      absUrl(
+        m[1],
+        parent
+      );
 
-    if (isHttp(u)) {
-      out.push(u);
+    if (
+      /^https?:\/\//i.test(u)
+    ) {
+      result.push(u);
     }
   }
 
-  return unique(out);
-}
-
-/* =========================================================
- * MEDIA
- * ========================================================= */
-
-function mediaUrls(text, parent) {
-  const out = [];
-  let m;
-
-  if (!text) return out;
-
-  const patterns = [
-    /(?:["'](?:file|src|source|url|videoUrl|hls)["']?\s*[:=]\s*["'])([^"']+)(?:["'])/gi,
-
-    /<source[^>]+(?:src|data-src)=["']([^"']+)["']/gi,
-
-    /https?:\/\/[^"'\\\s<>]+?\.m3u8(?:\?[^"'\\\s<>]*)?/gi,
-
-    /https?:\/\/[^"'\\\s<>]+?\.mp4(?:\?[^"'\\\s<>]*)?/gi
-  ];
-
-  patterns.forEach(function (re, idx) {
-    while ((m = re.exec(text))) {
-      const raw = idx >= 2 ? m[0] : m[1];
-
-      const u = absUrl(raw, parent);
-
-      if (
-        /\.m3u8(?:$|[?#])|\.mp4(?:$|[?#])|\.m4v(?:$|[?#])|\.webm(?:$|[?#])/i.test(
-          u
-        )
-      ) {
-        out.push(u);
-      }
-    }
-  });
-
-  return unique(out);
+  return unique(result);
 }
 
 /* =========================================================
  * EPISODE PARSING
  * ========================================================= */
 
-function episodeNumber(s, fallback) {
-  s = decodeEntities(String(s || ""));
+function getEpisodeNumber(
+  text,
+  fallback
+) {
+  const s =
+    decodeEntities(
+      String(text || "")
+    );
 
   let m =
     s.match(
-      /(?:episode|ep|e)[\s._-]*(\d{1,4})/i
-    ) ||
-    s.match(/-episode-(\d+)/i) ||
-    s.match(
-      /(?:^|[-_. ])(\d{1,4})(?:[-_. ]|$)/
+      /episode[\s._-]*(\d{1,4})/i
     );
 
+  if (!m) {
+    m =
+      s.match(
+        /ep[\s._-]*(\d{1,4})/i
+      );
+  }
+
+  if (!m) {
+    m =
+      s.match(
+        /-episode-(\d{1,4})/i
+      );
+  }
+
+  if (!m) {
+    m =
+      s.match(
+        /\bE(\d{1,4})\b/i
+      );
+  }
+
+  if (!m) {
+    m =
+      s.match(
+        /(?:^|[-_.\s])(\d{1,4})(?:[-_.\s]|$)/
+      );
+  }
+
   return m
-    ? parseInt(m[1], 10)
+    ? parseInt(
+        m[1],
+        10
+      )
     : fallback;
 }
 
-function seasonNumber(s) {
-  const m = String(s || "").match(
-    /season[\s._-]*(\d{1,2})/i
-  );
+function getSeasonNumber(
+  text
+) {
+  const m =
+    String(text || "")
+      .match(
+        /\bseason[\s._-]*(\d{1,2})\b/i
+      );
 
   return m
-    ? parseInt(m[1], 10)
+    ? parseInt(
+        m[1],
+        10
+      )
     : 1;
 }
 
-function parseSubEpisode(name) {
-  const n = String(name || "");
-
-  let m = n.match(
-    /\bS(\d{1,2})[.\-_ ]?E(\d{1,3})\b/i
+function episodeUrlLooksValid(
+  url
+) {
+  return (
+    /episode[-_.]/i.test(
+      url
+    ) ||
+    /\/watch\//i.test(
+      url
+    ) ||
+    /\/episode\//i.test(
+      url
+    )
   );
-
-  if (m) {
-    return {
-      s: +m[1],
-      e: +m[2]
-    };
-  }
-
-  m = n.match(
-    /\b(\d{1,2})x(\d{1,3})\b/i
-  );
-
-  if (m) {
-    return {
-      s: +m[1],
-      e: +m[2]
-    };
-  }
-
-  m = n.match(
-    /\[(\d{1,2})\.(\d{1,3})\]/
-  );
-
-  if (m) {
-    return {
-      s: +m[1],
-      e: +m[2]
-    };
-  }
-
-  m = n.match(
-    /(?:^|[\s\-_.])(\d)(\d{2})(?:[\s\-_.]|$)/
-  );
-
-  if (m) {
-    return {
-      s: +m[1],
-      e: +m[2]
-    };
-  }
-
-  return null;
-}
-
-function animeSlugFromEpisode(url) {
-  const p =
-    String(url || "")
-      .replace(/\/+$/, "")
-      .split("/")
-      .pop() || "";
-
-  const m = p.match(
-    /^(.*?)-episode-\d+(?:-english-subbed|-dubbed)?$/i
-  );
-
-  return m
-    ? m[1]
-    : p.replace(
-        /-episode-\d+.*$/i,
-        ""
-      );
-}
-
-function seriesUrlFromEpisode(url) {
-  const slug = animeSlugFromEpisode(url);
-
-  return slug
-    ? baseUrl + "/series/" + slug + "/"
-    : "";
 }
 
 /* =========================================================
  * SEARCH
  * ========================================================= */
 
-async function searchResults(keyword) {
-  try {
-    const q = cleanText(keyword);
+async function siteSearch(
+  keyword
+) {
+  const q =
+    String(keyword || "")
+      .trim();
 
-    if (!q) {
-      return JSON.stringify([]);
+  if (!q) {
+    return [];
+  }
+
+  const urls = [
+    baseUrl +
+      "/search.html?keyword=" +
+      encodeURIComponent(q),
+
+    baseUrl +
+      "/search?keyword=" +
+      encodeURIComponent(q),
+
+    baseUrl +
+      "/search/?keyword=" +
+      encodeURIComponent(q),
+
+    baseUrl +
+      "/search/?q=" +
+      encodeURIComponent(q),
+
+    baseUrl +
+      "/index.php?s=" +
+      encodeURIComponent(q),
+
+    baseUrl +
+      "/?s=" +
+      encodeURIComponent(q)
+  ];
+
+  for (
+    let i = 0;
+    i < urls.length;
+    i++
+  ) {
+    const html =
+      await getText(
+        await soraFetch(
+          urls[i],
+          {
+            headers: {
+              Referer:
+                baseUrl + "/",
+              Accept:
+                "text/html,*/*"
+            }
+          }
+        )
+      );
+
+    if (
+      !html ||
+      html.length < 500
+    ) {
+      continue;
+    }
+
+    if (
+      /Just a moment|cf-chl-/i.test(
+        html
+      )
+    ) {
+      continue;
     }
 
     const results = [];
     const seen = {};
 
-    function push(href, title, image) {
-      href = absUrl(
-        String(href || "").split("?")[0]
-      );
-
-      if (
-        !href ||
-        seen[href] ||
-        !/\/series\/[^/]+\/?$/i.test(
-          new URL(href).pathname
-        )
-      ) {
-        return;
-      }
-
-      seen[href] = true;
-
-      results.push({
-        title: cleanText(title) || "Anime",
-        image: absUrl(image || ""),
-        href: href
-      });
-    }
-
-    const urls = [
-      baseUrl +
-        "/search.html?keyword=" +
-        encodeURIComponent(q),
-
-      baseUrl +
-        "/search?keyword=" +
-        encodeURIComponent(q),
-
-      baseUrl +
-        "/?s=" +
-        encodeURIComponent(q)
-    ];
-
-    let html = "";
-
-    for (let i = 0; i < urls.length; i++) {
-      html = await getText(
-        await soraFetch(urls[i])
-      );
-
-      if (
-        html &&
-        html.length > 1000 &&
-        !/Just a moment|cf-chl-/i.test(html)
-      ) {
-        break;
-      }
-    }
-
-    if (html) {
-      const ls = links(
+    const links =
+      getLinks(
         html,
         baseUrl
       );
 
-      ls.forEach(function (l) {
-        if (/\/series\//i.test(l.href)) {
-          push(
-            l.href,
-            l.text ||
-              (
-                l.attrs.match(
-                  /title=["']([^"']+)/i
-                ) || []
-              )[1] ||
-              "",
-            ""
-          );
+    links.forEach(
+      function (l) {
+        const path =
+          String(l.href || "");
+
+        if (
+          !/\/series\/[^/]+\/?$/i.test(
+            path
+          )
+        ) {
+          return;
         }
+
+        if (
+          seen[path]
+        ) {
+          return;
+        }
+
+        seen[path] = true;
+
+        results.push({
+          title:
+            l.text ||
+            l.attrs.match(
+              /title=["']([^"']+)["']/i
+            )?.[1] ||
+            "Anime",
+
+          image: "",
+
+          href: path
+        });
+      }
+    );
+
+    if (
+      results.length
+    ) {
+      return results;
+    }
+  }
+
+  return [];
+}
+
+/* =========================================================
+ * KITSU FALLBACK
+ *
+ * Used because the site's own search can be broken.
+ * ========================================================= */
+
+async function kitsuSearch(
+  keyword
+) {
+  try {
+    const url =
+      KITSU +
+      "?filter[text]=" +
+      encodeURIComponent(
+        keyword
+      ) +
+      "&page[limit]=12";
+
+    const d =
+      await getJSON(
+        url,
+        {
+          headers: {
+            Accept:
+              "application/vnd.api+json"
+          }
+        }
+      );
+
+    if (
+      !d ||
+      !Array.isArray(
+        d.data
+      )
+    ) {
+      return [];
+    }
+
+    const results = [];
+
+    for (
+      let i = 0;
+      i < d.data.length;
+      i++
+    ) {
+      const x =
+        d.data[i];
+
+      if (
+        !x ||
+        !x.attributes
+      ) {
+        continue;
+      }
+
+      const a =
+        x.attributes;
+
+      const titles =
+        a.titles || {};
+
+      const title =
+        titles.en ||
+        titles.en_jp ||
+        titles.ja_jp ||
+        titles.romaji ||
+        a.canonicalTitle ||
+        "";
+
+      if (!title) {
+        continue;
+      }
+
+      const slug =
+        slugify(title);
+
+      results.push({
+        title: title,
+
+        image:
+          a.posterImage &&
+          (
+            a.posterImage.medium ||
+            a.posterImage.original
+          )
+            ? (
+                a.posterImage.medium ||
+                a.posterImage.original
+              )
+            : "",
+
+        href:
+          baseUrl +
+          "/series/" +
+          slug +
+          "/"
       });
     }
 
+    return results;
+  } catch (e) {
+    return [];
+  }
+}
+
+async function searchResults(
+  keyword
+) {
+  try {
+    const q =
+      String(keyword || "")
+        .trim();
+
+    if (!q) {
+      return JSON.stringify([]);
+    }
+
+    let results =
+      await siteSearch(q);
+
     /*
-     * Direct slug fallback.
+     * Site search is broken/changed:
+     * use metadata search as fallback.
      */
     if (!results.length) {
-      const candidate =
-        baseUrl +
-        "/series/" +
-        slugify(q) +
-        "/";
+      results =
+        await kitsuSearch(q);
+    }
 
-      const h = await getText(
-        await soraFetch(candidate)
-      );
+    /*
+     * Verify constructed series
+     * pages before returning them.
+     */
+    const verified = [];
+
+    for (
+      let i = 0;
+      i <
+        Math.min(
+          results.length,
+          12
+        );
+      i++
+    ) {
+      const r =
+        results[i];
+
+      const html =
+        await getText(
+          await soraFetch(
+            r.href,
+            {
+              headers: {
+                Referer:
+                  baseUrl + "/"
+              }
+            }
+          )
+        );
 
       if (
-        h &&
-        /<h1|Episode|Synopsis/i.test(h)
+        html &&
+        html.length > 500 &&
+        !/404|Page not found/i.test(
+          html
+        )
       ) {
-        push(
-          candidate,
-          extractTitle(h) || q,
-          images(h, candidate)[0] || ""
-        );
+        const title =
+          getTitleFromHtml(
+            html
+          ) ||
+          r.title;
+
+        verified.push({
+          title: cleanText(
+            title
+          ),
+          image:
+            r.image || "",
+          href:
+            r.href
+        });
       }
     }
 
-    const norm = slugify(q);
+    /*
+     * If verification failed,
+     * still return site results.
+     */
+    const finalResults =
+      verified.length
+        ? verified
+        : results;
 
-    results.sort(function (a, b) {
-      const sa = slugify(a.title);
-      const sb = slugify(b.title);
+    const ql =
+      q.toLowerCase();
 
-      const scoreA =
-        sa === norm
-          ? 100
-          : sa.includes(norm)
-          ? 50
-          : 0;
+    finalResults.sort(
+      function (a, b) {
+        const at =
+          a.title
+            .toLowerCase();
 
-      const scoreB =
-        sb === norm
-          ? 100
-          : sb.includes(norm)
-          ? 50
-          : 0;
+        const bt =
+          b.title
+            .toLowerCase();
 
-      return scoreB - scoreA;
-    });
+        const as =
+          at === ql
+            ? 100
+            : at.includes(ql)
+            ? 50
+            : 0;
+
+        const bs =
+          bt === ql
+            ? 100
+            : bt.includes(ql)
+            ? 50
+            : 0;
+
+        return bs - as;
+      }
+    );
 
     return JSON.stringify(
-      results.slice(0, 30)
+      finalResults.slice(
+        0,
+        30
+      )
     );
   } catch (e) {
     return JSON.stringify([]);
@@ -595,70 +845,80 @@ async function searchResults(keyword) {
 }
 
 /* =========================================================
- * SERIES
+ * SERIES DETAILS
  * ========================================================= */
 
-async function getSeriesHtml(url) {
-  let u = String(url || "");
-
-  if (/\/episode-\d+/i.test(u)) {
-    u =
-      seriesUrlFromEpisode(u) ||
-      u;
-  }
-
-  const html = await getText(
-    await soraFetch(u)
-  );
-
-  return {
-    url: u,
-    html: html
-  };
-}
-
-async function extractDetails(url) {
+async function extractDetails(
+  url
+) {
   try {
-    const p =
-      await getSeriesHtml(url);
+    const html =
+      await getText(
+        await soraFetch(
+          url
+        )
+      );
 
-    const h = p.html || "";
+    if (!html) {
+      return JSON.stringify([
+        {
+          description:
+            "N/A",
+          aliases:
+            "N/A",
+          airdate:
+            "N/A"
+        }
+      ]);
+    }
 
-    const description =
-      meta(h, "description") ||
-      meta(h, "og:description") ||
-      "N/A";
+    let description =
+      "";
 
-    const title =
-      extractTitle(h) ||
-      "Anime";
+    let m =
+      html.match(
+        /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i
+      );
 
-    const imdb =
-      (
-        h.match(
-          /imdb\.com\/title\/(tt\d+)/i
-        ) || []
-      )[1] || "";
+    if (!m) {
+      m =
+        html.match(
+          /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i
+        );
+    }
+
+    if (m) {
+      description =
+        cleanText(
+          m[1]
+        );
+    }
 
     return JSON.stringify([
       {
         description:
-          description.slice(0, 1500),
+          description ||
+          "N/A",
 
         aliases:
-          imdb
-            ? title + " | " + imdb
-            : title,
+          getTitleFromHtml(
+            html
+          ) ||
+          "N/A",
 
-        airdate: "N/A"
+        airdate:
+          "N/A"
       }
     ]);
   } catch (e) {
     return JSON.stringify([
       {
-        description: "N/A",
-        aliases: "N/A",
-        airdate: "N/A"
+        description:
+          "N/A",
+        aliases:
+          "N/A",
+        airdate:
+          "N/A"
       }
     ]);
   }
@@ -668,73 +928,175 @@ async function extractDetails(url) {
  * EPISODES
  * ========================================================= */
 
-async function extractEpisodes(url) {
+async function extractEpisodes(
+  url
+) {
   try {
-    const p =
-      await getSeriesHtml(url);
+    let seriesUrl =
+      String(url || "");
 
-    const h = p.html || "";
+    /*
+     * If Sora passes an episode
+     * URL, find its series slug.
+     */
+    if (
+      !/\/series\//i.test(
+        seriesUrl
+      )
+    ) {
+      const match =
+        seriesUrl.match(
+          /https?:\/\/[^/]+\/([^/?#]+)-episode-\d+/i
+        );
+
+      if (match) {
+        seriesUrl =
+          baseUrl +
+          "/series/" +
+          match[1] +
+          "/";
+      }
+    }
+
+    const html =
+      await getText(
+        await soraFetch(
+          seriesUrl,
+          {
+            headers: {
+              Referer:
+                baseUrl + "/",
+              "User-Agent":
+                UA
+            }
+          }
+        )
+      );
+
+    if (!html) {
+      return JSON.stringify([]);
+    }
 
     const eps = [];
     const seen = {};
 
-    links(h, p.url).forEach(function (l) {
-      if (!/\/episode-\d+/i.test(l.href)) {
-        return;
-      }
-
-      const n = episodeNumber(
-        l.text + " " + l.href,
-        eps.length + 1
+    /*
+     * Current GogoAnimeZ:
+     * root-level episode URLs.
+     */
+    const links =
+      getLinks(
+        html,
+        seriesUrl
       );
 
-      if (!n || seen[l.href]) {
-        return;
-      }
-
-      seen[l.href] = true;
-
-      eps.push({
-        href: l.href,
-        number: n,
-        title: "Episode " + n
-      });
-    });
-
-    /*
-     * Generic fallback.
-     */
-    if (!eps.length) {
-      let m;
-
-      const re =
-        /href=["']([^"']*-episode-(\d+)[^"']*)["']/gi;
-
-      while ((m = re.exec(h))) {
-        const href =
-          absUrl(m[1], p.url);
-
-        if (seen[href]) {
-          continue;
+    links.forEach(
+      function (l) {
+        if (
+          !episodeUrlLooksValid(
+            l.href
+          )
+        ) {
+          return;
         }
 
-        seen[href] = true;
+        if (
+          seen[l.href]
+        ) {
+          return;
+        }
+
+        /*
+         * Only accept links that
+         * actually contain an episode
+         * number.
+         */
+        const number =
+          getEpisodeNumber(
+            l.text +
+              " " +
+              l.href,
+            0
+          );
+
+        if (!number) {
+          return;
+        }
+
+        seen[l.href] = true;
 
         eps.push({
-          href: href,
-          number: +m[2],
+          href:
+            l.href,
+          number:
+            number,
           title:
-            "Episode " + m[2]
+            "Episode " +
+            number
         });
       }
+    );
+
+    /*
+     * Additional direct regex.
+     */
+    let m;
+
+    const re =
+      /href=["']([^"']*(?:episode[-_.]\d+|\/watch\/[^"']+)[^"']*)["']/gi;
+
+    while (
+      (m = re.exec(html))
+    ) {
+      const href =
+        absUrl(
+          m[1],
+          seriesUrl
+        );
+
+      if (
+        seen[href]
+      ) {
+        continue;
+      }
+
+      const number =
+        getEpisodeNumber(
+          href,
+          0
+        );
+
+      if (!number) {
+        continue;
+      }
+
+      seen[href] = true;
+
+      eps.push({
+        href:
+          href,
+        number:
+          number,
+        title:
+          "Episode " +
+          number
+      });
     }
 
-    eps.sort(function (a, b) {
-      return a.number - b.number;
-    });
+    eps.sort(
+      function (a, b) {
+        return (
+          a.number -
+          b.number
+        );
+      }
+    );
 
     return JSON.stringify(
-      eps.slice(0, 1000)
+      eps.slice(
+        0,
+        1000
+      )
     );
   } catch (e) {
     return JSON.stringify([]);
@@ -742,438 +1104,68 @@ async function extractEpisodes(url) {
 }
 
 /* =========================================================
- * IMDb
+ * MEDIA EXTRACTION
  * ========================================================= */
 
-async function findImdbId(title, year) {
-  const clean =
-    cleanText(title)
-      .replace(
-        /\s*\(\d{4}\)\s*$/,
-        ""
-      );
+function extractMedia(
+  text,
+  parent
+) {
+  const result = [];
+  let m;
 
-  const first =
-    (clean.charAt(0) || "x")
-      .toLowerCase();
+  const patterns = [
+    /(?:file|src|source|video|videoUrl|stream|streamUrl|hls)\s*[:=]\s*["']([^"']+)["']/gi,
 
-  const urls = [
-    IMDB_SUGGEST +
-      encodeURIComponent(clean) +
-      ".json",
+    /data-(?:src|video|file|url)=["']([^"']+)["']/gi,
 
-    "https://v2.sg.media-imdb.com/suggestion/" +
-      encodeURIComponent(first) +
-      "/" +
-      encodeURIComponent(clean) +
-      ".json"
+    /<source[^>]+src=["']([^"']+)["']/gi,
+
+    /https?:\/\/[^"'\\\s<>]+\.m3u8(?:\?[^"'\\\s<>]*)?/gi,
+
+    /https?:\/\/[^"'\\\s<>]+\.mp4(?:\?[^"'\\\s<>]*)?/gi
   ];
 
-  for (let i = 0; i < urls.length; i++) {
-    try {
-      const d = await getJSON(
-        urls[i],
-        {
-          Accept:
-            "application/json"
-        }
-      );
+  patterns.forEach(
+    function (re, index) {
+      while (
+        (m = re.exec(text))
+      ) {
+        const raw =
+          index >= 3
+            ? m[0]
+            : m[1];
 
-      const list =
-        d &&
-        Array.isArray(d.d)
-          ? d.d
-          : [];
-
-      const candidates =
-        list.filter(function (x) {
-          return (
-            x &&
-            /^tt\d+$/.test(x.id)
+        const u =
+          absUrl(
+            raw,
+            parent
           );
-        });
 
-      candidates.sort(
-        function (a, b) {
-          const na =
-            slugify(
-              a.l ||
-              a.title ||
-              ""
-            );
-
-          const nb =
-            slugify(
-              b.l ||
-              b.title ||
-              ""
-            );
-
-          const q =
-            slugify(clean);
-
-          const sa =
-            na === q
-              ? 100
-              : na.includes(q) ||
-                q.includes(na)
-              ? 50
-              : 0;
-
-          const sb =
-            nb === q
-              ? 100
-              : nb.includes(q) ||
-                q.includes(nb)
-              ? 50
-              : 0;
-
-          const ya =
-            year && a.y
-              ? Math.abs(
-                  +a.y - +year
-                )
-              : 99;
-
-          const yb =
-            year && b.y
-              ? Math.abs(
-                  +b.y - +year
-                )
-              : 99;
-
-          return (
-            sb - sa ||
-            ya - yb
-          );
+        if (
+          /\.m3u8(?:$|[?#])/i.test(
+            u
+          ) ||
+          /\.mp4(?:$|[?#])/i.test(
+            u
+          ) ||
+          /\.m4v(?:$|[?#])/i.test(
+            u
+          )
+        ) {
+          result.push(u);
         }
-      );
-
-      if (candidates[0]) {
-        return candidates[0].id;
       }
-    } catch (e) {}
-  }
-
-  return "";
-}
-
-async function imdbForEpisode(
-  episodeUrl,
-  episodeHtml
-) {
-  let m =
-    episodeHtml.match(
-      /imdb\.com\/title\/(tt\d+)/i
-    );
-
-  if (m) {
-    return m[1];
-  }
-
-  const seriesUrl =
-    seriesUrlFromEpisode(
-      episodeUrl
-    );
-
-  if (seriesUrl) {
-    const h = await getText(
-      await soraFetch(seriesUrl)
-    );
-
-    m =
-      h.match(
-        /imdb\.com\/title\/(tt\d+)/i
-      );
-
-    if (m) {
-      return m[1];
-    }
-
-    const title =
-      extractTitle(h);
-
-    const ym =
-      h.match(
-        /(?:Released|Release(?:d)?|Year)\s*[:\-]?\s*(20\d{2}|19\d{2})/i
-      );
-
-    return await findImdbId(
-      title,
-      ym ? ym[1] : ""
-    );
-  }
-
-  return "";
-}
-
-/* =========================================================
- * TURKISH SUBTITLES
- * ========================================================= */
-
-function subtitleRank(
-  x,
-  s,
-  e
-) {
-  const parsed =
-    parseSubEpisode(
-      x.filename ||
-      x.name ||
-      ""
-    );
-
-  /*
-   * Wrong S/E = completely rejected.
-   */
-  if (
-    parsed &&
-    (
-      parsed.s !== s ||
-      parsed.e !== e
-    )
-  ) {
-    return -100000;
-  }
-
-  let score =
-    parsed
-      ? 1000
-      : 100;
-
-  const n =
-    String(
-      x.filename ||
-      x.name ||
-      ""
-    ).toLowerCase();
-
-  if (
-    /forced|signs|sdh|hearing/i.test(n)
-  ) {
-    score -= 30;
-  }
-
-  if (
-    /utf8|utf-8/i.test(
-      String(x.url || "")
-    )
-  ) {
-    score += 10;
-  }
-
-  return score;
-}
-
-async function turkishSubtitles(
-  imdbId,
-  season,
-  episode
-) {
-  if (!imdbId) {
-    return [];
-  }
-
-  const out = [];
-
-  /*
-   * Provider A:
-   * Stremio OpenSubtitles v3
-   *
-   * IMPORTANT:
-   * IMDb:S:E format is required.
-   */
-  try {
-    const id =
-      encodeURIComponent(
-        imdbId +
-          ":" +
-          season +
-          ":" +
-          episode
-      );
-
-    const d =
-      await getJSON(
-        OS_V3 +
-          "/subtitles/series/" +
-          id +
-          ".json",
-        {
-          Accept:
-            "application/json",
-
-          Referer:
-            "https://app.strem.io/",
-
-          "Accept-Encoding":
-            "identity"
-        }
-      );
-
-    const arr =
-      d &&
-      Array.isArray(d.subtitles)
-        ? d.subtitles
-        : [];
-
-    arr.forEach(function (x) {
-      if (
-        x &&
-        x.url &&
-        String(
-          x.lang || ""
-        ).toLowerCase() === "tur"
-      ) {
-        out.push({
-          url: x.url,
-          label: "Türkçe",
-          lang: "tur",
-          filename:
-            x.filename ||
-            x.name ||
-            ""
-        });
-      }
-    });
-  } catch (e) {}
-
-  /*
-   * Provider B:
-   * OpenSubtitles legacy REST
-   *
-   * Gives release names so we can
-   * validate S/E.
-   */
-  try {
-    const id =
-      imdbId.replace(
-        /^tt/i,
-        ""
-      );
-
-    const url =
-      OS_REST +
-      "/episode-" +
-      episode +
-      "/imdbid-" +
-      id +
-      "/season-" +
-      season +
-      "/sublanguageid-tur";
-
-    const d =
-      await getJSON(
-        url,
-        {
-          "X-User-Agent":
-            "trailers.to-UA",
-
-          Accept:
-            "application/json",
-
-          "Accept-Encoding":
-            "identity"
-        }
-      );
-
-    const arr =
-      Array.isArray(d)
-        ? d
-        : [];
-
-    arr.forEach(function (x) {
-      if (!x) {
-        return;
-      }
-
-      if (
-        String(
-          x.SubLanguageID ||
-          ""
-        ).toLowerCase() !==
-        "tur"
-      ) {
-        return;
-      }
-
-      const name =
-        x.SubFileName ||
-        x.MovieReleaseName ||
-        "";
-
-      const parsed =
-        parseSubEpisode(name);
-
-      /*
-       * Reject subtitles belonging
-       * to another season/episode.
-       */
-      if (
-        parsed &&
-        (
-          parsed.s !== season ||
-          parsed.e !== episode
-        )
-      ) {
-        return;
-      }
-
-      const idf =
-        x.IDSubtitleFile;
-
-      if (!idf) {
-        return;
-      }
-
-      const u =
-        "https://dl.opensubtitles.org/en/download/filead/" +
-        encodeURIComponent(idf);
-
-      out.push({
-        url: u,
-        label: "Türkçe",
-        lang: "tur",
-        filename: name
-      });
-    });
-  } catch (e) {}
-
-  const dedup = {};
-  const valid = [];
-
-  out.sort(
-    function (a, b) {
-      return (
-        subtitleRank(
-          b,
-          season,
-          episode
-        ) -
-        subtitleRank(
-          a,
-          season,
-          episode
-        )
-      );
     }
   );
 
-  out.forEach(function (x) {
-    if (
-      x.url &&
-      !dedup[x.url]
-    ) {
-      dedup[x.url] = true;
-      valid.push(x);
-    }
-  });
-
-  return valid.slice(0, 8);
+  return unique(
+    result
+  );
 }
 
 /* =========================================================
- * STREAM PLAYER
+ * PLAYER RESOLUTION
  * ========================================================= */
 
 async function resolvePlayer(
@@ -1181,11 +1173,11 @@ async function resolvePlayer(
   referer,
   depth
 ) {
-  if (depth > 2) {
+  if (depth > 3) {
     return [];
   }
 
-  const h =
+  const html =
     await getText(
       await soraFetch(
         url,
@@ -1194,113 +1186,271 @@ async function resolvePlayer(
             Referer:
               referer ||
               baseUrl + "/",
-
-            Accept:
-              "text/html,*/*",
-
             "User-Agent":
-              UA
+              UA,
+            Accept:
+              "text/html,*/*"
           }
         }
       )
     );
 
-  if (!h) {
+  if (!html) {
     return [];
   }
 
-  let out =
-    mediaUrls(
-      h,
+  let media =
+    extractMedia(
+      html,
       url
     );
 
+  if (media.length) {
+    return media;
+  }
+
   /*
-   * Some players contain another
-   * iframe.
+   * Some Gogo players put the
+   * actual source inside JS as an
+   * escaped URL.
    */
-  if (!out.length) {
-    const nested =
-      iframes(
-        h,
-        url
+  const decoded =
+    html
+      .replace(
+        /\\u002F/gi,
+        "/"
+      )
+      .replace(
+        /\\\//g,
+        "/"
+      )
+      .replace(
+        /\\u003A/gi,
+        ":"
+      )
+      .replace(
+        /&amp;/gi,
+        "&"
       );
 
-    for (
-      let i = 0;
-      i <
-        Math.min(
-          nested.length,
-          5
-        );
-      i++
-    ) {
-      out =
-        out.concat(
-          await resolvePlayer(
-            nested[i],
-            url,
-            depth + 1
-          )
+  media =
+    extractMedia(
+      decoded,
+      url
+    );
+
+  if (media.length) {
+    return media;
+  }
+
+  const frames =
+    getIframes(
+      html,
+      url
+    );
+
+  for (
+    let i = 0;
+    i <
+      Math.min(
+        frames.length,
+        8
+      );
+    i++
+  ) {
+    const nested =
+      await resolvePlayer(
+        frames[i],
+        url,
+        depth + 1
+      );
+
+    if (nested.length) {
+      media =
+        media.concat(
+          nested
         );
     }
   }
 
-  return unique(out);
-}
-
-function playerLabel(url) {
-  const u =
-    String(url || "")
-      .toLowerCase();
-
-  if (
-    /megacloud|rapid-cloud/.test(u)
-  ) {
-    return "MegaCloud";
-  }
-
-  if (
-    /vidcloud|vidstream/.test(u)
-  ) {
-    return "VidCloud";
-  }
-
-  if (
-    /rabbitstream|dokicloud/.test(u)
-  ) {
-    return "RabbitStream";
-  }
-
-  if (
-    /streamwish/.test(u)
-  ) {
-    return "StreamWish";
-  }
-
-  if (
-    /vidhide/.test(u)
-  ) {
-    return "VidHide";
-  }
-
-  try {
-    return new URL(url).hostname;
-  } catch (e) {
-    return "Player";
-  }
+  return unique(
+    media
+  );
 }
 
 /* =========================================================
- * MAIN STREAM FUNCTION
+ * TURKISH SUBTITLES
  * ========================================================= */
 
-async function extractStreamUrl(url) {
+function parseSubtitleEpisode(
+  name
+) {
+  const s =
+    String(name || "");
+
+  let m =
+    s.match(
+      /\bS(\d{1,2})[ ._-]*E(\d{1,3})\b/i
+    );
+
+  if (m) {
+    return {
+      season:
+        +m[1],
+      episode:
+        +m[2]
+    };
+  }
+
+  m =
+    s.match(
+      /\b(\d{1,2})x(\d{1,3})\b/i
+    );
+
+  if (m) {
+    return {
+      season:
+        +m[1],
+      episode:
+        +m[2]
+    };
+  }
+
+  return null;
+}
+
+async function getTurkishSubtitles(
+  imdb,
+  season,
+  episode
+) {
+  if (!imdb) {
+    return [];
+  }
+
+  const result = [];
+
+  /*
+   * OpenSubtitles Stremio endpoint.
+   */
+  try {
+    const key =
+      encodeURIComponent(
+        imdb +
+          ":" +
+          season +
+          ":" +
+          episode
+      );
+
+    const data =
+      await getJSON(
+        OS_V3 +
+          "/subtitles/series/" +
+          key +
+          ".json",
+        {
+          headers: {
+            Referer:
+              "https://app.strem.io/",
+            Accept:
+              "application/json",
+            "Accept-Encoding":
+              "identity"
+          }
+        }
+      );
+
+    const subs =
+      data &&
+      Array.isArray(
+        data.subtitles
+      )
+        ? data.subtitles
+        : [];
+
+    subs.forEach(
+      function (x) {
+        if (
+          !x ||
+          !x.url
+        ) {
+          return;
+        }
+
+        const lang =
+          String(
+            x.lang || ""
+          ).toLowerCase();
+
+        if (
+          lang !== "tur"
+        ) {
+          return;
+        }
+
+        const parsed =
+          parseSubtitleEpisode(
+            x.filename ||
+              x.name ||
+              ""
+          );
+
+        if (
+          parsed &&
+          (
+            parsed.season !==
+              season ||
+            parsed.episode !==
+              episode
+          )
+        ) {
+          return;
+        }
+
+        result.push({
+          url:
+            x.url,
+          label:
+            "Türkçe",
+          lang:
+            "tur"
+        });
+      }
+    );
+  } catch (e) {}
+
+  const seen = {};
+
+  return result.filter(
+    function (x) {
+      if (
+        seen[x.url]
+      ) {
+        return false;
+      }
+
+      seen[x.url] = true;
+      return true;
+    }
+  ).slice(
+    0,
+    5
+  );
+}
+
+/* =========================================================
+ * STREAM
+ * ========================================================= */
+
+async function extractStreamUrl(
+  url
+) {
   try {
     const episodeUrl =
       String(url || "");
 
-    const epHtml =
+    const html =
       await getText(
         await soraFetch(
           episodeUrl,
@@ -1308,15 +1458,16 @@ async function extractStreamUrl(url) {
             headers: {
               Referer:
                 baseUrl + "/",
-
               "User-Agent":
-                UA
+                UA,
+              Accept:
+                "text/html,*/*"
             }
           }
         )
       );
 
-    if (!epHtml) {
+    if (!html) {
       return JSON.stringify({
         streams: [],
         subtitles: ""
@@ -1324,78 +1475,99 @@ async function extractStreamUrl(url) {
     }
 
     /*
-     * Direct media.
+     * Direct source.
      */
     let found =
-      mediaUrls(
-        epHtml,
+      extractMedia(
+        html,
         episodeUrl
-      ).map(function (u) {
-        return {
-          url: u,
-          label: "GogoAnime",
-          player: episodeUrl
-        };
-      });
+      ).map(
+        function (u) {
+          return {
+            url:
+              u,
+            label:
+              "GogoAnimeZ",
+            headers: {
+              Referer:
+                episodeUrl,
+              "User-Agent":
+                UA
+            }
+          };
+        }
+      );
 
     /*
-     * External players.
+     * Find all iframe/player
+     * URLs.
      */
     const players =
-      iframes(
-        epHtml,
+      getIframes(
+        html,
         episodeUrl
-      ).filter(function (u) {
-        return !/youtube|facebook|twitter|google/i.test(u);
-      });
+      );
 
     for (
       let i = 0;
       i <
         Math.min(
           players.length,
-          8
+          10
         );
       i++
     ) {
-      const us =
+      const urls =
         await resolvePlayer(
           players[i],
           episodeUrl,
           0
         );
 
-      us.forEach(
+      urls.forEach(
         function (u) {
           found.push({
-            url: u,
+            url:
+              u,
             label:
-              playerLabel(
+              playerName(
                 players[i]
               ),
-            player:
-              players[i]
+            headers: {
+              Referer:
+                players[i],
+              "User-Agent":
+                UA,
+              Accept:
+                "application/vnd.apple.mpegurl,video/*,*/*"
+            }
           });
         }
       );
     }
 
     /*
-     * Deduplicate.
+     * Remove duplicate streams.
      */
+    const streamSeen = {};
+
     found =
       found.filter(
-        function (x, i, a) {
-          return (
-            a.findIndex(
-              function (y) {
-                return (
-                  y.url ===
-                  x.url
-                );
-              }
-            ) === i
-          );
+        function (x) {
+          if (
+            !x.url ||
+            streamSeen[
+              x.url
+            ]
+          ) {
+            return false;
+          }
+
+          streamSeen[
+            x.url
+          ] = true;
+
+          return true;
         }
       );
 
@@ -1404,170 +1576,236 @@ async function extractStreamUrl(url) {
      */
     found.sort(
       function (a, b) {
-        return (
-          (/\.m3u8/i.test(
+        const ah =
+          /\.m3u8/i.test(
             a.url
           )
             ? 0
-            : 1) -
-          (/\.m3u8/i.test(
+            : 1;
+
+        const bh =
+          /\.m3u8/i.test(
             b.url
           )
             ? 0
-            : 1)
-        );
+            : 1;
+
+        return ah - bh;
       }
     );
 
     /*
-     * Determine S/E.
+     * Episode number.
      */
-    const title =
-      extractTitle(
-        epHtml
-      );
-
-    const season =
-      seasonNumber(
-        title +
-          " " +
-          episodeUrl
-      );
-
     const episode =
-      episodeNumber(
-        title +
+      getEpisodeNumber(
+        episodeUrl +
           " " +
-          episodeUrl,
+          getTitleFromHtml(
+            html
+          ),
         1
       );
 
-    /*
-     * Subtitle extraction is OPTIONAL.
-     * A subtitle failure must NEVER
-     * remove a working stream.
-     */
-    const imdbId =
-      await imdbForEpisode(
-        episodeUrl,
-        epHtml
+    const season =
+      getSeasonNumber(
+        episodeUrl +
+          " " +
+          getTitleFromHtml(
+            html
+          )
       );
 
-    const subs =
-      await turkishSubtitles(
-        imdbId,
+    /*
+     * Try IMDb.
+     */
+    let imdb = "";
+
+    const imdbMatch =
+      html.match(
+        /imdb\.com\/title\/(tt\d+)/i
+      );
+
+    if (
+      imdbMatch
+    ) {
+      imdb =
+        imdbMatch[1];
+    }
+
+    /*
+     * Turkish subtitles.
+     *
+     * No Turkish subtitle =
+     * stream still works.
+     */
+    const subtitles =
+      await getTurkishSubtitles(
+        imdb,
         season,
         episode
       );
 
-    const subPairs = [];
-    const allSubs = [];
-
-    for (
-      let i = 0;
-      i < subs.length;
-      i++
-    ) {
-      const headers = {
-        Referer:
-          "https://app.strem.io/",
-
-        "User-Agent":
-          UA,
-
-        Accept:
-          "text/plain,text/vtt,application/x-subrip,*/*"
-      };
-
-      /*
-       * Only Turkish is exposed.
-       */
-      subPairs.push(
-        "Türkçe",
-        subs[i].url
-      );
-
-      allSubs.push({
-        url: subs[i].url,
-        label: "Türkçe",
-        headers: headers
-      });
-    }
+    const output =
+      subtitles.length
+        ? subtitles[0]
+        : null;
 
     const streams = [];
 
     found
-      .slice(0, 10)
-      .forEach(function (x) {
-        const t =
-          "GogoAnime · " +
-          x.label +
-          (
+      .slice(
+        0,
+        8
+      )
+      .forEach(
+        function (x) {
+          const type =
             /\.m3u8/i.test(
               x.url
             )
-              ? " · HLS"
-              : " · MP4"
-          );
+              ? "HLS"
+              : "MP4";
 
-        const item = {
-          title: t,
-          name: t,
+          const title =
+            "GogoAnimeZ · " +
+            x.label +
+            " · " +
+            type;
 
-          streamUrl:
-            x.url,
+          const item = {
+            title:
+              title,
 
-          headers: {
-            "User-Agent":
-              UA,
+            name:
+              title,
 
-            Referer:
-              x.player ||
-              episodeUrl,
+            streamUrl:
+              x.url,
 
-            Accept:
-              "application/vnd.apple.mpegurl,video/*,*/*"
+            headers:
+              x.headers,
+
+            subtitles: []
+          };
+
+          /*
+           * Sora/Luna subtitle
+           * fields.
+           */
+          if (
+            output
+          ) {
+            item.subtitle =
+              output.url;
+
+            item.subtitleHeaders =
+              {
+                Referer:
+                  "https://app.strem.io/",
+                "User-Agent":
+                  UA,
+                Accept:
+                  "text/vtt,text/plain,*/*"
+              };
+
+            item.subtitles =
+              [
+                "Türkçe",
+                output.url
+              ];
+
+            item.allSubtitles =
+              [
+                {
+                  url:
+                    output.url,
+                  label:
+                    "Türkçe",
+                  lang:
+                    "tur",
+                  headers:
+                    {
+                      Referer:
+                        "https://app.strem.io/",
+                      "User-Agent":
+                        UA
+                    }
+                }
+              ];
           }
-        };
 
-        /*
-         * Turkish subtitle only.
-         */
-        if (allSubs.length) {
-          item.subtitle =
-            allSubs[0].url;
-
-          item.subtitleHeaders =
-            allSubs[0].headers;
-
-          item.subtitles =
-            subPairs;
-
-          item.allSubtitles =
-            allSubs;
-        } else {
-          item.subtitles = [];
-          item.allSubtitles = [];
+          streams.push(
+            item
+          );
         }
-
-        streams.push(item);
-      });
+      );
 
     return JSON.stringify({
-      streams: streams,
+      streams:
+        streams,
 
       subtitles:
-        allSubs.length
-          ? allSubs[0].url
+        output
+          ? output.url
           : ""
     });
   } catch (e) {
-    /*
-     * Never crash Sora/Luna.
-     */
     return JSON.stringify({
       streams: [],
       subtitles: ""
     });
+  }
+}
+
+/* =========================================================
+ * PLAYER NAME
+ * ========================================================= */
+
+function playerName(
+  url
+) {
+  const u =
+    String(url || "")
+      .toLowerCase();
+
+  if (
+    /megacloud|rapid-cloud/.test(
+      u
+    )
+  ) {
+    return "MegaCloud";
+  }
+
+  if (
+    /vidstream|vidcloud/.test(
+      u
+    )
+  ) {
+    return "VidCloud";
+  }
+
+  if (
+    /streamwish/.test(
+      u
+    )
+  ) {
+    return "StreamWish";
+  }
+
+  if (
+    /vidhide/.test(
+      u
+    )
+  ) {
+    return "VidHide";
+  }
+
+  try {
+    return new URL(
+      url
+    ).hostname;
+  } catch (e) {
+    return "Player";
   }
 }
