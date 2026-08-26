@@ -1,8 +1,10 @@
 /**
  * diziwatch (diziwatch8.com) – Sora / Luna
- * Search API → /dizi/ → /bolum/
- * Player: videoplay.vip → HLS + softsubs (TR/EN VTT)
- * v1.0.1
+ * Search: /api/search.php?q=
+ * Series: /dizi/{slug}
+ * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
+ * Player: videoplay.vip → HLS + softsubs (.vtt, Referer required)
+ * v1.0.2
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -80,6 +82,9 @@ function decodeEntities(s) {
     })
     .replace(/&#(\d+);/g, function (_, n) {
       return String.fromCharCode(parseInt(n, 10));
+    })
+    .replace(/\\u([0-9a-f]{4})/gi, function (_, h) {
+      return String.fromCharCode(parseInt(h, 16));
     })
     .replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'")
@@ -162,7 +167,11 @@ function extractPlayerEmbed(html) {
   return "";
 }
 
-/** Parse HLS master + softsubs from videoplay HTML */
+/**
+ * HLS masters + softsubs.
+ * Subs must be real .vtt under /uploads/hls/{id}/… (NOT play.m3u8 proxy).
+ * Referer: videoplay.vip is required or CDN returns 403.
+ */
 function parsePlayerPage(html) {
   const result = { hls: [], subs: [] };
   if (!html) return result;
@@ -181,83 +190,55 @@ function parsePlayerPage(html) {
     });
   }
 
-  // tracksData = {"audio":[...],"subtitles":[{"name":"Türkçe","lang":"tr","url":"tracks/...vtt"},...]}
-  const td =
-    html.match(/tracksData\s*=\s*(\{[\s\S]*?\});/) ||
-    html.match(/tracksData\s*=\s*(\{[\s\S]*?\})\s*;/);
-  let tokenParams = "";
-  const tp = html.match(
-    /tokenParams\s*=\s*["'](&token=[^"']+&expires=\d+)["']/
-  );
-  if (tp) tokenParams = tp[1];
-  // fallback token from master url
   let vid = "";
-  let token = "";
-  let expires = "";
   if (result.hls.length) {
-    const mm = result.hls[0].match(
-      /id=(\d+).*?token=([^&]+).*?expires=(\d+)/
-    );
-    if (mm) {
-      vid = mm[1];
-      token = mm[2];
-      expires = mm[3];
-      if (!tokenParams)
-        tokenParams = "&token=" + token + "&expires=" + expires;
-    }
+    const mm = result.hls[0].match(/id=(\d+)/);
+    if (mm) vid = mm[1];
   }
+  let hlsBase = "";
+  const bp = html.match(/hlsBasePath\s*=\s*['"]([^'"]+)['"]/);
+  if (bp) hlsBase = bp[1].replace(/\\+/g, "/").replace(/^\/+/, "");
+  if (!hlsBase && vid) hlsBase = "uploads/hls/" + vid + "/";
 
+  const td = html.match(/tracksData\s*=\s*(\{[\s\S]*?\});/);
   if (td) {
     try {
-      // unescape \/ for JSON
-      const raw = td[1].replace(/\\\//g, "/");
-      const j = JSON.parse(raw);
+      const j = JSON.parse(td[1].replace(/\\\//g, "/"));
       const list = (j && j.subtitles) || [];
       for (let i = 0; i < list.length; i++) {
         const s = list[i];
         if (!s || !s.url) continue;
-        let subUrl = String(s.url).replace(/\\\//g, "/");
-        if (!/^https?:\/\//i.test(subUrl)) {
-          // proxy path used by player
-          if (vid) {
-            subUrl =
-              playerHost +
-              "/play.m3u8?id=" +
-              vid +
-              "&p=" +
-              encodeURIComponent(subUrl) +
-              (tokenParams || "");
-          } else {
-            continue;
-          }
+        let rel = String(s.url).replace(/\\\//g, "/").replace(/^\//, "");
+        let subUrl = "";
+        if (/^https?:\/\//i.test(rel)) {
+          subUrl = rel;
+        } else if (hlsBase) {
+          subUrl = playerHost + "/" + hlsBase + rel;
+        } else if (vid) {
+          subUrl = playerHost + "/uploads/hls/" + vid + "/" + rel;
         }
-        const lang = String(s.lang || "").toLowerCase();
-        const name = decodeEntities(
-          String(s.name || lang || "Sub").replace(/\\u00([0-9a-f]{2})/gi, function (_, h) {
-            return String.fromCharCode(parseInt(h, 16));
-          })
-        );
+        if (!subUrl) continue;
+
+        let name = decodeEntities(String(s.name || s.lang || "Sub"));
         result.subs.push({
-          url: subUrl,
+          url: forceHttps(subUrl),
           label: name,
-          lang: lang,
+          lang: String(s.lang || "").toLowerCase(),
           default: !!s.default,
         });
       }
     } catch (e) {}
   }
 
-  // Prefer TR first
   result.subs.sort(function (a, b) {
-    const rank = function (x) {
+    function rank(x) {
       if (x.lang === "tr" || /t[uü]rk/i.test(x.label)) return 0;
       if (x.default) return 1;
       if (x.lang === "en" || /ingiliz|english/i.test(x.label)) return 2;
       return 3;
-    };
+    }
     return rank(a) - rank(b);
   });
-
   return result;
 }
 
@@ -343,9 +324,8 @@ async function extractDetails(url) {
 
 /* ===================== EPISODES ===================== */
 /**
- * Sequential numbering (1..N) so the app does NOT show 1.001 / 1.002.
- * Titles keep "X. Sezon Y. Bölüm" so you can still tell seasons apart.
- * Sorted season ASC, episode ASC.
+ * Sequential numbers 1..N (avoids Episode 1.001 UI).
+ * Titles keep "X. Sezon Y. Bölüm". Sorted by season then episode.
  */
 async function extractEpisodes(url) {
   try {
@@ -382,7 +362,6 @@ async function extractEpisodes(url) {
       return a.season - b.season || a.episode - b.episode;
     });
 
-    // sequential numbers for Sora (avoids 1.001 UI)
     const eps = raw.map(function (e, idx) {
       return {
         href: e.href,
@@ -488,7 +467,6 @@ async function extractStreamUrl(url) {
       Origin: playerHost,
     };
 
-    // Build softsub arrays (TR first)
     const subPairs = [];
     const allSubs = [];
     for (let i = 0; i < parsed.subs.length; i++) {
@@ -514,7 +492,6 @@ async function extractStreamUrl(url) {
         url: media,
         headers: headers,
       };
-      // softsub fields (Sora/Luna/Shirox)
       if (defaultSub) {
         stream.subtitle = defaultSub;
         stream.subtitleHeaders = subHeaders;
