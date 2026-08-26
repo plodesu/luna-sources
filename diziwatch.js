@@ -3,8 +3,8 @@
  * Search: /api/search.php?q=
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
- * Player: videoplay.vip → HLS + softsubs (.vtt, Referer required)
- * v1.0.2
+ * Player: videoplay.vip → HLS (+ softsubs when present)
+ * v1.0.3
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -117,6 +117,10 @@ function b64decode(str) {
   }
   return out;
 }
+function pad2(n) {
+  n = String(n);
+  return n.length < 2 ? "0" + n : n;
+}
 function parseHref(url) {
   const s = String(url || "");
   let m = s.match(/\/bolum\/([^/?#]+?)-(\d+)-sezon-(\d+)-bolum\/?/i);
@@ -134,12 +138,20 @@ function parseHref(url) {
   return { type: "unknown", slug: "", season: 0, episode: 0 };
 }
 
-function extractPlayerEmbed(html) {
+function extractPlayerEmbed(html, epUrl) {
   if (!html) return "";
+
+  // 1) Live iframe (page may already have real-player filled)
   let m = html.match(
-    /src=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
+    /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
   );
   if (m) return m[1];
+
+  // 2) Bare URL in HTML
+  m = html.match(/(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s<>]*)/i);
+  if (m) return m[1];
+
+  // 3) base64 encodedContent
   m =
     html.match(/encodedContent\s*=\s*['"]([A-Za-z0-9+/=]+)['"]/) ||
     html.match(/const encodedContent\s*=\s*['"]([A-Za-z0-9+/=]+)['"]/);
@@ -147,11 +159,17 @@ function extractPlayerEmbed(html) {
     try {
       const dec = b64decode(m[1]);
       const u = dec.match(
-        /src=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
+        /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
       );
       if (u) return u[1];
+      const u2 = dec.match(
+        /(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s]*)/i
+      );
+      if (u2) return u2[1];
     } catch (e) {}
   }
+
+  // 4) progressKey = "312949_1_1"
   m = html.match(/progressKey\s*=\s*['"](\d+)_(\d+)_(\d+)['"]/);
   if (m)
     return (
@@ -164,18 +182,33 @@ function extractPlayerEmbed(html) {
       m[3] +
       "?sid=diziwatch8.com"
     );
+
+  // 5) poster / backdrop id + season/ep from URL
+  const p = parseHref(epUrl || "");
+  const idMatch = html.match(
+    /(?:dizi_poster|bolum_|dizi_backdrop)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
+  );
+  if (idMatch && p.season && p.episode) {
+    return (
+      playerHost +
+      "/dizi/" +
+      idMatch[1] +
+      "/" +
+      p.season +
+      "/" +
+      p.episode +
+      "?sid=diziwatch8.com"
+    );
+  }
+
   return "";
 }
 
-/**
- * HLS masters + softsubs.
- * Subs must be real .vtt under /uploads/hls/{id}/… (NOT play.m3u8 proxy).
- * Referer: videoplay.vip is required or CDN returns 403.
- */
 function parsePlayerPage(html) {
   const result = { hls: [], subs: [] };
   if (!html) return result;
 
+  // Masters with token
   const masters = html.match(
     /\/play\.m3u8\?id=\d+&t=m&token=[A-Za-z0-9_-]+&expires=\d+/g
   );
@@ -188,6 +221,14 @@ function parsePlayerPage(html) {
       seen[u] = true;
       result.hls.push(u);
     });
+  }
+
+  // Fallback: const src = '...'
+  if (!result.hls.length) {
+    const sm = html.match(
+      /const\s+src\s*=\s*['"](\/play\.m3u8\?id=\d+[^'"]+)['"]/
+    );
+    if (sm && sm[1].indexOf("token=") >= 0) result.hls.push(playerHost + sm[1]);
   }
 
   let vid = "";
@@ -210,19 +251,13 @@ function parsePlayerPage(html) {
         if (!s || !s.url) continue;
         let rel = String(s.url).replace(/\\\//g, "/").replace(/^\//, "");
         let subUrl = "";
-        if (/^https?:\/\//i.test(rel)) {
-          subUrl = rel;
-        } else if (hlsBase) {
-          subUrl = playerHost + "/" + hlsBase + rel;
-        } else if (vid) {
-          subUrl = playerHost + "/uploads/hls/" + vid + "/" + rel;
-        }
+        if (/^https?:\/\//i.test(rel)) subUrl = rel;
+        else if (hlsBase) subUrl = playerHost + "/" + hlsBase + rel;
+        else if (vid) subUrl = playerHost + "/uploads/hls/" + vid + "/" + rel;
         if (!subUrl) continue;
-
-        let name = decodeEntities(String(s.name || s.lang || "Sub"));
         result.subs.push({
           url: forceHttps(subUrl),
-          label: name,
+          label: decodeEntities(String(s.name || s.lang || "Sub")),
           lang: String(s.lang || "").toLowerCase(),
           default: !!s.default,
         });
@@ -310,6 +345,7 @@ async function extractDetails(url) {
     let airdate = "N/A";
     const ym =
       html.match(/YEAR OF PUBLICATION[\s\S]{0,80}?>(\d{4})</i) ||
+      html.match(/Yayın Yılı[\s\S]{0,80}?>(\d{4})</i) ||
       html.match(/>\s*(20\d{2})\s*</);
     if (ym) airdate = ym[1];
     return JSON.stringify([
@@ -324,8 +360,8 @@ async function extractDetails(url) {
 
 /* ===================== EPISODES ===================== */
 /**
- * Sequential numbers 1..N (avoids Episode 1.001 UI).
- * Titles keep "X. Sezon Y. Bölüm". Sorted by season then episode.
+ * number = season*1000 + episode  → S3E1 = 3001 (TMDB multi-season safe)
+ * title  = S03E01 · …
  */
 async function extractEpisodes(url) {
   try {
@@ -350,38 +386,47 @@ async function extractEpisodes(url) {
       if (p.slug && m[2].indexOf(p.slug) < 0 && p.slug.indexOf(m[2]) < 0)
         continue;
       seen[key] = true;
-      raw.push({
-        href: absUrl(m[1]),
-        season: season,
-        episode: ep,
-        title: season + ". Sezon " + ep + ". Bölüm",
-      });
+      raw.push({ href: absUrl(m[1]), season: season, episode: ep });
     }
 
     raw.sort(function (a, b) {
       return a.season - b.season || a.episode - b.episode;
     });
 
-    const eps = raw.map(function (e, idx) {
+    const eps = raw.map(function (e) {
+      const code = "S" + pad2(e.season) + "E" + pad2(e.episode);
       return {
         href: e.href,
-        number: idx + 1,
-        title: e.title,
+        number: e.season * 1000 + e.episode,
+        season: e.season,
+        episode: e.episode,
+        title: code + " · " + e.season + ". Sezon " + e.episode + ". Bölüm",
       };
     });
 
     if (!eps.length && /\/bolum\//i.test(String(url))) {
+      const pe = parseHref(url);
+      const s = pe.season || 1;
+      const e = pe.episode || 1;
       eps.push({
         href: String(url),
-        number: 1,
-        title: "1. Bölüm",
+        number: s * 1000 + e,
+        season: s,
+        episode: e,
+        title: "S" + pad2(s) + "E" + pad2(e),
       });
     }
 
     return JSON.stringify(eps.slice(0, 800));
   } catch (e) {
     return JSON.stringify([
-      { href: String(url), number: 1, title: "1. Bölüm" },
+      {
+        href: String(url),
+        number: 1001,
+        season: 1,
+        episode: 1,
+        title: "S01E01",
+      },
     ]);
   }
 }
@@ -393,6 +438,7 @@ async function extractStreamUrl(url) {
     if (!/^https?:\/\//i.test(epUrl))
       epUrl = baseUrl + (epUrl.charAt(0) === "/" ? epUrl : "/" + epUrl);
 
+    // Series page → lowest season/ep
     if (/\/dizi\//i.test(epUrl) && !/\/bolum\//i.test(epUrl)) {
       const seriesHtml = await getText(await soraFetch(epUrl));
       const all = [];
@@ -418,27 +464,10 @@ async function extractStreamUrl(url) {
         headers: { Referer: baseUrl + "/", "User-Agent": UA },
       })
     );
-    if (!epHtml || epHtml.length < 300)
+    if (!epHtml || epHtml.length < 200)
       return JSON.stringify({ streams: [] });
 
-    let embed = extractPlayerEmbed(epHtml);
-    if (!embed) {
-      const p = parseHref(epUrl);
-      const posterId = (epHtml.match(
-        /(?:dizi_poster|bolum_)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
-      ) || [])[1];
-      if (posterId && p.season && p.episode) {
-        embed =
-          playerHost +
-          "/dizi/" +
-          posterId +
-          "/" +
-          p.season +
-          "/" +
-          p.episode +
-          "?sid=diziwatch8.com";
-      }
-    }
+    const embed = extractPlayerEmbed(epHtml, epUrl);
     if (!embed || !isHttp(embed))
       return JSON.stringify({ streams: [] });
 
@@ -451,6 +480,8 @@ async function extractStreamUrl(url) {
         },
       })
     );
+    if (!playerHtml || playerHtml.length < 100)
+      return JSON.stringify({ streams: [] });
 
     const parsed = parsePlayerPage(playerHtml);
     const streams = [];
