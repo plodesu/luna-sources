@@ -3,8 +3,10 @@
  * Search: /api/search.php?q=
  * Series: /dizi/{slug}
  * Episodes: /bolum/{slug}-{s}-sezon-{e}-bolum
- * Player: videoplay.vip → HLS master (A/V together)
- * v1.0.5
+ * Movies:  /film/{slug} → videoplay.vip/film/{id}
+ * Player: videoplay.vip → HLS master
+ * Seasons: episode number resets each season (1,2,… then 1,2,…) so Sora shows season picker
+ * v1.0.6
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -141,8 +143,15 @@ function parseHref(url) {
 function extractPlayerEmbed(html, epUrl) {
   if (!html) return "";
 
+  // Live iframe – series
   let m = html.match(
     /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
+  );
+  if (m) return m[1];
+
+  // Live iframe – movie
+  m = html.match(
+    /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/film\/[^"']+)["']/i
   );
   if (m) return m[1];
 
@@ -151,23 +160,27 @@ function extractPlayerEmbed(html, epUrl) {
   );
   if (m) return m[1];
 
+  m = html.match(/(https?:\/\/videoplay\.vip\/film\/\d+\?[^"'\s<>]*)/i);
+  if (m) return m[1];
+
   m =
     html.match(/encodedContent\s*=\s*['"]([A-Za-z0-9+/=]+)['"]/) ||
     html.match(/const encodedContent\s*=\s*['"]([A-Za-z0-9+/=]+)['"]/);
   if (m) {
     try {
       const dec = b64decode(m[1]);
-      const u = dec.match(
-        /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
+      let u = dec.match(
+        /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/(?:dizi|film)\/[^"']+)["']/i
       );
       if (u) return u[1];
-      const u2 = dec.match(
-        /(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s]*)/i
+      u = dec.match(
+        /(https?:\/\/videoplay\.vip\/(?:dizi\/\d+\/\d+\/\d+|film\/\d+)\?[^"'\s]*)/i
       );
-      if (u2) return u2[1];
+      if (u) return u[1];
     } catch (e) {}
   }
 
+  // Series progressKey: "114410_1_1"
   m = html.match(/progressKey\s*=\s*['"](\d+)_(\d+)_(\d+)['"]/);
   if (m)
     return (
@@ -181,15 +194,20 @@ function extractPlayerEmbed(html, epUrl) {
       "?sid=diziwatch8.com"
     );
 
+  // Movie progressKey: "1218925"
+  m = html.match(/progressKey\s*=\s*['"](\d+)['"]/);
+  if (m && m[1].indexOf("_") < 0)
+    return playerHost + "/film/" + m[1] + "?sid=diziwatch8.com";
+
   const p = parseHref(epUrl || "");
-  const idMatch = html.match(
+  const seriesId = html.match(
     /(?:dizi_poster|bolum_|dizi_backdrop)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
   );
-  if (idMatch && p.season && p.episode) {
+  if (seriesId && p.season && p.episode) {
     return (
       playerHost +
       "/dizi/" +
-      idMatch[1] +
+      seriesId[1] +
       "/" +
       p.season +
       "/" +
@@ -198,12 +216,16 @@ function extractPlayerEmbed(html, epUrl) {
     );
   }
 
+  const filmId = html.match(/film_poster[^"'/]*_(\d+)\.(?:webp|jpg|png)/i);
+  if (filmId) return playerHost + "/film/" + filmId[1] + "?sid=diziwatch8.com";
+
   return "";
 }
 
 function parsePlayerPage(html) {
   const result = { hls: [], subs: [] };
   if (!html) return result;
+  if (/Hata\s*\/\s*Error/i.test(html) && html.length < 8000) return result;
 
   const masters = html.match(
     /\/play\.m3u8\?id=\d+&t=m&token=[A-Za-z0-9_-]+&expires=\d+/g
@@ -355,12 +377,24 @@ async function extractDetails(url) {
 
 /* ===================== EPISODES ===================== */
 /**
- * number = season*1000 + episode → S3E1 = 3001 (TMDB multi-season safe)
- * title  = S03E01 · …
+ * Sora season picker:
+ *   Ep 1..N  then Ep 1..M  → detects 2 seasons
+ * So number = episode WITHIN season (resets every season).
+ * Order must stay chronological: all S1, then all S2, …
  */
 async function extractEpisodes(url) {
   try {
     const p = parseHref(url);
+
+    // Movies → single entry
+    if (p.type === "movie" || /\/film\//i.test(String(url))) {
+      const href =
+        String(url).indexOf("http") === 0 ? String(url) : absUrl(String(url));
+      return JSON.stringify([
+        { href: href, number: 1, season: 1, episode: 1, title: "Film" },
+      ]);
+    }
+
     const seriesUrl =
       p.slug && p.type !== "movie"
         ? baseUrl + "/dizi/" + p.slug
@@ -384,6 +418,7 @@ async function extractEpisodes(url) {
       raw.push({ href: absUrl(m[1]), season: season, episode: ep });
     }
 
+    // Must be sorted: full season 1, then season 2, …
     raw.sort(function (a, b) {
       return a.season - b.season || a.episode - b.episode;
     });
@@ -392,7 +427,8 @@ async function extractEpisodes(url) {
       const code = "S" + pad2(e.season) + "E" + pad2(e.episode);
       return {
         href: e.href,
-        number: e.season * 1000 + e.episode,
+        // Reset per season → Sora builds Season 1 / Season 2 picker
+        number: e.episode,
         season: e.season,
         episode: e.episode,
         title: code + " · " + e.season + ". Sezon " + e.episode + ". Bölüm",
@@ -405,7 +441,7 @@ async function extractEpisodes(url) {
       const e = pe.episode || 1;
       eps.push({
         href: String(url),
-        number: s * 1000 + e,
+        number: e,
         season: s,
         episode: e,
         title: "S" + pad2(s) + "E" + pad2(e),
@@ -417,7 +453,7 @@ async function extractEpisodes(url) {
     return JSON.stringify([
       {
         href: String(url),
-        number: 1001,
+        number: 1,
         season: 1,
         episode: 1,
         title: "S01E01",
@@ -482,7 +518,6 @@ async function extractStreamUrl(url) {
     if (!parsed.hls.length)
       return JSON.stringify({ streams: [], subtitles: "" });
 
-    // Must be sent on playlist AND every segment (.jpg TS)
     const headers = {
       "User-Agent": UA,
       Accept: "*/*",
@@ -491,11 +526,8 @@ async function extractStreamUrl(url) {
     };
 
     let subtitles = "";
-    if (parsed.subs.length) {
-      subtitles = forceHttps(parsed.subs[0].url);
-    }
+    if (parsed.subs.length) subtitles = forceHttps(parsed.subs[0].url);
 
-    // Master only — keeps VIDEO + AUDIO together (better for Luna)
     const streams = [];
     for (let i = 0; i < parsed.hls.length; i++) {
       const master = forceHttps(parsed.hls[i]);
