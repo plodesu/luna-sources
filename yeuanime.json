@@ -1,18 +1,15 @@
 {
-  "sourceName": "YeuAnime · Vietsub/EngSub · HLS · Sora & Luna",
+  "sourceName": "Yêu Anime",
   "iconUrl": "https://yeuanime.buzz/images/logo.png",
-  "author": {
-    "name": "plodesu",
-    "icon": ""
-  },
-  "version": "1.1.4",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
   "language": "Vietnamese",
   "languageType": ["Subbed"],
   "streamType": "HLS",
   "quality": "HD",
   "baseUrl": "https://yeuanime.buzz",
-  "searchBaseUrl": "https://yeuanime.buzz/tim-kiem",
-  "scriptUrl": "https://raw.githubusercontent.com/your-repo/main/yeuanime.js",
+  "searchBaseUrl": "https://yeuanime.buzz",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/yeuanime.js",
   "type": "anime",
   "asyncJS": true,
   "softsub": false,
