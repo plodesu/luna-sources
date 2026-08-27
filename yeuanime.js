@@ -1,234 +1,271 @@
 /**
- * YeuAnime Module - Using exact site patterns
- * Episode URL: /xem-phim/{slug}/tap-{num}/{language}?server={SERVER}
- * Search: /tim-kiem?q={keyword}
- * Series: /phim/{slug}
+ * yeuanime.buzz – Sora / Luna
+ * Search:   /tim-kiem?q=
+ * Series:   /phim/{slug}
+ * Episodes: /xem-phim/{slug}/tap-{num}/{lang}?server={SERVER}
+ * Stream:   hidden input "url" in watch page → HLS master
+ * v1.0.8
  */
 
 const baseUrl = "https://yeuanime.buzz";
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+const UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
-// ============ FETCH HELPERS ============
-
-async function getHTML(url) {
-  try {
-    const headers = {
+// ---------- HELPERS ----------
+async function soraFetch(url, options) {
+  options = options || {};
+  const headers = Object.assign(
+    {
       "User-Agent": UA,
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Referer": baseUrl + "/"
-    };
-    
+      "Accept-Language": "vi,en;q=0.9",
+      Accept: "text/html,application/json,*/*",
+      Referer: baseUrl + "/",
+      "Accept-Encoding": "identity",
+    },
+    options.headers || {}
+  );
+  const method = options.method || "GET";
+  const body = options.body || null;
+  try {
     if (typeof fetchv2 === "function") {
-      try {
-        const res = await fetchv2(url, headers, "GET");
-        if (res) {
-          if (typeof res === "string") return res;
-          if (typeof res.text === "function") return await res.text();
-          return String(res);
-        }
-      } catch (_) {}
+      const r = await fetchv2(url, headers, method, body);
+      if (r) return r;
     }
-    
-    const res = await fetch(url, { headers });
-    if (res && typeof res.text === "function") {
-      return await res.text();
+  } catch (_) {}
+  try {
+    return await fetch(url, { method, headers, body });
+  } catch (_) {
+    return null;
+  }
+}
+
+async function getText(res) {
+  if (res == null) return "";
+  try {
+    if (typeof res === "string") return res;
+    if (typeof res.text === "function") return String((await res.text()) || "");
+    if (typeof res === "object") {
+      if (typeof res.data === "string") return res.data;
+      if (typeof res.body === "string") return res.body;
     }
     return String(res);
-  } catch (e) {
+  } catch (_) {
     return "";
   }
 }
 
-function cleanString(str) {
-  if (!str) return "";
-  return String(str)
+// ---------- CACHE ----------
+const __cache = Object.create(null);
+const __max = 80;
+
+function __cacheSet(key, value) {
+  const keys = Object.keys(__cache);
+  if (keys.length >= __max) delete __cache[keys[0]];
+  __cache[key] = value;
+}
+
+async function cachedText(url, options) {
+  if (typeof __cache[url] === "string") return __cache[url];
+  const res = await soraFetch(url, options);
+  const text = await getText(res);
+  if (!text) return text;
+  const status = res && res.status != null ? res.status : 200;
+  if (status >= 200 && status < 300) __cacheSet(url, text);
+  return text;
+}
+
+function absUrl(u) {
+  if (!u) return "";
+  u = String(u).trim();
+  if (u.indexOf("//") === 0) return "https:" + u;
+  if (u.charAt(0) === "/") return baseUrl + u;
+  return u;
+}
+
+function decodeEntities(s) {
+  return String(s || "")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
     .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/&#039;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
-function absUrl(path) {
-  if (!path) return "";
-  path = String(path).trim();
-  if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  if (path.startsWith("//")) return "https:" + path;
-  if (path.startsWith("/")) return baseUrl + path;
-  return baseUrl + "/" + path;
+function cleanQuery(q) {
+  return String(q || "").replace(/\s+/g, " ").trim();
 }
 
-function extractSlugFromUrl(url) {
-  const match = String(url).match(/\/phim\/([^/?#]+)/);
-  return match ? match[1] : null;
+function pad2(n) {
+  n = String(n);
+  return n.length < 2 ? "0" + n : n;
 }
 
-// ============ SEARCH ============
+function parseHref(url) {
+  const s = String(url || "");
+  let m = s.match(/\/xem-phim\/([^/]+?)\/tap-(\d+)\/([^?]+)/i);
+  if (m) {
+    return { type: "episode", slug: m[1], episode: parseInt(m[2], 10), lang: m[3] };
+  }
+  m = s.match(/\/phim\/([^/?#]+)/i);
+  if (m) return { type: "series", slug: m[1] };
+  return { type: "unknown", slug: "" };
+}
 
+// ---------- SEARCH ----------
 async function searchResults(keyword) {
   try {
-    const q = String(keyword || "").trim();
-    if (!q) return "[]";
-    
-    const url = baseUrl + "/tim-kiem?q=" + encodeURIComponent(q);
-    const html = await getHTML(url);
-    
-    if (!html || html.length < 100) return "[]";
-    
+    const q = cleanQuery(keyword);
+    if (!q) return JSON.stringify([]);
+
+    const html = await cachedText(baseUrl + "/tim-kiem?q=" + encodeURIComponent(q));
+    if (!html || html.length < 100) return JSON.stringify([]);
+
     const results = [];
     const seen = {};
-    
-    // Pattern: Find anime cards with <a href="/phim/SLUG">
-    // and <img src="..." alt="TITLE">
-    const cardRegex = /<a[^>]+href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]+alt="([^"]*)"[^>]*>/gi;
-    
-    let match;
-    while ((match = cardRegex.exec(html))) {
-      const slug = match[1];
-      const image = absUrl(match[2]);
-      let title = cleanString(match[3]);
-      
-      // If no alt, try to get title from nearby h3
+
+    // Pattern 1: <a href="/phim/SLUG"> ... <img src="..." alt="TITLE">
+    const re1 = /<a[^>]+href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]+alt="([^"]*)"[^>]*>/gi;
+    let m;
+    while ((m = re1.exec(html))) {
+      const slug = m[1];
+      const image = absUrl(m[2]);
+      let title = decodeEntities(m[3]).trim();
       if (!title) {
-        const slice = html.slice(Math.max(0, match.index - 300), match.index + 500);
-        const hMatch = slice.match(/<h3[^>]*>([^<]+)<\/h3>/);
-        if (hMatch) title = cleanString(hMatch[1]);
+        // try nearby h3
+        const slice = html.slice(Math.max(0, m.index - 300), m.index + 500);
+        const h = slice.match(/<h3[^>]*>([^<]+)<\/h3>/);
+        if (h) title = decodeEntities(h[1]).trim();
       }
-      
-      // Fallback: use slug
-      if (!title) {
-        title = slug.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-      }
-      
+      if (!title) title = slug.replace(/-/g, " ").replace(/\b\w/g, l => l.toUpperCase());
       const href = baseUrl + "/phim/" + slug;
       if (!seen[href]) {
         seen[href] = true;
         results.push({ title, image, href });
       }
     }
-    
-    // Alternative pattern
+
+    // Pattern 2: fallback – just <a href="/phim/SLUG"> and h3
     if (results.length === 0) {
-      const altRegex = /<a[^>]+href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/gi;
-      while ((match = altRegex.exec(html))) {
-        const slug = match[1];
-        const title = cleanString(match[2]);
+      const re2 = /<a[^>]+href="\/phim\/([^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/gi;
+      while ((m = re2.exec(html))) {
+        const slug = m[1];
+        const title = decodeEntities(m[2]).trim();
         const href = baseUrl + "/phim/" + slug;
-        
-        const slice = html.slice(Math.max(0, match.index - 500), match.index + 100);
-        const imgMatch = slice.match(/<img[^>]+src="([^"]+)"[^>]*>/);
-        const image = imgMatch ? absUrl(imgMatch[1]) : "";
-        
         if (!seen[href]) {
           seen[href] = true;
+          // try to find an image
+          const slice = html.slice(Math.max(0, m.index - 500), m.index + 100);
+          const img = slice.match(/<img[^>]+src="([^"]+)"/);
+          const image = img ? absUrl(img[1]) : "";
           results.push({ title, image, href });
         }
       }
     }
-    
+
+    // Pattern 3: absolute fallback – list all /phim/ links
+    if (results.length === 0) {
+      const re3 = /\/phim\/([^"'\s?]+)/g;
+      while ((m = re3.exec(html))) {
+        const slug = m[1];
+        const href = baseUrl + "/phim/" + slug;
+        if (!seen[href]) {
+          seen[href] = true;
+          const title = slug.replace(/-/g, " ").replace(/\b\w/g, l => l.toUpperCase());
+          results.push({ title, image: "", href });
+        }
+      }
+    }
+
     return JSON.stringify(results.slice(0, 30));
-    
-  } catch (e) {
-    return "[]";
+  } catch (_) {
+    return JSON.stringify([]);
   }
 }
 
-// ============ DETAILS ============
-
+// ---------- DETAILS ----------
 async function extractDetails(url) {
   try {
-    const html = await getHTML(url);
-    if (!html) return JSON.stringify([{ description: "N/A", aliases: "N/A", airdate: "N/A" }]);
-    
-    let description = "N/A";
-    let aliases = "N/A";
-    let airdate = "N/A";
-    
-    // Try JSON-LD first
-    const ldRegex = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
-    let match;
-    while ((match = ldRegex.exec(html))) {
+    const html = await cachedText(url);
+    let description = "N/A",
+      aliases = "N/A",
+      airdate = "N/A";
+
+    // JSON-LD
+    const ld = html.match(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/);
+    if (ld) {
       try {
-        const data = JSON.parse(match[1]);
+        const data = JSON.parse(ld[1]);
+        let item = data;
         if (Array.isArray(data)) {
-          for (let item of data) {
-            if (item['@type'] === 'TVSeries' || item['@type'] === 'Movie') {
-              if (item.description) description = cleanString(item.description.substring(0, 500));
-              if (item.name) aliases = cleanString(item.name);
-              if (item.datePublished) airdate = item.datePublished.substring(0, 4);
-              break;
-            }
+          for (let i of data) {
+            if (i['@type'] === 'TVSeries' || i['@type'] === 'Movie') item = i;
           }
-        } else if (data['@type'] === 'TVSeries' || data['@type'] === 'Movie') {
-          if (data.description) description = cleanString(data.description.substring(0, 500));
-          if (data.name) aliases = cleanString(data.name);
-          if (data.datePublished) airdate = data.datePublished.substring(0, 4);
+        }
+        if (item) {
+          if (item.description) description = decodeEntities(item.description).replace(/<[^>]+>/g, "").slice(0, 500);
+          if (item.name) aliases = decodeEntities(item.name);
+          if (item.datePublished) airdate = item.datePublished.substring(0, 4);
         }
       } catch (_) {}
     }
-    
-    // Fallback: HTML meta tags
+
+    // meta fallback
     if (description === "N/A") {
-      const descMatch = html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i) ||
-                       html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i);
-      if (descMatch) description = cleanString(descMatch[1].substring(0, 500));
+      const d = html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/i) ||
+                html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/i);
+      if (d) description = decodeEntities(d[1]).slice(0, 500);
     }
-    
     if (aliases === "N/A") {
-      const titleMatch = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
-                        html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      if (titleMatch) aliases = cleanString(titleMatch[1]);
+      const t = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i) ||
+                html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (t) aliases = decodeEntities(t[1]);
     }
-    
     if (airdate === "N/A") {
-      const yearMatch = html.match(/(\d{4})/);
-      if (yearMatch) airdate = yearMatch[1];
+      const y = html.match(/(\d{4})/);
+      if (y) airdate = y[1];
     }
-    
+
     return JSON.stringify([{ description, aliases, airdate }]);
-    
   } catch (_) {
     return JSON.stringify([{ description: "N/A", aliases: "N/A", airdate: "N/A" }]);
   }
 }
 
-// ============ EPISODES ============
-
+// ---------- EPISODES ----------
 async function extractEpisodes(url) {
   try {
-    const slug = extractSlugFromUrl(url);
-    if (!slug) return "[]";
-    
-    const html = await getHTML(baseUrl + "/phim/" + slug);
-    if (!html) return "[]";
-    
+    const p = parseHref(url);
+    if (p.type !== "series" || !p.slug) {
+      // if it's an episode, try to get slug
+      const m = String(url).match(/\/xem-phim\/([^/]+?)\//);
+      if (m) {
+        const slug = m[1];
+        return await extractEpisodes(baseUrl + "/phim/" + slug);
+      }
+      return JSON.stringify([]);
+    }
+
+    const html = await cachedText(baseUrl + "/phim/" + p.slug);
+    if (!html) return JSON.stringify([]);
+
     const episodes = [];
     const seen = {};
-    
-    // Exact pattern from the site:
-    // <a href="/xem-phim/{slug}/tap-{num}/{language}?server={SERVER}">
-    //   <p>Tập {num}</p>
-    // </a>
-    const epRegex = /<a[^>]+href="(\/xem-phim\/[^"]+?)"[^>]*>[\s\S]*?<p[^>]*>([^<]+)<\/p>[\s\S]*?<\/a>/gi;
-    
-    let match;
-    while ((match = epRegex.exec(html))) {
-      const href = absUrl(match[1]);
-      const title = cleanString(match[2]);
-      
-      // Extract episode number from href
+
+    // Exact pattern: <a href="/xem-phim/{slug}/tap-{num}/{lang}?server={SERVER}"><p>Tập {num}</p></a>
+    const re = /<a[^>]+href="(\/xem-phim\/[^"]+?)"[^>]*>[\s\S]*?<p[^>]*>([^<]+)<\/p>[\s\S]*?<\/a>/gi;
+    let m;
+    while ((m = re.exec(html))) {
+      const href = absUrl(m[1]);
+      const title = decodeEntities(m[2]).trim();
       const epMatch = href.match(/\/tap-(\d+)\//);
       if (!epMatch) continue;
-      
       const epNum = parseInt(epMatch[1], 10);
-      
       if (!seen[epNum]) {
         seen[epNum] = true;
         episodes.push({
-          href: href,
+          href,
           number: epNum,
           season: 1,
           episode: epNum,
@@ -236,118 +273,78 @@ async function extractEpisodes(url) {
         });
       }
     }
-    
-    // If no episodes found, try simpler pattern
+
+    // fallback: just links
     if (episodes.length === 0) {
-      const altRegex = /href="(\/xem-phim\/[^"]+?)"/gi;
-      while ((match = altRegex.exec(html))) {
-        const href = absUrl(match[1]);
+      const re2 = /href="(\/xem-phim\/[^"]+?)"/gi;
+      while ((m = re2.exec(html))) {
+        const href = absUrl(m[1]);
         const epMatch = href.match(/\/tap-(\d+)\//);
-        if (epMatch) {
-          const epNum = parseInt(epMatch[1], 10);
-          if (!seen[epNum]) {
-            seen[epNum] = true;
-            episodes.push({
-              href: href,
-              number: epNum,
-              season: 1,
-              episode: epNum,
-              title: "Tập " + epNum
-            });
-          }
+        if (!epMatch) continue;
+        const epNum = parseInt(epMatch[1], 10);
+        if (!seen[epNum]) {
+          seen[epNum] = true;
+          episodes.push({
+            href,
+            number: epNum,
+            season: 1,
+            episode: epNum,
+            title: "Tập " + epNum
+          });
         }
       }
     }
-    
-    // Sort by episode number
+
     episodes.sort((a, b) => a.episode - b.episode);
-    
     return JSON.stringify(episodes.slice(0, 300));
-    
   } catch (_) {
-    return "[]";
+    return JSON.stringify([]);
   }
 }
 
-// ============ STREAMS ============
-
+// ---------- STREAMS ----------
 async function extractStreamUrl(url) {
   try {
-    const html = await getHTML(url);
+    const html = await cachedText(url);
     if (!html) return JSON.stringify({ streams: [], subtitles: "" });
-    
+
     let hlsUrl = null;
-    
-    // Pattern 1: Hidden input with name="url"
-    const inputMatch = html.match(/<input[^>]+name="url"[^>]+value="([^"]+)"[^>]*>/i);
-    if (inputMatch) {
-      hlsUrl = inputMatch[1];
-    }
-    
-    // Pattern 2: JavaScript variable
+
+    // 1. hidden input
+    const inp = html.match(/<input[^>]+name="url"[^>]+value="([^"]+)"[^>]*>/i);
+    if (inp) hlsUrl = inp[1];
+
+    // 2. JS variable
     if (!hlsUrl) {
-      const jsMatch = html.match(/url\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']/i);
-      if (jsMatch) {
-        hlsUrl = jsMatch[1];
-      }
+      const js = html.match(/url\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']/i);
+      if (js) hlsUrl = js[1];
     }
-    
-    // Pattern 3: Direct .m3u8 URL
+
+    // 3. direct .m3u8
     if (!hlsUrl) {
-      const m3u8Match = html.match(/(https?:\/\/[^\s"']+\.m3u8[^\s"']*)/i);
-      if (m3u8Match) {
-        hlsUrl = m3u8Match[1];
-      }
+      const m3u = html.match(/(https?:\/\/[^\s"']+\.m3u8[^\s"']*)/i);
+      if (m3u) hlsUrl = m3u[1];
     }
-    
-    // Pattern 4: From iframe src
-    if (!hlsUrl) {
-      const iframeMatch = html.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i);
-      if (iframeMatch) {
-        const iframeUrl = iframeMatch[1];
-        if (iframeUrl.includes('player') || iframeUrl.includes('embed')) {
-          const iframeHTML = await getHTML(iframeUrl);
-          if (iframeHTML) {
-            const m3u8Match2 = iframeHTML.match(/(https?:\/\/[^\s"']+\.m3u8[^\s"']*)/i);
-            if (m3u8Match2) {
-              hlsUrl = m3u8Match2[1];
-            }
-          }
-        }
-      }
-    }
-    
-    if (!hlsUrl) {
-      return JSON.stringify({ streams: [], subtitles: "" });
-    }
-    
-    hlsUrl = String(hlsUrl).replace(/\\/g, '').trim();
-    
+
+    if (!hlsUrl) return JSON.stringify({ streams: [], subtitles: "" });
+
+    hlsUrl = hlsUrl.replace(/\\/g, "").trim();
+
     const headers = {
       "User-Agent": UA,
       "Referer": url,
       "Origin": baseUrl,
       "Accept": "*/*"
     };
-    
-    // Try to extract subtitles
+
     let subtitles = "";
-    const subMatch = html.match(/<track[^>]+src="([^"]+\.vtt[^"]*)"[^>]*>/i);
-    if (subMatch) {
-      subtitles = absUrl(subMatch[1]);
-    }
-    
+    const sub = html.match(/<track[^>]+src="([^"]+\.vtt[^"]*)"[^>]*>/i);
+    if (sub) subtitles = absUrl(sub[1]);
+
     return JSON.stringify({
-      streams: [
-        {
-          title: "HLS Stream",
-          streamUrl: hlsUrl,
-          headers: headers
-        }
-      ],
-      subtitles: subtitles
+      streams: [{ title: "HLS Stream", streamUrl: hlsUrl, headers }],
+      subtitles
     });
-    
   } catch (_) {
     return JSON.stringify({ streams: [], subtitles: "" });
   }
