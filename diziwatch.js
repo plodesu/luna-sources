@@ -27,9 +27,13 @@
  *   Referer, UTF-8->base64 encoded). This gives the EXACT (correctly-synced)
  *   translation instead of the community OpenSubtitles one. OpenSubtitles
  *   remains as a header-free fallback in the picker.
+ * Accurate IMDb id: the diziwatch content id IS the TMDB id (verified), so
+ *   resolve the IMDb id via TMDB external_ids (keyless proxy) and use it for
+ *   OpenSubtitles — avoids fuzzy title-search choosing the wrong edition.
+ *   Falls back to Cinemeta title search when no content id is available.
  * Async: bounded response cache (static pages only) to avoid redundant
  *   fetches across the flow; the player page is never cached (expiring token).
- * v1.5.3
+ * v1.6.0
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
@@ -40,6 +44,13 @@ const playerHost = "https://videoplay.vip";
 // header and DO load in every client. Cinemeta resolves the title -> IMDb id.
 const OS_V3 = "https://opensubtitles-v3.strem.io";
 const CINEMETA = "https://v3-cinemeta.strem.io";
+// The diziwatch site's content id IS the TMDB id (verified: Bleach poster
+// dizi_poster_bleach_30984 -> TMDB 30984 -> imdb tt0434665; Demon Slayer
+// film content 1311031 -> imdb tt32820897). Resolve the ACCURATE IMDb id via
+// TMDB external_ids (through the same keyless proxy the reference imdb module
+// uses) instead of fuzzy title search. Community TMDB read key, no account.
+const TMDB_PROXY = "https://post-eosin.vercel.app/api/proxy?url=";
+const TMDB_KEY = "ad301b7cc82ffe19273e55e4d4206885";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
@@ -434,7 +445,39 @@ function curatedSubtitleEntries(tracks, subHeaders) {
  * every client. Resolve the title -> IMDb id via keyless Cinemeta, then pull
  * the episode's OpenSubtitles v3 tracks. All success-cached.
  * ----------------------------------------------------------------------- */
+// The site's content id lives in the episode page's poster/backdrop filename
+// (dizi_poster_bleach_30984) or progressKey (30984_2_1). It IS the TMDB id.
+function extractTmdbId(html) {
+  if (!html) return "";
+  let m = html.match(
+    /(?:dizi_poster|bolum_|dizi_backdrop|film_poster)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
+  );
+  if (m) return m[1];
+  m = html.match(/progressKey\s*=\s*['"](\d+)(?:_(\d+)_(\d+))?['"]/);
+  if (m) return m[1];
+  return "";
+}
+
+// Accurate IMDb id from a TMDB id via external_ids (keyless proxy). More
+// reliable than fuzzy title search when the site exposes the TMDB id (it does).
 const __imdbCache = {};
+async function resolveImdbFromTmdb(tmdbId, tmdbType) {
+  if (!tmdbId || !/^\d+$/.test(String(tmdbId))) return "";
+  const key = "tmdb2imdb/" + tmdbType + "/" + tmdbId;
+  if (__imdbCache[key]) return __imdbCache[key];
+  try {
+    const inner =
+      "https://api.themoviedb.org/3/" + tmdbType + "/" + tmdbId +
+      "?api_key=" + TMDB_KEY + "&append_to_response=external_ids&language=en";
+    const r = await cachedJson(TMDB_PROXY + encodeURIComponent(inner));
+    const imdb = String((r && r.external_ids && r.external_ids.imdb_id) || "");
+    if (imdb) __imdbCache[key] = imdb;
+    return imdb;
+  } catch (e) {
+    return "";
+  }
+}
+
 async function resolveImdbId(title, type) {
   if (!title) return "";
   const key = type + ":" + String(title).trim().toLowerCase();
@@ -879,7 +922,12 @@ async function extractStreamUrl(url) {
       const s = isMovie ? 1 : (hf.season || 1);
       const e = isMovie ? 1 : (hf.episode || 1);
       const title = String(hf.slug || "").replace(/-/g, " ").trim();
-      const imdbId = await resolveImdbId(title, type);
+      // The site's content id == its TMDB id -> resolve the ACCURATE IMDb id
+      // (the exact same title the page is showing), before fuzzy title search.
+      const tmdbId = extractTmdbId(epHtml);
+      const imdbId =
+        (await resolveImdbFromTmdb(tmdbId, isMovie ? "movie" : "tv")) ||
+        (await resolveImdbId(title, type));
       if (imdbId) {
         osSubs = await fetchStremioSubs(imdbId, type, s, e);
         // Drop other-episode/other-season files (SUBTITLES.md §5) so we never
