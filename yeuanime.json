@@ -1,0 +1,24 @@
+{
+  "sourceName": "YeuAnime · Vietsub/EngSub · HLS · Sora & Luna",
+  "iconUrl": "https://yeuanime.buzz/images/logo.png",
+  "author": {
+    "name": "plodesu",
+    "icon": ""
+  },
+  "version": "1.0.4",
+  "language": "Vietnamese",
+  "languageType": ["Subbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://yeuanime.buzz",
+  "searchBaseUrl": "https://yeuanime.buzz/tim-kiem",
+  "scriptUrl": "https://raw.githubusercontent.com/your-repo/main/yeuanime.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": false,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
