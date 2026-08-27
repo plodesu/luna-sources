@@ -10,6 +10,20 @@
  */
 const baseUrl = "https://diziwatch8.com";
 const playerHost = "https://videoplay.vip";
+// Keyless providers (SUBTITLES.md) for HEADER-FREE subtitles. The diziwatch
+// player's own tracks are Referer-gated (videoplay.vip 403 without it), and
+// the Sora/Sulfur client loads `subtitles` with URLSession.shared (NO custom
+// headers), so those can never render there. OpenSubtitles URLs need no
+// header and DO load in every client. Cinemeta resolves the title -> IMDb id.
+const OS_V3 = "https://opensubtitles-v3.strem.io";
+const CINEMETA = "https://v3-cinemeta.strem.io";
+// The diziwatch site's content id IS the TMDB id (verified: Bleach poster
+// dizi_poster_bleach_30984 -> TMDB 30984 -> imdb tt0434665; Demon Slayer
+// film content 1311031 -> imdb tt32820897). Resolve the ACCURATE IMDb id via
+// TMDB external_ids (through the same keyless proxy the reference imdb module
+// uses) instead of fuzzy title search. Community TMDB read key, no account.
+const TMDB_PROXY = "https://post-eosin.vercel.app/api/proxy?url=";
+const TMDB_KEY = "ad301b7cc82ffe19273e55e4d4206885";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
@@ -20,7 +34,9 @@ async function soraFetch(url, options) {
       "User-Agent": UA,
       "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
       Accept: "text/html,application/json,*/*",
+      // The fetchv2 bridge cannot decompress gzip/brotli (SUBTITLES.md §8).
       Referer: baseUrl + "/",
+      "Accept-Encoding": "identity",
     },
     options.headers || {}
   );
@@ -54,11 +70,44 @@ async function getText(res) {
   }
 }
 
-async function getJson(res) {
-  const t = await getText(res);
-  if (!t) return null;
+/* ---------------------------------------------------------------- *
+ *  Bounded in-memory response cache (SUBTITLES.md §8).              *
+ *  Caches only successful (2xx) non-empty bodies, keyed by URL.     *
+ *  The same module instance handles the whole flow (search →        *
+ *  details → episodes → stream), so the series page fetched by      *
+ *  extractDetails/extractEpisodes is reused by extractStreamUrl,    *
+ *  and re-opening an episode reuses its already-fetched player page.*
+ * ---------------------------------------------------------------- */
+const __httpCache = Object.create(null);
+const __httpCacheMax = 80;
+function __cacheSet(key, value) {
+  const keys = Object.keys(__httpCache);
+  if (keys.length >= __httpCacheMax) delete __httpCache[keys[0]];
+  __httpCache[key] = value;
+}
+
+async function cachedText(url, options) {
+  if (typeof __httpCache[url] === "string") return __httpCache[url];
+  const res = await soraFetch(url, options);
+  const text = await getText(res);
+  if (!text) return text; // don't cache failures
+  // `.status` is present on the fetchv2 bridge response; the legacy
+  // `fetch` fallback returns a bare string with no status, treat as ok.
+  const status =
+    res && res.status != null
+      ? res.status
+      : res && res.ok === false
+        ? 500
+        : 200;
+  if (status >= 200 && status < 300) __cacheSet(url, text);
+  return text;
+}
+
+async function cachedJson(url, options) {
+  const text = await cachedText(url, options);
+  if (!text) return null;
   try {
-    return JSON.parse(t);
+    return JSON.parse(text);
   } catch (e) {
     return null;
   }
@@ -119,6 +168,7 @@ function b64decode(str) {
   }
   return out;
 }
+
 function pad2(n) {
   n = String(n);
   return n.length < 2 ? "0" + n : n;
@@ -145,7 +195,7 @@ function extractPlayerEmbed(html, epUrl) {
 
   // Live iframe – series
   let m = html.match(
-    /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/dizi\/[^"']+)["']/i
+    /(?:src|data-src)=["'](https?:\/\/videoplay\.vip\/(?:dizi|film)\/[^"']+)["']/i
   );
   if (m) return m[1];
 
@@ -156,7 +206,7 @@ function extractPlayerEmbed(html, epUrl) {
   if (m) return m[1];
 
   m = html.match(
-    /(https?:\/\/videoplay\.vip\/dizi\/\d+\/\d+\/\d+\?[^"'\s<>]*)/i
+    /(https?:\/\/videoplay\.vip\/(?:dizi|film)\/[^"'\s<>]+)/i
   );
   if (m) return m[1];
 
@@ -182,7 +232,7 @@ function extractPlayerEmbed(html, epUrl) {
 
   // Series progressKey: "114410_1_1"
   m = html.match(/progressKey\s*=\s*['"](\d+)_(\d+)_(\d+)['"]/);
-  if (m)
+  if (m) {
     return (
       playerHost +
       "/dizi/" +
@@ -193,6 +243,7 @@ function extractPlayerEmbed(html, epUrl) {
       m[3] +
       "?sid=diziwatch8.com"
     );
+  }
 
   // Movie progressKey: "1218925"
   m = html.match(/progressKey\s*=\s*['"](\d+)['"]/);
@@ -294,22 +345,272 @@ function parsePlayerPage(html) {
   return result;
 }
 
+/**
+ * Curate embedded tracks (Provider C) into one entry per language, deduped
+ * by URL, preserving the provider's rank order. Each entry carries its own
+ * headers (Referer!) so the app can fetch the VTT without a 403 (§4).
+ */
+// Human-readable labels for 3-letter subtitle language codes.
+const LANG_NAMES = {
+  en: "English", eng: "English", tr: "Türkçe", tur: "Türkçe",
+  spa: "Español", es: "Español", por: "Português", por: "Português",
+  pob: "Português (BR)", pt: "Português", fra: "Français", fre: "Français",
+  deu: "Deutsch", ger: "Deutsch", ita: "Italiano", kor: "한국어", ko: "한국어",
+  jpn: "日本語", ja: "日本語", ara: "العربية", rus: "Русский", ru: "Русский",
+  vie: "Tiếng Việt", vi: "Tiếng Việt", zho: "中文", zh: "中文", pol: "Polski",
+  ukr: "Українська", heb: "עברית", fas: "فارسی", ind: "Indonesia",
+};
+function langLabel(code) {
+  return LANG_NAMES[String(code || "").toLowerCase()] || String(code || "Sub");
+}
+
+function curatedSubtitleEntries(tracks, subHeaders) {
+  const out = [];
+  const seenUrl = {};
+  const seenLang = {};
+  if (!tracks) return out;
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if (!t || !t.url) continue;
+    const url = String(t.url);
+    const lang = String(t.lang || "und").toLowerCase();
+    if (seenUrl[url] || seenLang[lang]) continue;
+    seenUrl[url] = true;
+    seenLang[lang] = true;
+    out.push({
+      url: url,
+      label: decodeEntities(String(t.label || t.lang || "Sub")),
+      lang: lang,
+      headers: subHeaders,
+    });
+  }
+  return out;
+}
+
+/* ---------------- Header-free subtitle providers (SUBTITLES.md) --------- *
+ * The diziwatch player's own tracks are Referer-gated and the Sora/Sulfur
+ * client fetches `subtitles` with URLSession.shared (no headers), so those
+ * can't render there. OpenSubtitles URLs need no header, so they load in
+ * every client. Resolve the title -> IMDb id via keyless Cinemeta, then pull
+ * the episode's OpenSubtitles v3 tracks. All success-cached.
+ * ----------------------------------------------------------------------- */
+// The site's content id lives in the episode page's poster/backdrop filename
+// (dizi_poster_bleach_30984) or progressKey (30984_2_1). It IS the TMDB id.
+function extractTmdbId(html) {
+  if (!html) return "";
+  let m = html.match(
+    /(?:dizi_poster|bolum_|dizi_backdrop|film_poster)[^"'/]*_(\d+)\.(?:webp|jpg|png)/i
+  );
+  if (m) return m[1];
+  m = html.match(/progressKey\s*=\s*['"](\d+)(?:_(\d+)_(\d+))?['"]/);
+  if (m) return m[1];
+  return "";
+}
+
+// Accurate IMDb id from a TMDB id via external_ids (keyless proxy). More
+// reliable than fuzzy title search when the site exposes the TMDB id (it does).
+const __imdbCache = {};
+async function resolveImdbFromTmdb(tmdbId, tmdbType) {
+  if (!tmdbId || !/^\d+$/.test(String(tmdbId))) return "";
+  const key = "tmdb2imdb/" + tmdbType + "/" + tmdbId;
+  if (__imdbCache[key]) return __imdbCache[key];
+  try {
+    const inner =
+      "https://api.themoviedb.org/3/" + tmdbType + "/" + tmdbId +
+      "?api_key=" + TMDB_KEY + "&append_to_response=external_ids&language=en";
+    const r = await cachedJson(TMDB_PROXY + encodeURIComponent(inner));
+    const imdb = String((r && r.external_ids && r.external_ids.imdb_id) || "");
+    if (imdb) __imdbCache[key] = imdb;
+    return imdb;
+  } catch (e) {
+    return "";
+  }
+}
+
+async function resolveImdbId(title, type) {
+  if (!title) return "";
+  const key = type + ":" + String(title).trim().toLowerCase();
+  if (__imdbCache[key]) return __imdbCache[key];
+  try {
+    const r = await cachedJson(
+      CINEMETA + "/catalog/" + type + "/top/search=" + encodeURIComponent(title) + ".json"
+    );
+    const metas = (r && r.metas) || [];
+    if (!metas.length) return "";
+    const lower = String(title).trim().toLowerCase();
+    let best = null;
+    for (let i = 0; i < metas.length; i++) {
+      if (String(metas[i].name || "").toLowerCase() === lower) { best = metas[i]; break; }
+    }
+    if (!best) {
+      for (let i = 0; i < metas.length; i++) {
+        if (String(metas[i].name || "").toLowerCase().indexOf(lower) === 0) { best = metas[i]; break; }
+      }
+    }
+    if (!best) best = metas[0];
+    const id = String((best && best.id) || "");
+    if (id) __imdbCache[key] = id;
+    return id;
+  } catch (e) {
+    return "";
+  }
+}
+
+async function fetchStremioSubs(imdbId, type, s, e) {
+  if (!imdbId) return [];
+  // Series MUST use the colon path imdbId:s:e (SUBTITLES.md §2); the query
+  // form is silently ignored by the addon.
+  const id = type === "series"
+    ? imdbId + ":" + encodeURIComponent(s) + ":" + encodeURIComponent(e)
+    : imdbId;
+  try {
+    const r = await cachedJson(OS_V3 + "/subtitles/" + type + "/" + id + ".json", {
+      headers: { Accept: "application/json", Referer: "https://app.strem.io/" },
+    });
+    const subs = (r && r.subtitles) || [];
+    const out = [];
+    const seen = {};
+    for (let i = 0; i < subs.length; i++) {
+      const sub = subs[i];
+      if (!sub || !sub.url) continue;
+      const url = String(sub.url);
+      if (seen[url]) continue;
+      seen[url] = true;
+      const code = String(sub.lang || "und").toLowerCase();
+      out.push({ lang: code, url: url, label: langLabel(code) });
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+/* ---------------- Episode validation (SUBTITLES.md §5) -------------------- *
+ * OpenSubtitles v3's imdbId:s:e mapping is polluted for some shows: it can
+ * list OTHER seasons'/episodes' premieres alongside the true episode (the
+ * Family Guy case: "Blue Harvest" S06E01, "Lottery Fever" S10E01, ...). A
+ * large wrong-episode file otherwise auto-loads -> "right video, wrong subs".
+ * Validate through the OS REST SEPARATE-endpoint, which returns each row's
+ * release NAME (SubFileName). Parse an s:e code out of it and classify:
+ *   verified (name == requested s:e)  -> keep, outrank
+ *   blocked  (name != requested s:e)  -> drop for every language
+ *   unknown  (no parsable code)       -> keep, lower priority
+ * ----------------------------------------------------------------------- */
+const OS_REST = "https://rest.opensubtitles.org/search";
+
+// Numeric OpenSubtitles file id from either provider URL shape:
+//   .../subencoding-stremio-utf8/src-api/file/1958351161   (v3)
+//   .../dl.opensubtitles.org/en/download/filead/1957978378 (REST)
+function subtitleFileId(url) {
+  const m = String(url || "").match(/file(?:ad)?\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Parse (season, episode) from a release-style subtitle filename. Recognized:
+// S01E01 / S01.E01, 1x01, [3.01], and the bare three-digit "101" form.
+// Resolution tags like "1080p" cannot false-match (three-digit form needs
+// word-ish boundaries around all digits AND rejects trailing letters).
+function parseSubtitleNameEpisode(name) {
+  const n = String(name || "");
+  let m = n.match(/\bS(\d{1,2})[.\-_ ]?E(\d{1,3})\b/i);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  m = n.match(/\b(\d{1,2})x(\d{1,3})\b/i);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  m = n.match(/\[(\d{1,2})\.(\d{1,3})\]/);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  m = n.match(/(?:^|[\s\-_.])(\d)(\d{2})(?:[\s\-_.]|$)/);
+  if (m) return { s: parseInt(m[1], 10), e: parseInt(m[2], 10) };
+  return null;
+}
+
+const __trustCache = {};
+async function fetchTrustedSubtitleIds(imdbId, isMovie, s, e) {
+  const bare = String(imdbId || "").replace(/^tt/i, "");
+  if (!/^\d+$/.test(bare)) return null;
+  const key = "trusted/" + imdbId + "/" + (isMovie ? "m" : "s") + "/" + s + ":" + e;
+  if (__trustCache[key]) return __trustCache[key];
+  try {
+    let url = OS_REST + "/";
+    if (!isMovie) url += "episode-" + encodeURIComponent(String(e || 1)) + "/";
+    url += "imdbid-" + bare;
+    if (!isMovie) url += "/season-" + encodeURIComponent(String(s || 1));
+    url += "/sublanguageid-eng";
+    const r = await cachedJson(url, {
+      headers: { "X-User-Agent": "trailers.to-UA", Accept: "application/json" },
+    });
+    if (!Array.isArray(r)) return null;
+    const wantS = parseInt(s || "1", 10);
+    const wantE = parseInt(e || "1", 10);
+    const verified = {};
+    const blocked = {};
+    for (let i = 0; i < r.length; i++) {
+      const row = r[i];
+      if (!row || row.IDSubtitleFile == null) continue;
+      const parsed = parseSubtitleNameEpisode(row.SubFileName);
+      if (!parsed) continue;
+      const id = String(row.IDSubtitleFile);
+      if (parsed.s === wantS && parsed.e === wantE) verified[id] = true;
+      else blocked[id] = true;
+    }
+    const result =
+      Object.keys(verified).length > 0 || Object.keys(blocked).length > 0
+        ? { verified: verified, blocked: blocked }
+        : null;
+    __trustCache[key] = result;
+    return result;
+  } catch (e2) {
+    return null;
+  }
+}
+
+// Apply the trust filter to a list of provider subs: drop blocked (foreign
+// episode) files, keep verified first and unknown as eligible fallback.
+// Returns the same {url,lang,label} list but ordered verified-first within
+// each language and with wrong-episode files removed.
+function applyTrustFilter(subs, trust) {
+  if (!trust) return subs;
+  const eligible = [];
+  for (let i = 0; i < subs.length; i++) {
+    const sub = subs[i];
+    const fid = subtitleFileId(sub.url);
+    if (!fid) { eligible.push(sub); continue; }
+    if (trust.blocked && trust.blocked[fid]) continue; // foreign episode
+    eligible.push(sub);
+  }
+  // verified-first within each language
+  const byLang = {};
+  const order = [];
+  for (let i = 0; i < eligible.length; i++) {
+    const sub = eligible[i];
+    const lang = sub.lang;
+    const cls = trust.verified && trust.verified[subtitleFileId(sub.url)] ? 1 : 0;
+    const existing = byLang[lang];
+    if (!existing) {
+      byLang[lang] = { sub: sub, cls: cls };
+      order.push(lang);
+    } else if (cls > existing.cls) {
+      byLang[lang] = { sub: sub, cls: cls };
+    }
+  }
+  const out = [];
+  for (let i = 0; i < order.length; i++) out.push(byLang[order[i]].sub);
+  return out;
+}
+
 /* ===================== SEARCH ===================== */
 async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
-    const data = await getJson(
-      await soraFetch(
-        baseUrl + "/api/search.php?q=" + encodeURIComponent(cleaned),
-        {
-          headers: {
-            "User-Agent": UA,
-            Accept: "application/json",
-            Referer: baseUrl + "/",
-          },
-        }
-      )
+    const data = await cachedJson(
+      baseUrl + "/api/search.php?q=" + encodeURIComponent(cleaned),
+      {
+        headers: {
+          "User-Agent": UA,
+          Accept: "application/json",
+          Referer: baseUrl + "/",
+        },
+      }
     );
     const list = (data && data.results) || [];
     const results = [];
@@ -347,7 +648,7 @@ async function extractDetails(url) {
     const p = parseHref(url);
     let page = String(url);
     if (p.type === "episode" && p.slug) page = baseUrl + "/dizi/" + p.slug;
-    const html = await getText(await soraFetch(page));
+    const html = await cachedText(page);
     let description = "N/A";
     const dm =
       html.match(
@@ -400,7 +701,7 @@ async function extractEpisodes(url) {
         ? baseUrl + "/dizi/" + p.slug
         : String(url);
 
-    const html = await getText(await soraFetch(seriesUrl));
+    const html = await cachedText(seriesUrl);
     const raw = [];
     const seen = {};
 
@@ -471,7 +772,7 @@ async function extractStreamUrl(url) {
 
     // Series page → first episode
     if (/\/dizi\//i.test(epUrl) && !/\/bolum\//i.test(epUrl)) {
-      const seriesHtml = await getText(await soraFetch(epUrl));
+      const seriesHtml = await cachedText(epUrl);
       const all = [];
       const re =
         /href="((?:https?:\/\/[^"]+)?\/bolum\/[^"]+?-(\d+)-sezon-(\d+)-bolum\/?)"/gi;
@@ -490,11 +791,9 @@ async function extractStreamUrl(url) {
       epUrl = all[0].href;
     }
 
-    const epHtml = await getText(
-      await soraFetch(epUrl, {
-        headers: { Referer: baseUrl + "/", "User-Agent": UA },
-      })
-    );
+    const epHtml = await cachedText(epUrl, {
+      headers: { Referer: baseUrl + "/", "User-Agent": UA },
+    });
     if (!epHtml || epHtml.length < 200)
       return JSON.stringify({ streams: [], subtitles: "" });
 
@@ -502,6 +801,8 @@ async function extractStreamUrl(url) {
     if (!embed || !isHttp(embed))
       return JSON.stringify({ streams: [], subtitles: "" });
 
+    // NOTE: the player page is NOT cached — its HLS master carries an
+    // expiring token, so a cached page could serve a dead stream URL.
     const playerHtml = await getText(
       await soraFetch(embed, {
         headers: {
@@ -532,16 +833,24 @@ async function extractStreamUrl(url) {
     for (let i = 0; i < parsed.hls.length; i++) {
       const master = forceHttps(parsed.hls[i]);
       if (!isHttp(master)) continue;
-      streams.push({
+      const stream = {
         title: i === 0 ? "Videoplay · HLS" : "Videoplay · HLS " + (i + 1),
         streamUrl: master,
         headers: headers,
-      });
+      };
+      if (subtitle) stream.subtitle = subtitle;
+      streams.push(stream);
     }
 
+    const primary = streams.length ? streams[0].streamUrl : "";
     return JSON.stringify({
+      stream: primary,
       streams: streams.slice(0, 4),
-      subtitles: subtitles || "",
+      subtitle: subtitle,
+      subtitles: subtitlePairs,
+      subtitlesHeaders: subtitleHeaders || {},
+      subtitleHeaders: subtitleHeaders || {},
+      allSubtitles: allSubtitles,
     });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "" });
