@@ -2,9 +2,9 @@
  * AnimeHay (animehay11.site) – Sora / Luna
  * Search:  POST /api { action: live_search, keyword }
  * Series:  /thong-tin-phim/{slug}-{id}.html
- * Watch:   /xem-phim/{slug}-tap-{n}-{epid}.html
- * Servers: $wp_servers  AHS (vipah06) · HY (abyss)
- * v1.0.0
+ * Watch:   /xem-phim/{slug}-tap-{n|full}-{epid}.html
+ * Servers: $wp_servers — AHS (vipah06 HLS) · HY (abyss)
+ * v1.0.1 — slug-safe episodes + prefer HD
  */
 const baseUrl = "https://animehay11.site";
 const UA =
@@ -73,6 +73,8 @@ function absUrl(u) {
   u = String(u).replace(/&amp;/g, "&").trim();
   if (u.indexOf("//") === 0) return "https:" + u;
   if (u.charAt(0) === "/") return baseUrl + u;
+  // fix double slash after host: site.com//upload
+  u = u.replace(/^(https?:\/\/[^/]+)\/\//, "$1/");
   return u;
 }
 function decodeEntities(s) {
@@ -96,10 +98,22 @@ function cleanQuery(keyword) {
     .replace(/\s+/g, " ")
     .trim();
 }
+function escapeRe(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function parseHref(url) {
   const s = String(url || "");
-  let m = s.match(/\/xem-phim\/([^/?#]+)-tap-(\d+)-(\d+)\.html/i);
+  let m = s.match(/\/xem-phim\/([^/?#]+)-tap-full-(\d+)\.html/i);
+  if (m)
+    return {
+      type: "watch",
+      slug: m[1],
+      episode: 1,
+      episodeId: m[2],
+      movieId: "",
+    };
+  m = s.match(/\/xem-phim\/([^/?#]+)-tap-(\d+)-(\d+)\.html/i);
   if (m)
     return {
       type: "watch",
@@ -120,6 +134,10 @@ function parseHref(url) {
   return { type: "unknown", slug: "", episode: 0, episodeId: "", movieId: "" };
 }
 
+function seriesSlugFromUrl(url) {
+  return parseHref(url).slug || "";
+}
+
 function parseWpServers(html) {
   const out = [];
   const m = String(html || "").match(/\$wp_servers\s*=\s*\{([\s\S]*?)\};/);
@@ -132,37 +150,69 @@ function parseWpServers(html) {
   return out;
 }
 
-/** Resolve vipah06 embed-jw/{id} → master.m3u8 */
+/**
+ * Prefer HD variant from vipah06 master playlist.
+ * master has: sd/index.m3u8 (~2.2M) and hd/index.m3u8 (~5M)
+ */
+function preferHdFromMaster(masterUrl) {
+  const list = [];
+  const master = forceHttps(masterUrl);
+  if (!master) return list;
+  // Absolute HD/SD under same directory as master
+  const base = master.replace(/\/master\.m3u8(\?.*)?$/i, "/");
+  const hd = base + "hd/index.m3u8";
+  const sd = base + "sd/index.m3u8";
+  list.push({ url: hd, label: "HD" });
+  list.push({ url: sd, label: "SD" });
+  list.push({ url: master, label: "Auto" });
+  return list;
+}
+
 async function resolveAhs(embedUrl) {
-  const streams = [];
+  const results = [];
   const idMatch = String(embedUrl).match(/embed-jw\/(\d+)/i);
   const id = idMatch ? idMatch[1] : "";
-  // 1) Fetch embed page for exact CDN host
+  let masters = [];
+
   try {
     const html = await getText(
       await soraFetch(embedUrl, {
         headers: { Referer: baseUrl + "/", Accept: "text/html,*/*" },
       })
     );
-    const found = html.match(/https?:\/\/s\d+\.vipah06\.xyz\/hls\/\d+\/master\.m3u8/gi) || [];
-    for (let i = 0; i < found.length; i++) {
-      streams.push(forceHttps(found[i]));
-    }
+    const found =
+      html.match(/https?:\/\/s\d+\.vipah06\.xyz\/hls\/\d+\/master\.m3u8/gi) ||
+      [];
+    for (let i = 0; i < found.length; i++) masters.push(forceHttps(found[i]));
   } catch (e) {}
-  // 2) Fallback guess common hosts if page parse empty
-  if (!streams.length && id) {
-    const hosts = ["s5", "s4", "s3", "s2", "s1", "s6", "s7"];
+
+  if (!masters.length && id) {
+    const hosts = ["s5", "s4", "s6", "s3", "s2", "s1", "s7"];
     for (let i = 0; i < hosts.length; i++) {
-      streams.push(
+      masters.push(
         "https://" + hosts[i] + ".vipah06.xyz/hls/" + id + "/master.m3u8"
       );
     }
   }
-  return streams;
+
+  // Expand each master → HD first, then SD, then Auto
+  const seen = {};
+  for (let i = 0; i < masters.length; i++) {
+    const variants = preferHdFromMaster(masters[i]);
+    for (let j = 0; j < variants.length; j++) {
+      const u = variants[j].url;
+      if (seen[u]) continue;
+      seen[u] = true;
+      results.push({ url: u, quality: variants[j].label });
+    }
+    // Only expand first working-looking master host (avoid 7 hosts × 3)
+    if (results.length) break;
+  }
+  return results;
 }
 
 async function resolveEmbedGeneric(embedUrl) {
-  const streams = [];
+  const results = [];
   try {
     const html = await getText(
       await soraFetch(embedUrl, {
@@ -171,18 +221,21 @@ async function resolveEmbedGeneric(embedUrl) {
     );
     const m3u8s =
       html.match(/https?:\/\/[^"'\\\s<>]+m3u8[^"'\\\s<>]*/gi) || [];
+    const seen = {};
     for (let i = 0; i < m3u8s.length; i++) {
       const u = forceHttps(m3u8s[i].replace(/\\/g, ""));
-      if (isHttp(u)) streams.push(u);
-    }
-    const files =
-      html.match(/["']file["']\s*:\s*["']([^"']+\.m3u8[^"']*)/gi) || [];
-    for (let i = 0; i < files.length; i++) {
-      const mm = files[i].match(/["'](https?:[^"']+)["']/);
-      if (mm) streams.push(forceHttps(mm[1]));
+      if (!isHttp(u) || seen[u]) continue;
+      seen[u] = true;
+      const q = /\/hd\//i.test(u) ? "HD" : /\/sd\//i.test(u) ? "SD" : "HLS";
+      results.push({ url: u, quality: q });
     }
   } catch (e) {}
-  return streams;
+  // HD first
+  results.sort(function (a, b) {
+    const rank = { HD: 0, HLS: 1, Auto: 2, SD: 3 };
+    return (rank[a.quality] || 9) - (rank[b.quality] || 9);
+  });
+  return results;
 }
 
 /* ===================== SEARCH ===================== */
@@ -213,13 +266,14 @@ async function searchResults(keyword) {
       const href = absUrl(it.url);
       if (seen[href]) continue;
       seen[href] = true;
+      let poster = String(it.poster || "");
+      poster = poster.replace(/([^:])\/\//g, "$1/");
       results.push({
         title: decodeEntities(it.name || "").trim() || "Anime",
-        image: absUrl(String(it.poster || "").replace(/\/\//g, "/").replace(":/", "://")),
+        image: absUrl(poster),
         href: href,
       });
     }
-    // HTML fallback if API empty
     if (!results.length) {
       const html = await getText(
         await soraFetch(
@@ -227,7 +281,7 @@ async function searchResults(keyword) {
         )
       );
       const re =
-        /href="(https?:\/\/[^"]*thong-tin-phim\/[^"]+\.html)"[^>]*title="([^"]*)"[\s\S]*?<img[^>]+src="([^"]+)"/gi;
+        /href="(https?:\/\/[^"]*thong-tin-phim\/[^"]+\.html)"[^>]*title="([^"]*)"[\s\S]{0,400}?src="([^"]+)"/gi;
       let m;
       while ((m = re.exec(html))) {
         const href = m[1];
@@ -272,7 +326,11 @@ async function extractDetails(url) {
     const y = html.match(/(20\d{2}|19\d{2})/);
     if (y) airdate = y[1];
     return JSON.stringify([
-      { description: description || "N/A", aliases: aliases, airdate: airdate },
+      {
+        description: description || "N/A",
+        aliases: aliases,
+        airdate: airdate,
+      },
     ]);
   } catch (e) {
     return JSON.stringify([
@@ -285,33 +343,65 @@ async function extractDetails(url) {
 async function extractEpisodes(url) {
   try {
     let seriesUrl = url;
+    let seriesSlug = seriesSlugFromUrl(url);
     const p = parseHref(url);
+
     if (p.type === "watch") {
-      // Try to find series link on page, else build from slug
       const html0 = await getText(await soraFetch(url));
-      const ser = html0.match(
-        /href="(https?:\/\/[^"]*thong-tin-phim\/[^"]+\.html)"/i
-      );
-      if (ser) seriesUrl = ser[1];
-      else if (p.slug)
-        seriesUrl = baseUrl + "/thong-tin-phim/" + p.slug + ".html";
+      const reSer =
+        /href="(https?:\/\/[^"]*\/thong-tin-phim\/([^"/]+)-(\d+)\.html)"/gi;
+      let mm;
+      let found = "";
+      while ((mm = reSer.exec(html0))) {
+        if (seriesSlug && mm[2] === seriesSlug) {
+          found = mm[1];
+          break;
+        }
+        if (!found) found = mm[1];
+      }
+      if (found) {
+        seriesUrl = found;
+        seriesSlug = seriesSlugFromUrl(found) || seriesSlug;
+      }
     }
+
     const html = await getText(await soraFetch(seriesUrl));
+    if (!seriesSlug) seriesSlug = seriesSlugFromUrl(seriesUrl);
+    if (!seriesSlug) return JSON.stringify([]);
+
     const eps = [];
     const seen = {};
-    const re =
-      /href="(https?:\/\/[^"]*\/xem-phim\/[^"]*-tap-(\d+)-\d+\.html)"/gi;
+    const re = new RegExp(
+      'href="(https?:\\/\\/[^"]*\\/xem-phim\\/' +
+        escapeRe(seriesSlug) +
+        '-tap-(full|\\d+)-(\\d+)\\.html)"',
+      "gi"
+    );
     let m;
     while ((m = re.exec(html))) {
-      const num = parseInt(m[2], 10);
-      if (seen[num]) continue;
+      const href = m[1];
+      const part = String(m[2]).toLowerCase();
+      const num = part === "full" ? 1 : parseInt(part, 10);
+      if (!num || seen[num]) continue;
       seen[num] = true;
       eps.push({
-        href: m[1],
+        href: href,
         number: num,
-        title: "Tập " + num,
+        title: part === "full" ? "Full Movie" : "Tập " + num,
       });
     }
+
+    if (!eps.length) {
+      const reFull = new RegExp(
+        'href="(https?:\\/\\/[^"]*\\/xem-phim\\/' +
+          escapeRe(seriesSlug) +
+          '-tap-full-\\d+\\.html)"',
+        "i"
+      );
+      const mf = html.match(reFull);
+      if (mf) eps.push({ href: mf[1], number: 1, title: "Full Movie" });
+    }
+
     eps.sort(function (a, b) {
       return a.number - b.number;
     });
@@ -328,17 +418,9 @@ async function extractStreamUrl(url) {
     const servers = parseWpServers(html);
     const streams = [];
     const seen = {};
-    const headersBase = {
-      "User-Agent": UA,
-      Accept: "*/*",
-      Referer: baseUrl + "/",
-    };
 
-    // Prefer AHS first
     servers.sort(function (a, b) {
-      const ar = a.name === "AHS" ? 0 : 1;
-      const br = b.name === "AHS" ? 0 : 1;
-      return ar - br;
+      return (a.name === "AHS" ? 0 : 1) - (b.name === "AHS" ? 0 : 1);
     });
 
     for (let i = 0; i < servers.length; i++) {
@@ -347,36 +429,57 @@ async function extractStreamUrl(url) {
       const embed = srv.url;
       if (!isHttp(embed)) continue;
 
-      let urls = [];
+      let items = [];
+      let ref = baseUrl + "/";
+      let origin = baseUrl;
+
       if (/vipah06\.xyz|embed-jw/i.test(embed) || name === "AHS") {
-        urls = await resolveAhs(embed);
-        headersBase.Referer = "https://main.vipah06.xyz/";
-        headersBase.Origin = "https://main.vipah06.xyz";
+        items = await resolveAhs(embed);
+        ref = "https://main.vipah06.xyz/";
+        origin = "https://main.vipah06.xyz";
       } else {
-        urls = await resolveEmbedGeneric(embed);
-        headersBase.Referer = embed.replace(/^(https?:\/\/[^/]+).*/, "$1/") || baseUrl + "/";
+        items = await resolveEmbedGeneric(embed);
+        const om = embed.match(/^(https?:\/\/[^/]+)/);
+        if (om) {
+          ref = om[1] + "/";
+          origin = om[1];
+        }
       }
 
-      for (let j = 0; j < urls.length; j++) {
-        const media = forceHttps(urls[j]);
+      // Sort HD → Auto → SD
+      items.sort(function (a, b) {
+        const rank = { HD: 0, Auto: 1, HLS: 2, SD: 3 };
+        return (rank[a.quality] || 9) - (rank[b.quality] || 9);
+      });
+
+      for (let j = 0; j < items.length; j++) {
+        const media = forceHttps(items[j].url);
         if (!isHttp(media) || seen[media]) continue;
         if (media.indexOf("m3u8") < 0 && !/\.mp4(\?|$)/i.test(media)) continue;
         seen[media] = true;
+        const q = items[j].quality || "HLS";
         streams.push({
-          title: name + (urls.length > 1 ? " · " + (j + 1) : ""),
+          title: name + " · " + q,
           streamUrl: media,
           headers: {
             "User-Agent": UA,
             Accept: "*/*",
-            Referer: headersBase.Referer,
-            Origin: headersBase.Origin || baseUrl,
+            Referer: ref,
+            Origin: origin,
           },
         });
       }
     }
 
+    // Overall: HD titles first
+    streams.sort(function (a, b) {
+      const ah = /HD/i.test(a.title) ? 0 : /Auto/i.test(a.title) ? 1 : 2;
+      const bh = /HD/i.test(b.title) ? 0 : /Auto/i.test(b.title) ? 1 : 2;
+      return ah - bh;
+    });
+
     return JSON.stringify({
-      streams: streams.slice(0, 10),
+      streams: streams.slice(0, 12),
       subtitles: "",
     });
   } catch (e) {
