@@ -1,9 +1,10 @@
 /**
  * RapPhim (rapphim.vip) – Sora / Luna
  * API: https://api.rapphim.vip/api
+ * Search: anime only (filter movies)
  * Streams: /upload/signed-urls/{movieId}/{epIndex}
  * Subs: VI on s1.cloud152.stream
- * v1.0.3
+ * v1.0.4
  */
 const baseUrl = "https://rapphim.vip";
 const apiBase = "https://api.rapphim.vip/api";
@@ -121,14 +122,13 @@ function parseHref(url) {
   return { slug: "", episode: 0, type: "unknown" };
 }
 
-function seriesHref(slug, isAnime) {
-  return isAnime ? baseUrl + "/anime/" + slug : baseUrl + "/phim/" + slug;
+function seriesHref(slug) {
+  return baseUrl + "/anime/" + slug;
 }
-function watchHref(slug, ep, isAnime) {
-  return isAnime
-    ? baseUrl + "/anime/" + slug + "/xem/tap-" + ep
-    : baseUrl + "/phim/" + slug + "/xem";
+function watchHref(slug, ep) {
+  return baseUrl + "/anime/" + slug + "/xem/tap-" + ep;
 }
+
 function serverRank(name) {
   const n = String(name || "").toLowerCase();
   if (n.indexOf("zeus") >= 0) return 0;
@@ -138,8 +138,25 @@ function serverRank(name) {
   return 5;
 }
 
-async function apiGet(path) {
-  return await getJson(await soraFetch(apiBase + path));
+function isAnimeItem(it) {
+  if (!it) return false;
+  if (it.isAnime === true) return true;
+  if (it.anilistId || it.malId) return true;
+  const type = String(it.type || "").toLowerCase();
+  if (type === "series" || type === "anime" || type === "tv") return true;
+  if (type === "movie" || type === "film") return false;
+  const slug = String(it.slug || it.href || "").toLowerCase();
+  if (slug.indexOf("/anime/") >= 0) return true;
+  const cats = it.categories || it.genres || [];
+  if (Array.isArray(cats)) {
+    for (let i = 0; i < cats.length; i++) {
+      const n = String(
+        (cats[i] && (cats[i].name || cats[i].slug || cats[i])) || ""
+      ).toLowerCase();
+      if (n.indexOf("anime") >= 0 || n.indexOf("hoat-hinh") >= 0) return true;
+    }
+  }
+  return false;
 }
 
 function scoreTitle(query, title, slug) {
@@ -160,16 +177,19 @@ function scoreTitle(query, title, slug) {
   return Math.round((hit / qw.length) * 70);
 }
 
+async function apiGet(path) {
+  return await getJson(await soraFetch(apiBase + path));
+}
+
 async function searchFromAnimePage(keyword) {
   const results = [];
-  const seen = {};
   try {
     const html = await getText(await soraFetch(baseUrl + "/anime"));
     if (!html) return results;
     const reLink = /href="\/anime\/([a-z0-9-]+)"/gi;
     let m;
-    const slugs = [];
     const seenSlug = {};
+    const slugs = [];
     while ((m = reLink.exec(html))) {
       const slug = m[1];
       if (slug === "danh-sach" || slug === "lich-chieu" || seenSlug[slug])
@@ -214,7 +234,6 @@ async function searchFromAnimePage(keyword) {
           tokenHit++;
       }
       if (sc < 20 && !(tokens.length && tokenHit >= 1)) continue;
-      seen[slug] = true;
       let image = "";
       if (idx >= 0) {
         const im = html.substr(idx, 1100).match(/src="(https?:\/\/[^"]+)"/i);
@@ -223,7 +242,7 @@ async function searchFromAnimePage(keyword) {
       results.push({
         title: title || eng || slug,
         image: absUrl(image),
-        href: baseUrl + "/anime/" + slug,
+        href: seriesHref(slug),
         _score: sc || 30 + tokenHit * 10,
       });
     }
@@ -243,7 +262,6 @@ async function searchResults(keyword) {
     const results = [];
     const seen = {};
 
-    // Light API attempts
     const tries = [cleaned];
     const words = cleaned.match(/[A-Za-z0-9\u00C0-\u024F]+/g) || [];
     if (words.length >= 2) tries.push(words.slice(0, 2).join(" "));
@@ -252,19 +270,15 @@ async function searchResults(keyword) {
     for (let v = 0; v < tries.length; v++) {
       try {
         const data = await apiGet(
-          "/movies?q=" + encodeURIComponent(tries[v]) + "&limit=15"
+          "/movies?q=" + encodeURIComponent(tries[v]) + "&limit=25"
         );
         let items = (data && data.data) || [];
         if (!Array.isArray(items)) items = [];
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
           if (!it || !it.slug || seen[it.slug]) continue;
+          if (!isAnimeItem(it)) continue;
           seen[it.slug] = true;
-          const isAnime = !!(
-            it.isAnime ||
-            it.type === "series" ||
-            it.anilistId
-          );
           const title =
             it.title || it.englishName || it.originalTitle || it.slug;
           const image =
@@ -276,13 +290,32 @@ async function searchResults(keyword) {
           results.push({
             title: String(title).trim(),
             image: absUrl(image),
-            href: seriesHref(it.slug, isAnime || it.type !== "movie"),
+            href: seriesHref(it.slug),
           });
         }
       } catch (e) {}
     }
 
-    // Anime hub page (Mushoku / Bleach TYBW live here)
+    try {
+      const ac = await apiGet(
+        "/movies/search/autocomplete?q=" +
+          encodeURIComponent(cleaned) +
+          "&limit=20"
+      );
+      const sug = (ac && ac.data && ac.data.suggestions) || [];
+      for (let i = 0; i < sug.length; i++) {
+        const it = sug[i];
+        if (!it || !it.slug || seen[it.slug]) continue;
+        if (!isAnimeItem(it)) continue;
+        seen[it.slug] = true;
+        results.push({
+          title: String(it.title || it.slug).trim(),
+          image: absUrl(it.posterUrl || ""),
+          href: seriesHref(it.slug),
+        });
+      }
+    } catch (e) {}
+
     try {
       const pageHits = await searchFromAnimePage(cleaned);
       for (let i = 0; i < pageHits.length; i++) {
@@ -290,7 +323,11 @@ async function searchResults(keyword) {
         const slug = parseHref(it.href).slug;
         if (!slug || seen[slug]) continue;
         seen[slug] = true;
-        results.push(it);
+        results.push({
+          title: it.title,
+          image: it.image || "",
+          href: seriesHref(slug),
+        });
       }
     } catch (e) {}
 
@@ -334,7 +371,6 @@ async function extractEpisodes(url) {
     if (!p.slug) return JSON.stringify([]);
     const data = await apiGet("/movies/slug/" + encodeURIComponent(p.slug));
     const d = (data && data.data) || {};
-    const isAnime = !!(d.isAnime || d.type === "series");
     const epsRaw = d.episodes || [];
     const eps = [];
     const seen = {};
@@ -345,7 +381,7 @@ async function extractEpisodes(url) {
       if (seen[num]) continue;
       seen[num] = true;
       eps.push({
-        href: watchHref(p.slug, num, isAnime),
+        href: watchHref(p.slug, num),
         number: num,
         title:
           e.title && String(e.title).trim()
@@ -355,7 +391,7 @@ async function extractEpisodes(url) {
     }
     if (!eps.length) {
       eps.push({
-        href: watchHref(p.slug, 1, isAnime),
+        href: watchHref(p.slug, 1),
         number: 1,
         title: d.type === "movie" ? "Full Movie" : "Tập 1",
       });
@@ -443,7 +479,6 @@ async function extractStreamUrl(url) {
       });
     }
 
-    // Vietnamese first
     const pairs = [];
     let viUrl = "";
     for (let i = 0; i < subList.length; i++) {
@@ -454,12 +489,15 @@ async function extractStreamUrl(url) {
       const label = String(sub.label || lang || "und");
       const isVi =
         /^(vi|vie)/i.test(lang) || /việt|tiếng việt/i.test(label);
-      pairs.push({ url: su, language: isVi ? "vi" : lang || "und", label: label });
+      pairs.push({
+        url: su,
+        language: isVi ? "vi" : lang || "und",
+        label: label,
+      });
       if (isVi && !viUrl) viUrl = su;
     }
     if (!viUrl && pairs.length) viUrl = pairs[0].url;
 
-    // Attach VI to each stream (diziwatch-style)
     for (let i = 0; i < streams.length; i++) {
       if (viUrl) streams[i].subtitle = viUrl;
     }
