@@ -1,9 +1,10 @@
 /**
- * MeAnime / meanime.net – Sora / Luna
- * Search:  GET /api/public/search?keyword=
- * Film:    GET /api/public/film/{slug}
- * Stream:  GET /api/public/playback?slug=&ep=&server=
- * v1.0.0
+ * MeAnime (meanime.net) – Sora / Luna
+ * Search:   GET /api/public/search?keyword=
+ * Details:  GET /api/public/film/{slug}
+ * Episodes: film.episodes[].server_data
+ * Streams:  GET /api/public/playback?slug=&ep=&server=
+ * v1.0.1
  */
 const baseUrl = "https://www.meanime.net";
 const UA =
@@ -99,11 +100,10 @@ function cleanQuery(keyword) {
 function parseHref(url) {
   const s = String(url || "");
   let m = s.match(/\/phim\/([^/?#]+)\/xem\/(tap-\d+|full)(?:\?[^#]*)?/i);
-  if (m)
-    return { type: "watch", slug: m[1], episodeSlug: m[2], server: "" };
+  if (m) return { type: "watch", slug: m[1], episodeSlug: m[2] };
   m = s.match(/\/phim\/([^/?#]+)\/?/i);
-  if (m) return { type: "series", slug: m[1], episodeSlug: "", server: "" };
-  return { type: "unknown", slug: "", episodeSlug: "", server: "" };
+  if (m) return { type: "series", slug: m[1], episodeSlug: "" };
+  return { type: "unknown", slug: "", episodeSlug: "" };
 }
 
 function epNum(slug) {
@@ -121,9 +121,41 @@ function hostLabel(u) {
     if (h.indexOf("kkphim") >= 0) return "KKPhim";
     if (h.indexOf("opstream") >= 0) return "OPhim";
     if (h.indexOf("streamc") >= 0) return "StreamC";
+    if (h.indexOf("phimapi") >= 0) return "PhimAPI";
     return h.split(".")[0] || "HLS";
   } catch (e) {
     return "HLS";
+  }
+}
+
+function pushM3u8(streams, seen, m3u8, title, headers) {
+  m3u8 = forceHttps(String(m3u8 || "").trim());
+  if (!isHttp(m3u8)) return;
+  if (m3u8.indexOf("m3u8") < 0 && !/\.mp4(\?|$)/i.test(m3u8)) return;
+  if (seen[m3u8]) return;
+  seen[m3u8] = true;
+  streams.push({
+    title: title || hostLabel(m3u8),
+    streamUrl: m3u8,
+    headers: headers,
+  });
+}
+
+function extractFromEmbedList(embeds, streams, seen, serverName, headers) {
+  if (!embeds || !embeds.length) return;
+  for (let i = 0; i < embeds.length; i++) {
+    const emb = String(embeds[i] || "");
+    // player.phimapi.com/player/?url=https://...m3u8
+    const mm = emb.match(/[?&]url=([^&]+)/i);
+    if (mm) {
+      let u = mm[1];
+      try {
+        u = decodeURIComponent(u);
+      } catch (e) {}
+      const title =
+        (serverName ? serverName + " · " : "") + hostLabel(u);
+      pushM3u8(streams, seen, u, title, headers);
+    }
   }
 }
 
@@ -152,9 +184,11 @@ async function searchResults(keyword) {
       const title = decodeEntities(item.name || item.original_name || item.slug)
         .replace(/\s+/g, " ")
         .trim();
-      let image = item.poster_url || item.thumb_url || "";
-      image = absUrl(image);
-      results.push({ title: title, image: image, href: href });
+      results.push({
+        title: title,
+        image: absUrl(item.poster_url || item.thumb_url || ""),
+        href: href,
+      });
     }
     return JSON.stringify(results.slice(0, 30));
   } catch (e) {
@@ -209,18 +243,14 @@ async function extractEpisodes(url) {
     const f = (data && data.film) || {};
     const servers = f.episodes || [];
 
-    // Prefer Vietsub server for episode list completeness
     let list = [];
-    let pick = null;
     for (let i = 0; i < servers.length; i++) {
-      const sn = String(servers[i].server_name || "");
-      if (/vietsub/i.test(sn)) {
-        pick = servers[i];
+      if (/vietsub/i.test(String(servers[i].server_name || ""))) {
+        list = servers[i].server_data || [];
         break;
       }
     }
-    if (!pick && servers.length) pick = servers[0];
-    if (pick) list = pick.server_data || [];
+    if (!list.length && servers[0]) list = servers[0].server_data || [];
 
     const eps = [];
     const seen = {};
@@ -251,44 +281,31 @@ async function extractStreamUrl(url) {
     let p = parseHref(url);
     if (!p.slug) return JSON.stringify({ streams: [], subtitles: "" });
 
-    // Resolve series → first ep
-    if (p.type === "series" || !p.episodeSlug) {
-      const data = await getJson(
-        await soraFetch(
-          baseUrl + "/api/public/film/" + encodeURIComponent(p.slug),
-          { headers: { Accept: "application/json" } }
-        )
-      );
-      const servers = ((data && data.film) || {}).episodes || [];
-      let list = [];
-      for (let i = 0; i < servers.length; i++) {
-        if (/vietsub/i.test(String(servers[i].server_name || ""))) {
-          list = servers[i].server_data || [];
-          break;
-        }
-      }
-      if (!list.length && servers[0]) list = servers[0].server_data || [];
-      if (!list.length) return JSON.stringify({ streams: [], subtitles: "" });
-      p.episodeSlug = list[0].slug;
-    }
-
-    // Load film once to get all server names
     const filmData = await getJson(
       await soraFetch(
         baseUrl + "/api/public/film/" + encodeURIComponent(p.slug),
         { headers: { Accept: "application/json" } }
       )
     );
-    const serverList = ((filmData && filmData.film) || {}).episodes || [];
-    const serverNames = [];
-    for (let i = 0; i < serverList.length; i++) {
-      const n = serverList[i].server_name;
-      if (n) serverNames.push(n);
-    }
-    if (!serverNames.length) serverNames.push("");
+    const film = (filmData && filmData.film) || {};
+    const serverList = film.episodes || [];
 
-    const streams = [];
-    const seen = {};
+    // Resolve first episode if series page
+    if (!p.episodeSlug) {
+      let list = [];
+      for (let i = 0; i < serverList.length; i++) {
+        if (/vietsub/i.test(String(serverList[i].server_name || ""))) {
+          list = serverList[i].server_data || [];
+          break;
+        }
+      }
+      if (!list.length && serverList[0])
+        list = serverList[0].server_data || [];
+      if (!list.length)
+        return JSON.stringify({ streams: [], subtitles: "" });
+      p.episodeSlug = list[0].slug;
+    }
+
     const headers = {
       "User-Agent": UA,
       Accept: "*/*",
@@ -296,72 +313,74 @@ async function extractStreamUrl(url) {
       Origin: baseUrl,
     };
 
-    for (let s = 0; s < serverNames.length; s++) {
-      const serverName = serverNames[s];
-      let api =
-        baseUrl +
-        "/api/public/playback?slug=" +
-        encodeURIComponent(p.slug) +
-        "&ep=" +
-        encodeURIComponent(p.episodeSlug);
-      if (serverName) api += "&server=" + encodeURIComponent(serverName);
+    const streams = [];
+    const seen = {};
 
-      let body = null;
+    // 1) Playback WITHOUT server (often returns full hls list)
+    const basePlay =
+      baseUrl +
+      "/api/public/playback?slug=" +
+      encodeURIComponent(p.slug) +
+      "&ep=" +
+      encodeURIComponent(p.episodeSlug);
+
+    let body = await getJson(
+      await soraFetch(basePlay, { headers: { Accept: "application/json" } })
+    );
+    if (body && body.status !== "error") {
+      const hls = body.hls || [];
+      for (let i = 0; i < hls.length; i++) {
+        pushM3u8(
+          streams,
+          seen,
+          hls[i],
+          hostLabel(hls[i]) + " · HLS",
+          headers
+        );
+      }
+      extractFromEmbedList(body.embed, streams, seen, "", headers);
+    }
+
+    // 2) Per-server (Vietsub / Lồng Tiếng …) — # must be encoded
+    for (let s = 0; s < serverList.length; s++) {
+      const serverName = String(serverList[s].server_name || "").trim();
+      if (!serverName) continue;
+      const api =
+        basePlay + "&server=" + encodeURIComponent(serverName);
+      let pb = null;
       try {
-        body = await getJson(
+        pb = await getJson(
           await soraFetch(api, { headers: { Accept: "application/json" } })
         );
       } catch (e) {
         continue;
       }
-      if (!body || body.status === "error") continue;
-
-      const hls = body.hls || [];
+      if (!pb || pb.status === "error") continue;
+      const hls = pb.hls || [];
       for (let i = 0; i < hls.length; i++) {
-        let m3u8 = forceHttps(hls[i]);
-        if (!isHttp(m3u8) || m3u8.indexOf("m3u8") < 0) continue;
-        if (seen[m3u8]) continue;
-        seen[m3u8] = true;
-        const label =
-          (serverName ? serverName + " · " : "") + hostLabel(m3u8);
-        streams.push({
-          title: label,
-          streamUrl: m3u8,
-          headers: headers,
-        });
+        pushM3u8(
+          streams,
+          seen,
+          hls[i],
+          serverName + " · " + hostLabel(hls[i]),
+          headers
+        );
       }
-
-      // fallback: pull m3u8 out of player.phimapi embed urls
-      const embeds = body.embed || [];
-      for (let i = 0; i < embeds.length; i++) {
-        const emb = String(embeds[i] || "");
-        const mm = emb.match(/[?&]url=([^&]+)/i);
-        if (!mm) continue;
-        let m3u8 = mm[1];
-        try {
-          m3u8 = decodeURIComponent(m3u8);
-        } catch (e2) {}
-        m3u8 = forceHttps(m3u8);
-        if (!isHttp(m3u8) || m3u8.indexOf("m3u8") < 0) continue;
-        if (seen[m3u8]) continue;
-        seen[m3u8] = true;
-        streams.push({
-          title: (serverName ? serverName + " · " : "") + hostLabel(m3u8),
-          streamUrl: m3u8,
-          headers: headers,
-        });
-      }
+      extractFromEmbedList(pb.embed, streams, seen, serverName, headers);
     }
 
-    // Prefer Vietsub titles first
+    // Prefer Vietsub-labeled first
     streams.sort(function (a, b) {
       const av = /vietsub/i.test(a.title) ? 0 : 1;
       const bv = /vietsub/i.test(b.title) ? 0 : 1;
-      return av - bv;
+      if (av !== bv) return av - bv;
+      const ap = /phim1280/i.test(a.title) ? 0 : 1;
+      const bp = /phim1280/i.test(b.title) ? 0 : 1;
+      return ap - bp;
     });
 
     return JSON.stringify({
-      streams: streams.slice(0, 10),
+      streams: streams.slice(0, 12),
       subtitles: "",
     });
   } catch (e) {
