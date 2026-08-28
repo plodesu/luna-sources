@@ -1,11 +1,11 @@
 /**
  * RapPhim (rapphim.vip) – Sora / Luna
  * API: https://api.rapphim.vip/api
- * Search: GET /movies?q=
+ * Search: GET /movies?q= + autocomplete + /anime page fallback
  * Detail: GET /movies/slug/{slug}
- * Streams: episode.sources[] (hls) – prefer Zeus when present
+ * Streams: episode.sources[] (HLS) – Zeus > KAA > Miruro > Vietsub
  * Softsub: episode.subtitles[] (.vtt)
- * v1.0.0
+ * v1.0.1
  */
 const baseUrl = "https://rapphim.vip";
 const apiBase = "https://api.rapphim.vip/api";
@@ -85,9 +85,63 @@ function cleanQuery(keyword) {
     .trim();
 }
 
+function norm(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function queryVariants(keyword) {
+  const raw = String(keyword || "").trim();
+  const out = [];
+  const push = function (v) {
+    v = String(v || "").trim();
+    if (v && out.indexOf(v) < 0) out.push(v);
+  };
+  push(raw);
+  let c = raw
+    .replace(/\((?:Ss?|Season)\s*\d+\)/gi, " ")
+    .replace(/\b(?:Ss?|Season)\s*\d+\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  push(c);
+  push(c.split(":")[0]);
+  push(c.split(" - ")[0]);
+  const words = c.match(/[A-Za-z0-9\u00C0-\u024F]+/g) || [];
+  if (words.length >= 2) push(words.slice(0, 2).join(" "));
+  if (words.length >= 3) push(words.slice(0, 3).join(" "));
+  if (words.length) push(words[0]);
+  push(
+    c
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+  );
+  return out.slice(0, 8);
+}
+
+function scoreTitle(query, title, slug) {
+  const q = norm(query);
+  const t = norm(title);
+  const s = norm(slug).replace(/-/g, " ");
+  if (!q) return 0;
+  if (t === q || s === q) return 100;
+  if (t.indexOf(q) >= 0 || s.indexOf(q) >= 0) return 80;
+  const qw = q.split(" ").filter(Boolean);
+  let hit = 0;
+  for (let i = 0; i < qw.length; i++) {
+    if (t.indexOf(qw[i]) >= 0 || s.indexOf(qw[i]) >= 0) hit++;
+  }
+  if (!qw.length) return 0;
+  return Math.round((hit / qw.length) * 60);
+}
+
 function parseHref(url) {
   const s = String(url || "");
-  // /anime/{slug}/xem/tap-3  or /phim/{slug}/xem
   let m = s.match(/\/(?:anime|phim)\/([^/?#]+)\/xem(?:\/tap-(\d+))?/i);
   if (m)
     return {
@@ -102,11 +156,6 @@ function parseHref(url) {
       episode: 0,
       type: s.indexOf("/anime/") >= 0 ? "anime" : "movie",
     };
-  // custom href we store: rapphim://{slug}|{ep}
-  m = s.match(/^rapphim:\/\/([^|]+)\|(\d+)/i);
-  if (m) return { slug: m[1], episode: parseInt(m[2], 10), type: "anime" };
-  m = s.match(/^rapphim:\/\/([^|]+)/i);
-  if (m) return { slug: m[1], episode: 0, type: "anime" };
   return { slug: "", episode: 0, type: "unknown" };
 }
 
@@ -130,8 +179,61 @@ function serverRank(name) {
 }
 
 async function apiGet(path) {
-  const data = await getJson(await soraFetch(apiBase + path));
-  return data;
+  return await getJson(await soraFetch(apiBase + path));
+}
+
+async function searchFromAnimePages(keyword) {
+  const results = [];
+  const seen = {};
+  const pages = [baseUrl + "/anime", baseUrl + "/anime/danh-sach"];
+  const qn = norm(keyword);
+  const first = qn.split(" ")[0] || "";
+
+  for (let p = 0; p < pages.length; p++) {
+    try {
+      const html = await getText(await soraFetch(pages[p]));
+      const re =
+        /href="\/anime\/([a-z0-9-]+)"[^>]*>[\s\S]{0,500}?alt="([^"]*)"/gi;
+      let m;
+      while ((m = re.exec(html))) {
+        const slug = m[1];
+        if (
+          slug === "danh-sach" ||
+          slug === "lich-chieu" ||
+          seen[slug]
+        )
+          continue;
+        const title = m[2] || slug;
+        let sc = scoreTitle(keyword, title, slug);
+        if (sc < 25 && first) {
+          const around = html
+            .substr(Math.max(0, m.index - 80), 600)
+            .toLowerCase();
+          if (around.indexOf(first) < 0 && sc < 20) continue;
+          if (around.indexOf(first) >= 0) sc = Math.max(sc, 40);
+        }
+        if (sc < 20) continue;
+        seen[slug] = true;
+        // try grab poster nearby
+        let image = "";
+        const chunk = html.substr(m.index, 800);
+        const im = chunk.match(/src="(https?:\/\/[^"]+)"/i);
+        if (im) image = im[1];
+        results.push({
+          title: title,
+          image: absUrl(image),
+          href: baseUrl + "/anime/" + slug,
+          _score: sc,
+        });
+      }
+    } catch (e) {}
+  }
+
+  results.sort(function (a, b) {
+    return (b._score || 0) - (a._score || 0);
+  });
+  for (let i = 0; i < results.length; i++) delete results[i]._score;
+  return results;
 }
 
 /* ===================== SEARCH ===================== */
@@ -139,42 +241,84 @@ async function searchResults(keyword) {
   try {
     const cleaned = cleanQuery(keyword);
     if (!cleaned) return JSON.stringify([]);
-    const data = await apiGet(
-      "/movies?q=" + encodeURIComponent(cleaned) + "&limit=30"
-    );
-    let items = (data && data.data) || [];
-    if (!Array.isArray(items)) items = [];
-    // autocomplete fallback
-    if (!items.length) {
-      const ac = await apiGet(
-        "/movies/search/autocomplete?q=" +
-          encodeURIComponent(cleaned) +
-          "&limit=20"
-      );
-      items = ((ac && ac.data && ac.data.suggestions) || []).slice();
-    }
+
+    const variants = queryVariants(cleaned);
     const results = [];
     const seen = {};
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      if (!it || !it.slug) continue;
-      if (seen[it.slug]) continue;
-      seen[it.slug] = true;
-      const isAnime = !!(it.isAnime || it.type === "series" || it.anilistId);
-      const title =
-        it.title || it.englishName || it.originalTitle || it.slug;
-      const image =
-        it.posterUrl ||
-        it.poster ||
-        (it.posterKey
-          ? "https://s1.cloud152.stream/" + it.posterKey
-          : "");
-      results.push({
-        title: String(title).trim(),
-        image: absUrl(image),
-        href: seriesHref(it.slug, isAnime || it.type !== "movie"),
-      });
+
+    for (let v = 0; v < Math.min(variants.length, 5); v++) {
+      try {
+        const data = await apiGet(
+          "/movies?q=" + encodeURIComponent(variants[v]) + "&limit=20"
+        );
+        let items = (data && data.data) || [];
+        if (!Array.isArray(items)) items = [];
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          if (!it || !it.slug || seen[it.slug]) continue;
+          seen[it.slug] = true;
+          const isAnime = !!(
+            it.isAnime ||
+            it.type === "series" ||
+            it.anilistId
+          );
+          const title =
+            it.title || it.englishName || it.originalTitle || it.slug;
+          const image =
+            it.posterUrl ||
+            it.poster ||
+            (it.posterKey
+              ? "https://s1.cloud152.stream/" + it.posterKey
+              : "");
+          results.push({
+            title: String(title).trim(),
+            image: absUrl(image),
+            href: seriesHref(it.slug, isAnime || it.type !== "movie"),
+            _score: scoreTitle(cleaned, title, it.slug),
+          });
+        }
+        if (results.length >= 8) break;
+      } catch (e) {}
     }
+
+    if (results.length < 5) {
+      try {
+        const ac = await apiGet(
+          "/movies/search/autocomplete?q=" +
+            encodeURIComponent(cleaned) +
+            "&limit=15"
+        );
+        const sug = (ac && ac.data && ac.data.suggestions) || [];
+        for (let i = 0; i < sug.length; i++) {
+          const it = sug[i];
+          if (!it || !it.slug || seen[it.slug]) continue;
+          seen[it.slug] = true;
+          results.push({
+            title: String(it.title || it.slug).trim(),
+            image: absUrl(it.posterUrl || ""),
+            href: seriesHref(it.slug, it.type !== "movie"),
+            _score: scoreTitle(cleaned, it.title, it.slug),
+          });
+        }
+      } catch (e) {}
+    }
+
+    if (results.length < 3) {
+      const pageHits = await searchFromAnimePages(cleaned);
+      for (let i = 0; i < pageHits.length; i++) {
+        const it = pageHits[i];
+        const slug = parseHref(it.href).slug;
+        if (!slug || seen[slug]) continue;
+        seen[slug] = true;
+        results.push(it);
+      }
+    }
+
+    results.sort(function (a, b) {
+      return (b._score || 0) - (a._score || 0);
+    });
+    for (let i = 0; i < results.length; i++) delete results[i]._score;
+
     return JSON.stringify(results.slice(0, 30));
   } catch (e) {
     return JSON.stringify([]);
@@ -194,8 +338,7 @@ async function extractDetails(url) {
     const description = String(
       d.description || d.descriptionEn || "N/A"
     ).slice(0, 900);
-    const aliases =
-      d.englishName || d.originalTitle || d.title || "N/A";
+    const aliases = d.englishName || d.originalTitle || d.title || "N/A";
     const airdate = String(d.releaseYear || d.releaseDate || "N/A");
     return JSON.stringify([
       {
@@ -242,7 +385,6 @@ async function extractEpisodes(url) {
       });
     }
 
-    // Movies with no episode list
     if (!eps.length) {
       eps.push({
         href: watchHref(p.slug, 1, isAnime),
@@ -251,17 +393,6 @@ async function extractEpisodes(url) {
         episode: 1,
         title: d.type === "movie" ? "Full Movie" : "Tập 1",
       });
-    }
-
-    // Sora season detection: reset numbers per season when multi-season
-    const seasons = {};
-    for (let i = 0; i < eps.length; i++) {
-      seasons[eps[i].season] = true;
-    }
-    const multi = Object.keys(seasons).length > 1;
-    if (multi) {
-      // keep episode number as episode within season (resets each season)
-      // already using episodeNumber from API
     }
 
     eps.sort(function (a, b) {
@@ -313,16 +444,15 @@ async function extractStreamUrl(url) {
       const s = sources[i];
       let media = forceHttps(s.url || s.signedUrl || "");
       if (!isHttp(media) || seen[media]) continue;
-      // prefer real media
       if (
         media.indexOf("m3u8") < 0 &&
         !/\.mp4(\?|$)/i.test(media) &&
         s.type !== "hls" &&
         s.type !== "m3u8_proxy" &&
-        s.type !== "mp4"
+        s.type !== "mp4" &&
+        media.indexOf("cloud152.stream") < 0
       ) {
-        // still allow cloud152 proxy links
-        if (media.indexOf("cloud152.stream") < 0) continue;
+        continue;
       }
       seen[media] = true;
       const name = s.serverName || "Server " + (i + 1);
@@ -334,7 +464,6 @@ async function extractStreamUrl(url) {
       });
     }
 
-    // Softsubs
     let subtitles = "";
     const subs = ep.subtitles || [];
     const subOut = [];
@@ -348,14 +477,12 @@ async function extractStreamUrl(url) {
         headers: headers,
       });
     }
-    // Prefer Vietnamese first
     subOut.sort(function (a, b) {
       const av = /vi/i.test(a.language) ? 0 : 1;
       const bv = /vi/i.test(b.language) ? 0 : 1;
       return av - bv;
     });
     if (subOut.length) {
-      // Sora/Luna often take a single URL or JSON string
       try {
         subtitles = JSON.stringify(subOut);
       } catch (e) {
