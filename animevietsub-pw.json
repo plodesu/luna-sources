@@ -1,0 +1,21 @@
+{
+  "sourceName": "AnimeVietSub.pw",
+  "iconUrl": "https://animevietsub.pw/favicon.ico",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
+  "language": "Vietnamese",
+  "languageType": ["Subbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://animevietsub.pw",
+  "searchBaseUrl": "https://animevietsub.pw",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/animevietsub-pw.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": false,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
