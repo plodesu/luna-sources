@@ -1,0 +1,21 @@
+{
+  "sourceName": "HDAnimey",
+  "iconUrl": "https://hdanimey.com/wp-content/uploads/2025/03/cropped-homebutton-192x192.webp",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
+  "language": "Hindi",
+  "languageType": ["Subbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://hdanimey.com",
+  "searchBaseUrl": "https://hdanimey.com",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/hdanimey.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": false,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
