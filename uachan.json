@@ -1,0 +1,21 @@
+{
+  "sourceName": "UAchan",
+  "iconUrl": "https://uachan.top/apple-touch-icon.png",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
+  "language": "Ukrainian",
+  "languageType": ["Subbed", "Dubbed"],
+  "streamType": "HLS",
+  "quality": "1080p",
+  "baseUrl": "https://uachan.top",
+  "searchBaseUrl": "https://uachan.top",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/uachan.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": false,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
