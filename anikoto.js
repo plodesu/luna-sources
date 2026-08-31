@@ -1,6 +1,10 @@
 /**
  * Anikoto (anikototv.to) – Sora / Luna
- * Softsub: MegaPlay VTT → data URI (Sora) + OpenSubtitles (Luna, header-free)
+ * Search: /filter?keyword=
+ * Episodes: /ajax/episode/list/{showId}
+ * Servers: /ajax/server/list?servers={data-ids}
+ * Source: /ajax/server?get={link-id} → megaplay → /stream/getSources?id=
+ * Softsub: MegaPlay VTT → data URI (Sora) + OpenSubtitles v3 (Luna, header-free)
  * v1.0.3
  */
 const baseUrl = "https://anikototv.to";
@@ -115,13 +119,58 @@ function subHeaders() {
 function rankSubLabel(label) {
   const l = String(label || "").toLowerCase();
   if (l.indexOf("english") >= 0 || l === "en" || l === "eng") return 0;
-  if (l.indexOf("spanish") >= 0) return 1;
-  if (l.indexOf("portuguese") >= 0) return 2;
-  if (l.indexOf("indonesian") >= 0) return 3;
-  if (l.indexOf("thai") >= 0) return 4;
-  if (l.indexOf("french") >= 0) return 5;
-  if (l.indexOf("german") >= 0) return 6;
+  if (l.indexOf("spanish") >= 0 || l === "es" || l === "spa") return 1;
+  if (l.indexOf("portuguese") >= 0 || l === "pt" || l === "por") return 2;
+  if (l.indexOf("indonesian") >= 0 || l === "id" || l === "ind") return 3;
+  if (l.indexOf("thai") >= 0 || l === "th") return 4;
+  if (l.indexOf("french") >= 0 || l === "fr" || l === "fra") return 5;
+  if (l.indexOf("german") >= 0 || l === "de" || l === "deu") return 6;
   return 10;
+}
+
+const LANG_NAMES = {
+  en: "English",
+  eng: "English",
+  es: "Spanish",
+  spa: "Spanish",
+  pt: "Portuguese",
+  por: "Portuguese",
+  pob: "Portuguese (BR)",
+  fr: "French",
+  fra: "French",
+  fre: "French",
+  de: "German",
+  deu: "German",
+  ger: "German",
+  id: "Indonesian",
+  ind: "Indonesian",
+  th: "Thai",
+  tha: "Thai",
+  it: "Italian",
+  ita: "Italian",
+  pl: "Polish",
+  pol: "Polish",
+  ru: "Russian",
+  rus: "Russian",
+  zh: "Chinese",
+  zho: "Chinese",
+  chi: "Chinese",
+  ja: "Japanese",
+  jpn: "Japanese",
+  ko: "Korean",
+  kor: "Korean",
+  ar: "Arabic",
+  ara: "Arabic",
+  vi: "Vietnamese",
+  vie: "Vietnamese",
+  tr: "Turkish",
+  tur: "Turkish",
+  uk: "Ukrainian",
+  ukr: "Ukrainian",
+};
+
+function langLabel(code) {
+  return LANG_NAMES[String(code || "").toLowerCase()] || String(code || "Sub");
 }
 
 function toDataUri(text, mime) {
@@ -191,7 +240,7 @@ async function enrichTracks(tracks) {
   return out;
 }
 
-/* ---------- OpenSubtitles (header-free → works on Luna) ---------- */
+/* ---------- OpenSubtitles (header-free → Luna) ---------- */
 function normTitle(s) {
   return String(s || "")
     .toLowerCase()
@@ -202,7 +251,10 @@ function normTitle(s) {
 
 async function resolveImdb(title) {
   try {
-    const q = cleanQuery(title).replace(/\s+season\s+\d+/gi, "").trim();
+    const q = cleanQuery(title)
+      .replace(/\s+season\s+\d+/gi, "")
+      .replace(/\s+sub\/dub.*$/i, "")
+      .trim();
     if (!q) return "";
     const url =
       CINEMETA +
@@ -234,7 +286,6 @@ async function fetchOpenSubs(imdbId, season, episode) {
   try {
     const s = parseInt(season, 10) || 1;
     const e = parseInt(episode, 10) || 1;
-    // series path MUST use colon form (SUBTITLES.md)
     const path =
       OS_V3 +
       "/subtitles/series/" +
@@ -249,19 +300,15 @@ async function fetchOpenSubs(imdbId, season, episode) {
       const lang = String(sub.lang || sub.language || "en").toLowerCase();
       if (seen[lang]) continue;
       seen[lang] = true;
-      let label = lang;
-      if (lang === "en" || lang === "eng") label = "English (OS)";
-      else if (lang === "es" || lang === "spa") label = "Spanish (OS)";
-      else if (lang === "pt" || lang === "pob") label = "Portuguese (OS)";
-      else label = lang.toUpperCase() + " (OS)";
+      const base = langLabel(lang);
       out.push({
         url: forceHttps(sub.url),
-        label: label,
-        language: label,
+        label: base + " (OS)",
+        language: base + " (OS)",
         headers: {},
         source: "os",
       });
-      if (out.length >= 8) break;
+      if (out.length >= 10) break;
     }
     out.sort(function (a, b) {
       return rankSubLabel(a.label) - rankSubLabel(b.label);
@@ -279,8 +326,9 @@ async function extractShowTitle(pageHtml) {
     .replace(/<[^>]+>/g, "")
     .replace(/\s*Episode\s*\d+.*$/i, "")
     .replace(/\s*-\s*Anikoto.*$/i, "")
-    .replace(/Watch\s+/i, "")
+    .replace(/^Watch\s+/i, "")
     .replace(/\s+Anime\s+English.*$/i, "")
+    .replace(/\s+English\s+SUB\/DUB.*$/i, "")
     .trim();
 }
 
@@ -563,7 +611,6 @@ async function extractStreamUrl(url) {
     if (!tokens.ids)
       return JSON.stringify({ streams: [], subtitles: "", stream: "" });
 
-    // Title + season/ep for OpenSubtitles (Luna)
     let pageHtml = "";
     try {
       const w = parseWatch(url);
@@ -619,17 +666,16 @@ async function extractStreamUrl(url) {
       if (/megaplay/i.test(embed)) {
         const resolved = await resolveMegaplay(embed);
         if (resolved.stream && isHttp(resolved.stream)) {
-          const mediaHeaders = {
-            "User-Agent": UA,
-            Referer: "https://megaplay.buzz/",
-            Origin: "https://megaplay.buzz",
-            Accept: "*/*",
-          };
           streams.push({
             title: (srv.name || "Vidstream") + " · HLS",
             name: srv.name || "Vidstream",
             streamUrl: resolved.stream,
-            headers: mediaHeaders,
+            headers: {
+              "User-Agent": UA,
+              Referer: "https://megaplay.buzz/",
+              Origin: "https://megaplay.buzz",
+              Accept: "*/*",
+            },
           });
           if (resolved.tracks && resolved.tracks.length && !siteTracks.length) {
             siteTracks = resolved.tracks;
@@ -650,7 +696,6 @@ async function extractStreamUrl(url) {
       }
     }
 
-    // OpenSubtitles for Luna (no Referer needed)
     let osTracks = [];
     try {
       if (showTitle) {
@@ -661,9 +706,7 @@ async function extractStreamUrl(url) {
       }
     } catch (e) {}
 
-    // Prefer: site data-URI first (Sora), then OS (Luna)
-    const allTracks = siteTracks.concat(osTracks);
-    // Default for Luna: prefer first OS English if present, else site data URI
+    // Luna default = header-free OS English; Sora also gets site data-URIs
     let defaultSub = "";
     for (let i = 0; i < osTracks.length; i++) {
       if (/english/i.test(osTracks[i].label)) {
@@ -671,9 +714,10 @@ async function extractStreamUrl(url) {
         break;
       }
     }
-    if (!defaultSub && siteTracks.length) defaultSub = siteTracks[0].url;
     if (!defaultSub && osTracks.length) defaultSub = osTracks[0].url;
+    if (!defaultSub && siteTracks.length) defaultSub = siteTracks[0].url;
 
+    const allTracks = osTracks.concat(siteTracks);
     const allSubtitles = [];
     const pairList = [];
     for (let i = 0; i < allTracks.length; i++) {
@@ -700,10 +744,8 @@ async function extractStreamUrl(url) {
     return JSON.stringify({
       stream: primary,
       streams: streams.slice(0, 8),
-      // string default (guide + Luna)
       subtitles: defaultSub || "",
       subtitle: defaultSub || "",
-      // multi-lang for pickers (Sora / some Luna builds)
       subtitlesList: pairList,
       allSubtitles: allSubtitles,
       softsubs: allSubtitles,
