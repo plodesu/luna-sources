@@ -4,8 +4,8 @@
  * Episodes: /ajax/episode/list/{showId}
  * Servers: /ajax/server/list?servers={data-ids}
  * Source: /ajax/server?get={link-id} → megaplay → /stream/getSources?id=
- * Softsub: multi-lang VTT + headers (EN first)
- * v1.0.1
+ * Softsub: fetch VTT → data:text/vtt;base64 (EN first)
+ * v1.0.2
  */
 const baseUrl = "https://anikototv.to";
 const UA =
@@ -117,9 +117,77 @@ function rankSubLabel(label) {
   if (l.indexOf("english") >= 0 || l === "en" || l === "eng") return 0;
   if (l.indexOf("spanish") >= 0) return 1;
   if (l.indexOf("portuguese") >= 0) return 2;
-  if (l.indexOf("french") >= 0) return 3;
-  if (l.indexOf("german") >= 0) return 4;
+  if (l.indexOf("indonesian") >= 0) return 3;
+  if (l.indexOf("thai") >= 0) return 4;
+  if (l.indexOf("french") >= 0) return 5;
+  if (l.indexOf("german") >= 0) return 6;
   return 10;
+}
+
+function toDataUri(text, mime) {
+  try {
+    const s = String(text || "");
+    const chars =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const bytes = [];
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c < 128) bytes.push(c);
+      else if (c < 2048) bytes.push(192 | (c >> 6), 128 | (c & 63));
+      else
+        bytes.push(
+          224 | (c >> 12),
+          128 | ((c >> 6) & 63),
+          128 | (c & 63)
+        );
+    }
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const a = bytes[i];
+      const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      out += chars[a >> 2];
+      out += chars[((a & 3) << 4) | (b >> 4)];
+      out += i + 1 < bytes.length ? chars[((b & 15) << 2) | (c >> 6)] : "=";
+      out += i + 2 < bytes.length ? chars[c & 63] : "=";
+    }
+    return "data:" + mime + ";base64," + out;
+  } catch (e) {
+    return "";
+  }
+}
+
+async function fetchVttText(vttUrl) {
+  try {
+    const text = await getText(
+      await soraFetch(vttUrl, { headers: subHeaders() })
+    );
+    if (!text || text.indexOf("WEBVTT") < 0) return "";
+    return text;
+  } catch (e) {
+    return "";
+  }
+}
+
+async function enrichTracks(tracks) {
+  const out = [];
+  const limit = Math.min(tracks.length, 6);
+  for (let i = 0; i < limit; i++) {
+    const t = tracks[i];
+    const raw = await fetchVttText(t.url);
+    let url = t.url;
+    if (raw) {
+      const data = toDataUri(raw, "text/vtt");
+      if (data) url = data;
+    }
+    out.push({
+      url: url,
+      label: t.label || "Sub",
+      language: t.label || "Sub",
+      headers: raw ? {} : subHeaders(),
+    });
+  }
+  return out;
 }
 
 /* ===================== SEARCH ===================== */
@@ -213,8 +281,7 @@ async function resolveShowId(url) {
   if (!html) return { showId: "", pageUrl: pageUrl, html: "" };
   const m =
     html.match(/id="watch-main"[^>]*data-id="(\d+)"/i) ||
-    html.match(/data-id="(\d+)"[^>]*data-url=/i) ||
-    html.match(/#watch-main[\s\S]{0,200}?data-id="(\d+)"/i);
+    html.match(/data-id="(\d+)"[^>]*data-url=/i);
   return { showId: m ? m[1] : "", pageUrl: pageUrl, html: html };
 }
 
@@ -369,9 +436,7 @@ async function resolveMegaplay(embedUrl) {
         if (!/\.vtt|\.srt/i.test(t.file)) continue;
         tracks.push({
           url: forceHttps(t.file),
-          label: t.label || t.lang || "Unknown",
-          language: t.label || "Unknown",
-          headers: subHeaders(),
+          label: t.label || "Unknown",
         });
       }
     }
@@ -379,7 +444,8 @@ async function resolveMegaplay(embedUrl) {
       return rankSubLabel(a.label) - rankSubLabel(b.label);
     });
 
-    return { stream: forceHttps(file), tracks: tracks };
+    const enriched = await enrichTracks(tracks);
+    return { stream: forceHttps(file), tracks: enriched };
   } catch (e) {
     return { stream: "", tracks: [] };
   }
@@ -433,6 +499,7 @@ async function extractStreamUrl(url) {
       const embed = forceHttps(got.result.url);
       if (!isHttp(embed)) continue;
 
+      // Prefer MegaPlay (Vidstream / HD-1 / HD-2)
       if (/megaplay/i.test(embed)) {
         const resolved = await resolveMegaplay(embed);
         if (resolved.stream && isHttp(resolved.stream)) {
@@ -452,11 +519,13 @@ async function extractStreamUrl(url) {
             streamUrl: resolved.stream,
             headers: mediaHeaders,
             subtitle: defaultSub,
-            subtitleHeaders: defaultSub ? subHeaders() : undefined,
+            subtitleHeaders: {},
           });
           if (resolved.tracks && resolved.tracks.length && !allTracks.length) {
             allTracks = resolved.tracks;
           }
+          // one good MegaPlay is enough for default playback + subs
+          if (streams.length >= 1 && allTracks.length) break;
         }
       } else if (/\.m3u8/i.test(embed)) {
         streams.push({
@@ -482,8 +551,15 @@ async function extractStreamUrl(url) {
         url: t.url,
         label: t.label || "Sub",
         language: t.label || "Sub",
-        headers: t.headers || subHeaders(),
+        headers: t.headers || {},
       });
+    }
+
+    for (let i = 0; i < streams.length; i++) {
+      if (subtitleUrl) {
+        streams[i].subtitle = subtitleUrl;
+        streams[i].subtitleHeaders = {};
+      }
     }
 
     const primary = streams.length ? streams[0].streamUrl : "";
