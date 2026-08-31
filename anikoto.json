@@ -2,7 +2,7 @@
   "sourceName": "Anikoto",
   "iconUrl": "https://anikototv.to/AnikotoTheme/assets/images/favicon.png",
   "author": { "name": "plodesu", "icon": "" },
-  "version": "1.0.1",
+  "version": "1.0.2",
   "language": "English",
   "languageType": ["Subbed", "Dubbed"],
   "streamType": "HLS",
