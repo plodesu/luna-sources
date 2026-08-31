@@ -4,7 +4,8 @@
  * Episodes: /ajax/episode/list/{showId}
  * Servers: /ajax/server/list?servers={data-ids}
  * Source: /ajax/server?get={link-id} → megaplay → /stream/getSources?id=
- * v1.0.0
+ * Softsub: multi-lang VTT + headers (EN first)
+ * v1.0.1
  */
 const baseUrl = "https://anikototv.to";
 const UA =
@@ -102,26 +103,41 @@ async function getJson(url, referer) {
   }
 }
 
+function subHeaders() {
+  return {
+    "User-Agent": UA,
+    Referer: "https://megaplay.buzz/",
+    Origin: "https://megaplay.buzz",
+    Accept: "text/vtt,text/plain,*/*",
+  };
+}
+
+function rankSubLabel(label) {
+  const l = String(label || "").toLowerCase();
+  if (l.indexOf("english") >= 0 || l === "en" || l === "eng") return 0;
+  if (l.indexOf("spanish") >= 0) return 1;
+  if (l.indexOf("portuguese") >= 0) return 2;
+  if (l.indexOf("french") >= 0) return 3;
+  if (l.indexOf("german") >= 0) return 4;
+  return 10;
+}
+
 /* ===================== SEARCH ===================== */
 async function searchResults(keyword) {
   try {
     const q = cleanQuery(keyword);
     if (!q) return JSON.stringify([]);
     const html = await getText(
-      await soraFetch(
-        baseUrl + "/filter?keyword=" + encodeURIComponent(q)
-      )
+      await soraFetch(baseUrl + "/filter?keyword=" + encodeURIComponent(q))
     );
     if (!html) return JSON.stringify([]);
     const results = [];
     const seen = {};
-    // name link + nearby poster img
     const re =
       /<a class="name d-title"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/gi;
     let m;
     while ((m = re.exec(html))) {
       let href = absUrl(m[1]).replace(/\/ep-[^/]*$/i, "");
-      // keep series-level; strip trailing ep for cleaner detail
       if (seen[href]) continue;
       seen[href] = true;
       const title = m[2].replace(/&amp;/g, "&").trim();
@@ -131,7 +147,6 @@ async function searchResults(keyword) {
       if (im) image = im[1];
       results.push({ title: title, image: image, href: href });
     }
-    // fallback poster links
     if (!results.length) {
       const re2 =
         /href="(https?:\/\/anikototv\.to\/watch\/[^"]+)"[^>]*>\s*<img[^>]+src="([^"]+)"[^>]*alt="([^"]*)"/gi;
@@ -173,7 +188,8 @@ async function extractDetails(url) {
     const dM =
       html.match(/property="og:description"\s+content="([^"]+)"/i) ||
       html.match(/class="description"[^>]*>\s*([\s\S]*?)<\/div>/i);
-    if (dM) desc = dM[1].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").trim();
+    if (dM)
+      desc = dM[1].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").trim();
     return JSON.stringify([
       {
         description: (desc || "N/A").slice(0, 900),
@@ -191,7 +207,8 @@ async function extractDetails(url) {
 async function resolveShowId(url) {
   const w = parseWatch(url);
   let pageUrl = w.watchBase;
-  if (!/\/ep-/i.test(pageUrl)) pageUrl = pageUrl.replace(/\/?$/, "") + "/ep-1";
+  if (!/\/ep-/i.test(pageUrl))
+    pageUrl = pageUrl.replace(/\/?$/, "") + "/ep-1";
   const html = await getText(await soraFetch(pageUrl));
   if (!html) return { showId: "", pageUrl: pageUrl, html: "" };
   const m =
@@ -213,32 +230,30 @@ async function extractEpisodes(url) {
     if (!data || !data.result) return JSON.stringify([]);
     const html = String(data.result);
     const eps = [];
+    const seen = {};
     const re =
       /<a[^>]*data-id="(\d+)"[^>]*data-num="([^"]+)"[^>]*data-ids="([^"]+)"[^>]*>/gi;
     let m;
-    const seen = {};
     while ((m = re.exec(html))) {
       const num = parseFloat(m[2]);
       if (!num || seen[num]) continue;
       seen[num] = true;
       const w = parseWatch(info.pageUrl);
-      const href =
-        baseUrl +
-        "/watch/" +
-        w.slug +
-        "/ep-" +
-        m[2] +
-        "#eid=" +
-        m[1] +
-        "&ids=" +
-        encodeURIComponent(m[3]);
       eps.push({
-        href: href,
+        href:
+          baseUrl +
+          "/watch/" +
+          w.slug +
+          "/ep-" +
+          m[2] +
+          "#eid=" +
+          m[1] +
+          "&ids=" +
+          encodeURIComponent(m[3]),
         number: num,
         title: "Episode " + m[2],
       });
     }
-    // alternate attr order
     if (!eps.length) {
       const re2 =
         /data-num="([^"]+)"[^>]*data-id="(\d+)"[^>]*data-ids="([^"]+)"/gi;
@@ -326,34 +341,44 @@ async function resolveMegaplay(embedUrl) {
       })
     );
     if (!html) return { stream: "", tracks: [] };
+
     const idM =
-      html.match(/data-id="(\d+)"/i) ||
-      html.match(/id="megaplay-player"[^>]*data-id="(\d+)"/i);
+      html.match(/id="megaplay-player"[^>]*data-id="(\d+)"/i) ||
+      html.match(/data-id="(\d+)"[^>]*data-realid/i) ||
+      html.match(/data-id="(\d+)"/i);
     if (!idM) return { stream: "", tracks: [] };
+
     const src = await getJson(
       "https://megaplay.buzz/stream/getSources?id=" + idM[1],
       embedUrl
     );
     if (!src) return { stream: "", tracks: [] };
+
     let file = "";
     if (src.sources) {
       if (typeof src.sources.file === "string") file = src.sources.file;
       else if (Array.isArray(src.sources) && src.sources[0])
         file = src.sources[0].file || src.sources[0].src || "";
     }
+
     const tracks = [];
     if (Array.isArray(src.tracks)) {
       for (let i = 0; i < src.tracks.length; i++) {
         const t = src.tracks[i];
-        if (t && t.file && /vtt/i.test(t.file)) {
-          tracks.push({
-            url: forceHttps(t.file),
-            language: t.label || "English",
-            label: t.label || "English",
-          });
-        }
+        if (!t || !t.file) continue;
+        if (!/\.vtt|\.srt/i.test(t.file)) continue;
+        tracks.push({
+          url: forceHttps(t.file),
+          label: t.label || t.lang || "Unknown",
+          language: t.label || "Unknown",
+          headers: subHeaders(),
+        });
       }
     }
+    tracks.sort(function (a, b) {
+      return rankSubLabel(a.label) - rankSubLabel(b.label);
+    });
+
     return { stream: forceHttps(file), tracks: tracks };
   } catch (e) {
     return { stream: "", tracks: [] };
@@ -376,17 +401,14 @@ async function extractStreamUrl(url) {
 
     const serverHtml = String(list.result);
     const servers = [];
-    const re =
-      /<li[^>]*data-link-id="([^"]+)"[^>]*>([\s\S]*?)<\/li>/gi;
+    const re = /<li[^>]*data-link-id="([^"]+)"[^>]*>([\s\S]*?)<\/li>/gi;
     let m;
     while ((m = re.exec(serverHtml))) {
       const name = m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
       servers.push({ linkId: m[1], name: name || "Server" });
     }
-    // attr order variants
     if (!servers.length) {
-      const re2 =
-        /data-link-id="([^"]+)"[^>]*>\s*([^<]+)/gi;
+      const re2 = /data-link-id="([^"]+)"[^>]*>\s*([^<]+)/gi;
       while ((m = re2.exec(serverHtml))) {
         servers.push({
           linkId: m[1],
@@ -398,8 +420,9 @@ async function extractStreamUrl(url) {
       return JSON.stringify({ streams: [], subtitles: "", stream: "" });
 
     const streams = [];
-    let subtitles = "";
+    let allTracks = [];
     const limit = Math.min(servers.length, 5);
+
     for (let i = 0; i < limit; i++) {
       const srv = servers[i];
       const got = await getJson(
@@ -413,45 +436,64 @@ async function extractStreamUrl(url) {
       if (/megaplay/i.test(embed)) {
         const resolved = await resolveMegaplay(embed);
         if (resolved.stream && isHttp(resolved.stream)) {
-          const headers = {
+          const mediaHeaders = {
             "User-Agent": UA,
             Referer: "https://megaplay.buzz/",
             Origin: "https://megaplay.buzz",
             Accept: "*/*",
           };
+          const defaultSub =
+            resolved.tracks && resolved.tracks.length
+              ? resolved.tracks[0].url
+              : "";
           streams.push({
             title: (srv.name || "Vidstream") + " · HLS",
             name: srv.name || "Vidstream",
             streamUrl: resolved.stream,
-            headers: headers,
+            headers: mediaHeaders,
+            subtitle: defaultSub,
+            subtitleHeaders: defaultSub ? subHeaders() : undefined,
           });
-          if (!subtitles && resolved.tracks && resolved.tracks.length) {
-            subtitles = resolved.tracks[0].url;
+          if (resolved.tracks && resolved.tracks.length && !allTracks.length) {
+            allTracks = resolved.tracks;
           }
         }
-      } else {
-        // unknown embed – skip or pass through if already media
-        if (/\.m3u8/i.test(embed)) {
-          streams.push({
-            title: srv.name || "Direct",
-            name: srv.name || "Direct",
-            streamUrl: embed,
-            headers: {
-              "User-Agent": UA,
-              Referer: baseUrl + "/",
-              Accept: "*/*",
-            },
-          });
-        }
+      } else if (/\.m3u8/i.test(embed)) {
+        streams.push({
+          title: srv.name || "Direct",
+          name: srv.name || "Direct",
+          streamUrl: embed,
+          headers: {
+            "User-Agent": UA,
+            Referer: baseUrl + "/",
+            Accept: "*/*",
+          },
+        });
       }
+    }
+
+    let subtitleUrl = "";
+    const allSubtitles = [];
+    for (let i = 0; i < allTracks.length; i++) {
+      const t = allTracks[i];
+      if (!t.url) continue;
+      if (!subtitleUrl) subtitleUrl = t.url;
+      allSubtitles.push({
+        url: t.url,
+        label: t.label || "Sub",
+        language: t.label || "Sub",
+        headers: t.headers || subHeaders(),
+      });
     }
 
     const primary = streams.length ? streams[0].streamUrl : "";
     return JSON.stringify({
       stream: primary,
       streams: streams.slice(0, 8),
-      subtitles: subtitles || "",
-      subtitle: subtitles || "",
+      subtitles: subtitleUrl || "",
+      subtitle: subtitleUrl || "",
+      allSubtitles: allSubtitles,
+      softsubs: allSubtitles,
     });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "", stream: "" });
