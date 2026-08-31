@@ -1,15 +1,13 @@
 /**
  * Anikoto (anikototv.to) – Sora / Luna
- * Search: /filter?keyword=
- * Episodes: /ajax/episode/list/{showId}
- * Servers: /ajax/server/list?servers={data-ids}
- * Source: /ajax/server?get={link-id} → megaplay → /stream/getSources?id=
- * Softsub: fetch VTT → data:text/vtt;base64 (EN first)
- * v1.0.2
+ * Softsub: MegaPlay VTT → data URI (Sora) + OpenSubtitles (Luna, header-free)
+ * v1.0.3
  */
 const baseUrl = "https://anikototv.to";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const OS_V3 = "https://opensubtitles-v3.strem.io";
+const CINEMETA = "https://v3-cinemeta.strem.io";
 
 async function soraFetch(url, options) {
   options = options || {};
@@ -19,6 +17,7 @@ async function soraFetch(url, options) {
       "Accept-Language": "en-US,en;q=0.9",
       Accept: "text/html,application/json,*/*",
       Referer: baseUrl + "/",
+      "Accept-Encoding": "identity",
     },
     options.headers || {}
   );
@@ -92,6 +91,7 @@ async function getJson(url, referer) {
         Accept: "application/json,*/*",
         "X-Requested-With": "XMLHttpRequest",
         Referer: referer || baseUrl + "/",
+        "Accept-Encoding": "identity",
       },
     })
   );
@@ -185,9 +185,114 @@ async function enrichTracks(tracks) {
       label: t.label || "Sub",
       language: t.label || "Sub",
       headers: raw ? {} : subHeaders(),
+      source: "site",
     });
   }
   return out;
+}
+
+/* ---------- OpenSubtitles (header-free → works on Luna) ---------- */
+function normTitle(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function resolveImdb(title) {
+  try {
+    const q = cleanQuery(title).replace(/\s+season\s+\d+/gi, "").trim();
+    if (!q) return "";
+    const url =
+      CINEMETA +
+      "/catalog/series/top/search=" +
+      encodeURIComponent(q) +
+      ".json";
+    const data = await getJson(url, "https://app.strem.io/");
+    if (!data || !Array.isArray(data.metas) || !data.metas.length) return "";
+    const nq = normTitle(q);
+    let best = data.metas[0];
+    for (let i = 0; i < data.metas.length; i++) {
+      const m = data.metas[i];
+      const nm = normTitle(m.name || "");
+      if (nm === nq || nm.indexOf(nq) >= 0 || nq.indexOf(nm) >= 0) {
+        best = m;
+        break;
+      }
+    }
+    const id = String(best.id || "");
+    return /^tt\d+/.test(id) ? id : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+async function fetchOpenSubs(imdbId, season, episode) {
+  const out = [];
+  if (!imdbId) return out;
+  try {
+    const s = parseInt(season, 10) || 1;
+    const e = parseInt(episode, 10) || 1;
+    // series path MUST use colon form (SUBTITLES.md)
+    const path =
+      OS_V3 +
+      "/subtitles/series/" +
+      encodeURIComponent(imdbId + ":" + s + ":" + e) +
+      ".json";
+    const data = await getJson(path, "https://app.strem.io/");
+    const list = (data && data.subtitles) || [];
+    const seen = {};
+    for (let i = 0; i < list.length; i++) {
+      const sub = list[i];
+      if (!sub || !sub.url) continue;
+      const lang = String(sub.lang || sub.language || "en").toLowerCase();
+      if (seen[lang]) continue;
+      seen[lang] = true;
+      let label = lang;
+      if (lang === "en" || lang === "eng") label = "English (OS)";
+      else if (lang === "es" || lang === "spa") label = "Spanish (OS)";
+      else if (lang === "pt" || lang === "pob") label = "Portuguese (OS)";
+      else label = lang.toUpperCase() + " (OS)";
+      out.push({
+        url: forceHttps(sub.url),
+        label: label,
+        language: label,
+        headers: {},
+        source: "os",
+      });
+      if (out.length >= 8) break;
+    }
+    out.sort(function (a, b) {
+      return rankSubLabel(a.label) - rankSubLabel(b.label);
+    });
+  } catch (e) {}
+  return out;
+}
+
+async function extractShowTitle(pageHtml) {
+  const tM =
+    pageHtml.match(/property="og:title"\s+content="([^"]+)"/i) ||
+    pageHtml.match(/<h1[^>]*>\s*([\s\S]*?)<\/h1>/i);
+  if (!tM) return "";
+  return tM[1]
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s*Episode\s*\d+.*$/i, "")
+    .replace(/\s*-\s*Anikoto.*$/i, "")
+    .replace(/Watch\s+/i, "")
+    .replace(/\s+Anime\s+English.*$/i, "")
+    .trim();
+}
+
+function guessSeasonEpisode(url, title) {
+  const epM = String(url).match(/\/ep-([^/?#]+)/i);
+  const ep = epM ? parseFloat(epM[1]) : 1;
+  let season = 1;
+  const sm =
+    String(title).match(/Season\s*(\d+)/i) ||
+    String(url).match(/season[-_]?(\d+)/i);
+  if (sm) season = parseInt(sm[1], 10) || 1;
+  return { season: season, episode: ep };
 }
 
 /* ===================== SEARCH ===================== */
@@ -458,6 +563,18 @@ async function extractStreamUrl(url) {
     if (!tokens.ids)
       return JSON.stringify({ streams: [], subtitles: "", stream: "" });
 
+    // Title + season/ep for OpenSubtitles (Luna)
+    let pageHtml = "";
+    try {
+      const w = parseWatch(url);
+      const pageUrl = w.ep
+        ? w.watchBase + "/ep-" + w.ep
+        : w.watchBase + "/ep-1";
+      pageHtml = await getText(await soraFetch(pageUrl));
+    } catch (e) {}
+    const showTitle = extractShowTitle(pageHtml || "");
+    const se = guessSeasonEpisode(url, showTitle);
+
     const list = await getJson(
       baseUrl + "/ajax/server/list?servers=" + encodeURIComponent(tokens.ids),
       url
@@ -486,7 +603,7 @@ async function extractStreamUrl(url) {
       return JSON.stringify({ streams: [], subtitles: "", stream: "" });
 
     const streams = [];
-    let allTracks = [];
+    let siteTracks = [];
     const limit = Math.min(servers.length, 5);
 
     for (let i = 0; i < limit; i++) {
@@ -499,7 +616,6 @@ async function extractStreamUrl(url) {
       const embed = forceHttps(got.result.url);
       if (!isHttp(embed)) continue;
 
-      // Prefer MegaPlay (Vidstream / HD-1 / HD-2)
       if (/megaplay/i.test(embed)) {
         const resolved = await resolveMegaplay(embed);
         if (resolved.stream && isHttp(resolved.stream)) {
@@ -509,23 +625,16 @@ async function extractStreamUrl(url) {
             Origin: "https://megaplay.buzz",
             Accept: "*/*",
           };
-          const defaultSub =
-            resolved.tracks && resolved.tracks.length
-              ? resolved.tracks[0].url
-              : "";
           streams.push({
             title: (srv.name || "Vidstream") + " · HLS",
             name: srv.name || "Vidstream",
             streamUrl: resolved.stream,
             headers: mediaHeaders,
-            subtitle: defaultSub,
-            subtitleHeaders: {},
           });
-          if (resolved.tracks && resolved.tracks.length && !allTracks.length) {
-            allTracks = resolved.tracks;
+          if (resolved.tracks && resolved.tracks.length && !siteTracks.length) {
+            siteTracks = resolved.tracks;
           }
-          // one good MegaPlay is enough for default playback + subs
-          if (streams.length >= 1 && allTracks.length) break;
+          if (streams.length >= 1 && siteTracks.length) break;
         }
       } else if (/\.m3u8/i.test(embed)) {
         streams.push({
@@ -541,23 +650,48 @@ async function extractStreamUrl(url) {
       }
     }
 
-    let subtitleUrl = "";
+    // OpenSubtitles for Luna (no Referer needed)
+    let osTracks = [];
+    try {
+      if (showTitle) {
+        const imdb = await resolveImdb(showTitle);
+        if (imdb) {
+          osTracks = await fetchOpenSubs(imdb, se.season, se.episode);
+        }
+      }
+    } catch (e) {}
+
+    // Prefer: site data-URI first (Sora), then OS (Luna)
+    const allTracks = siteTracks.concat(osTracks);
+    // Default for Luna: prefer first OS English if present, else site data URI
+    let defaultSub = "";
+    for (let i = 0; i < osTracks.length; i++) {
+      if (/english/i.test(osTracks[i].label)) {
+        defaultSub = osTracks[i].url;
+        break;
+      }
+    }
+    if (!defaultSub && siteTracks.length) defaultSub = siteTracks[0].url;
+    if (!defaultSub && osTracks.length) defaultSub = osTracks[0].url;
+
     const allSubtitles = [];
+    const pairList = [];
     for (let i = 0; i < allTracks.length; i++) {
       const t = allTracks[i];
       if (!t.url) continue;
-      if (!subtitleUrl) subtitleUrl = t.url;
       allSubtitles.push({
         url: t.url,
         label: t.label || "Sub",
         language: t.label || "Sub",
         headers: t.headers || {},
       });
+      pairList.push(t.label || "Sub");
+      pairList.push(t.url);
     }
 
     for (let i = 0; i < streams.length; i++) {
-      if (subtitleUrl) {
-        streams[i].subtitle = subtitleUrl;
+      if (defaultSub) {
+        streams[i].subtitle = defaultSub;
         streams[i].subtitleHeaders = {};
       }
     }
@@ -566,10 +700,15 @@ async function extractStreamUrl(url) {
     return JSON.stringify({
       stream: primary,
       streams: streams.slice(0, 8),
-      subtitles: subtitleUrl || "",
-      subtitle: subtitleUrl || "",
+      // string default (guide + Luna)
+      subtitles: defaultSub || "",
+      subtitle: defaultSub || "",
+      // multi-lang for pickers (Sora / some Luna builds)
+      subtitlesList: pairList,
       allSubtitles: allSubtitles,
       softsubs: allSubtitles,
+      subtitleHeaders: {},
+      subtitlesHeaders: {},
     });
   } catch (e) {
     return JSON.stringify({ streams: [], subtitles: "", stream: "" });
