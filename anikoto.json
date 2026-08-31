@@ -1,0 +1,21 @@
+{
+  "sourceName": "Anikoto",
+  "iconUrl": "https://anikototv.to/AnikotoTheme/assets/images/favicon.png",
+  "author": { "name": "plodesu", "icon": "" },
+  "version": "1.0.0",
+  "language": "English",
+  "languageType": ["Subbed", "Dubbed"],
+  "streamType": "HLS",
+  "quality": "HD",
+  "baseUrl": "https://anikototv.to",
+  "searchBaseUrl": "https://anikototv.to",
+  "scriptUrl": "https://raw.githubusercontent.com/plodesu/luna-sources/refs/heads/main/anikoto.js",
+  "type": "anime",
+  "asyncJS": true,
+  "softsub": true,
+  "downloadSupport": false,
+  "supportsSora": true,
+  "supportsLuna": true,
+  "supportsAnymex": true,
+  "supportsMojuru": true
+}
